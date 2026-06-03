@@ -126,10 +126,23 @@ func (r *DefaultRunner) runStateMachine(ctx context.Context, req Request, sink E
 			return nil, err
 		}
 
+		// 每轮调 LLM 前 root-level sanitize：剥离孤立 tool message（找不到对应
+		// assistant.ToolCalls 的 tool result）。这是 host-agnostic 防御 —— 即使
+		// 上游历史回放 / session 反序列化 / context 压缩 / fallback 切 provider
+		// 导致 ToolCalls 字段丢失，本层也能产出契约级合规序列发给所有 provider
+		// （Anthropic 直连尤其依赖此层，它自己 buildRequestBody 不做 sanitize）。
+		// 参考 ai-core/llm/openai 内 BUG-20260523_* 测试套件还原的具体故障模式。
+		// cron_context 守卫：cron 相关上下文（解析/创建/编辑 cron）一律禁 tools，
+		// 从协议层根除 LLM tool_call 失败导致的 tool_use_id 链路 400 bug。
+		// 上游 host（hexclaw cron handlers）在 Metadata 里打 cron_context: true 即生效。
+		effectiveTools := req.Tools
+		if isCronContext(req.Metadata) {
+			effectiveTools = nil
+		}
 		callReq := llm.CompletionRequest{
 			Model:    selection.Model,
-			Messages: state.Messages,
-			Tools:    req.Tools,
+			Messages: sanitizeToolCallSequence(state.Messages),
+			Tools:    effectiveTools,
 			Metadata: req.Metadata,
 		}
 		if err := emitter.emit(ctx, Event{
@@ -393,6 +406,28 @@ func prependSystemPrefix(messages []llm.Message, prefix string) []llm.Message {
 	return append([]llm.Message{{Role: llm.RoleSystem, Content: prefix}}, messages...)
 }
 
+// isCronContext 判断当前 LLM 调用是否处于 cron 上下文（解析/创建/编辑 cron）。
+//
+// 约定：host 在 Request.Metadata 里塞 cron_context: true（或 "true" 字符串）即视为
+// cron 上下文。本层据此强制 tools=nil，从协议层根除 tool_use_id 链路 400 bug —
+// cron 解析永远不需要 tool_call，统一走 response_format=json 或纯文字。
+func isCronContext(metadata map[string]any) bool {
+	if metadata == nil {
+		return false
+	}
+	v, ok := metadata["cron_context"]
+	if !ok {
+		return false
+	}
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return x == "true" || x == "1"
+	}
+	return false
+}
+
 func toolCallRefs(calls []llm.ToolCall) []llm.ToolCallRef {
 	refs := make([]llm.ToolCallRef, 0, len(calls))
 	for _, c := range calls {
@@ -403,4 +438,52 @@ func toolCallRefs(calls []llm.ToolCall) []llm.ToolCallRef {
 		})
 	}
 	return refs
+}
+
+// sanitizeToolCallSequence 剥离孤立 tool message —— 即 ToolCallID 找不到对应
+// 前序 assistant.ToolCalls[].ID 的 tool result。这是 runtime 层的契约级防御，
+// 对所有下游 provider 生效（OpenAI 兼容 / Anthropic 直连 / Gemini / 自研网关）。
+//
+// 触发场景（无论 host 是谁都可能踩）：
+//   - session 历史从 DB 反序列化时 ToolCalls 字段丢失，下次加载只剩 tool message
+//   - context 压缩误剥离 assistant tool_call message，留下孤立 tool
+//   - 多 provider failover 切换后老 turn 的 tool message 还在 state.Messages 里
+//   - 网关在 OpenAI ↔ Anthropic 翻译时 race 丢失 assistant tool_use
+//
+// 自愈契约：
+//   - 维护"当前可见 tool_call_id 集合"，每见到 assistant.ToolCalls 累加 ID
+//   - 每条 tool message 的 ToolCallID 必须在集合内，否则**丢弃**
+//   - assistant message 自身（含 ToolCalls）无条件保留——它是 producer
+//   - user/system message 不重置集合（同会话内 tool_use ID 跨多轮仍可被引用）
+//
+// 纯函数无副作用，不改原 slice。
+func sanitizeToolCallSequence(messages []llm.Message) []llm.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+	known := make(map[string]struct{})
+	out := make([]llm.Message, 0, len(messages))
+	for _, m := range messages {
+		if m.Role == llm.RoleAssistant && len(m.ToolCalls) > 0 {
+			for _, tc := range m.ToolCalls {
+				if tc.ID != "" {
+					known[tc.ID] = struct{}{}
+				}
+			}
+			out = append(out, m)
+			continue
+		}
+		if m.Role == llm.RoleTool {
+			if m.ToolCallID == "" {
+				continue
+			}
+			if _, ok := known[m.ToolCallID]; !ok {
+				continue
+			}
+			out = append(out, m)
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
