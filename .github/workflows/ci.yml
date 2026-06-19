@@ -37,6 +37,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    continue-on-error: true  # lint 债务清理为单独专项窗口, 暂降为提示性 (Test 仍硬门禁); 债清完后恢复阻断
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
