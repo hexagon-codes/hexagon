@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // NodeCache 节点缓存接口
@@ -266,7 +268,7 @@ func ComputeCacheKey(nodeName string, state any) string {
 	data, err := json.Marshal(state)
 	if err != nil {
 		// 无法序列化，使用固定前缀避免缓存
-		return fmt.Sprintf("uncacheable-%s-%d", nodeName, time.Now().UnixNano())
+		return fmt.Sprintf("uncacheable-%s-%s", nodeName, idgen.NanoID())
 	}
 
 	hash := sha256.Sum256(append([]byte(nodeName+":"), data...))

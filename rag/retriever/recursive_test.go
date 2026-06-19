@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/hexagon-codes/ai-core/store/vector"
 	"github.com/hexagon-codes/hexagon/rag"
-	"github.com/hexagon-codes/hexagon/store/vector"
 	"github.com/hexagon-codes/hexagon/testing/mock"
 )
 

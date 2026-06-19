@@ -30,6 +30,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // Client Langfuse 客户端
@@ -365,14 +367,14 @@ func (c *Client) Close() {
 func (c *Client) LLMHookFunc() (func(ctx context.Context, traceID, model string, input any), func(ctx context.Context, traceID string, output any, inputTokens, outputTokens int)) {
 	onStart := func(ctx context.Context, traceID, model string, input any) {
 		c.GenerationStart(
-			fmt.Sprintf("gen-%d", time.Now().UnixNano()),
+			fmt.Sprintf("gen-%s", idgen.NanoID()),
 			traceID, "", "llm-call", model, input,
 		)
 	}
 
 	onEnd := func(ctx context.Context, traceID string, output any, inputTokens, outputTokens int) {
 		c.GenerationEnd(
-			fmt.Sprintf("gen-%d", time.Now().UnixNano()),
+			fmt.Sprintf("gen-%s", idgen.NanoID()),
 			traceID, output,
 			&UsageBody{
 				Input:  inputTokens,

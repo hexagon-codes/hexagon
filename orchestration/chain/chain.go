@@ -18,8 +18,8 @@ import (
 	"context"
 	"fmt"
 
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/hexagon/core"
-	"github.com/hexagon-codes/hexagon/stream"
 )
 
 // Chain 链式组件

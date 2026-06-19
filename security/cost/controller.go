@@ -9,10 +9,13 @@ package cost
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"sync"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/llm"
+	hruntime "github.com/hexagon-codes/hexagon/runtime"
 	"github.com/hexagon-codes/toolkit/util/rate"
 )
 
@@ -78,7 +81,9 @@ type ControllerOption func(*Controller)
 // NewController 创建成本控制器
 func NewController(opts ...ControllerOption) *Controller {
 	c := &Controller{
-		pricing:             DefaultPricing,
+		// 克隆默认定价表，避免 WithPricing 的写入污染包级 DefaultPricing
+		// （否则任一 controller 改价会泄漏到全局、串扰其他 controller）。
+		pricing:             maps.Clone(DefaultPricing),
 		requestsPerMinute:   60,
 		maxTokensPerRequest: 8000,
 		maxTokensPerSession: 100000,
@@ -289,6 +294,48 @@ func (c *Controller) EstimateCost(model string, promptTokens, completionTokens i
 
 	return (float64(promptTokens) / 1000 * pricing.PromptPrice) +
 		(float64(completionTokens) / 1000 * pricing.CompletionPrice)
+}
+
+// BudgetCostFunc 返回以 runtime.State 为输入的累计成本估算函数，可直接作为
+// runtime/middleware.Budget 的 Cost 依赖注入。
+//
+// 这是"meter→cost→budget 单向数据流"的规范桥接（路线图 §12 risk7 收尾）：
+// State.Usage（计量数据）→ 本控制器 EstimateCost（成本估算所有权在此，不在别处重复）
+// → Budget（唯一 fail-closed 强制点）。返回裸 func 签名（而非具名 CostFunc 类型），
+// 使 runtime/middleware 无需反向依赖 security/cost——依赖方向保持单向（cost→runtime）。
+//
+// 用法：
+//
+//	budget := middleware.Budget{Limits: ..., Cost: costController.BudgetCostFunc()}
+func (c *Controller) BudgetCostFunc() func(*hruntime.State) float64 {
+	return func(s *hruntime.State) float64 {
+		if s == nil {
+			return 0
+		}
+		model, _ := s.Attributes["model"].(string)
+		return c.EstimateCost(model, s.Usage.PromptTokens, s.Usage.CompletionTokens)
+	}
+}
+
+// RecordUsageFunc 返回把单次 LLM 调用用量记入本控制器**累计账**（used/usedTokens/remaining）
+// 的桥接函数，可直接作为 runtime/middleware.CostControl 的 Record 注入。
+//
+// 与 BudgetCostFunc 的区别决定了二者的语义分工：
+//   - BudgetCostFunc 只**读** State.Usage（单 run）供 middleware.Budget 的 per-run 检查；
+//   - 本函数**写**控制器的跨 run 累计账，且复用 RecordUsage 的"先检查后扣费"原子语义——
+//     累计成本突破预算时返回错误且不记账。因控制器在 agent 的多次 run 间共享，故经
+//     middleware.CostControl 即可对多 run agent（PlanExecute/Reflection）实现"全程累计预算"。
+//
+// 返回裸 func 签名（而非具名类型），使 runtime/middleware 无需反向依赖 security/cost，
+// 依赖方向保持单向（cost→runtime）。
+func (c *Controller) RecordUsageFunc() func(model string, usage llm.Usage) error {
+	return func(model string, u llm.Usage) error {
+		return c.RecordUsage(model, TokenUsage{
+			PromptTokens:     u.PromptTokens,
+			CompletionTokens: u.CompletionTokens,
+			TotalTokens:      u.TotalTokens,
+		})
+	}
 }
 
 // RemainingBudget 返回剩余预算

@@ -6,8 +6,8 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/hexagon-codes/ai-core/store/vector"
 	"github.com/hexagon-codes/hexagon/rag"
-	"github.com/hexagon-codes/hexagon/store/vector"
 )
 
 // NodeType 索引节点类型

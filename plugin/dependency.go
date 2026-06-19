@@ -67,6 +67,19 @@ func ParseVersionConstraint(constraint string) (*VersionConstraint, error) {
 	}, nil
 }
 
+// parseDependencySpec 解析依赖声明，支持两种形式：
+//   - "name"            —— 仅依赖名，不约束版本（任意版本满足）
+//   - "name@constraint" —— 依赖名 + 版本约束，如 "logger@>=1.2.0"、"db@^1.0.0"
+//
+// 返回依赖名与版本约束字符串（无约束时 constraint 为空）。约束语法见 ParseVersionConstraint。
+func parseDependencySpec(spec string) (name, constraint string) {
+	spec = strings.TrimSpace(spec)
+	if n, c, found := strings.Cut(spec, "@"); found {
+		return strings.TrimSpace(n), strings.TrimSpace(c)
+	}
+	return spec, ""
+}
+
 // CheckVersion 检查版本是否满足约束
 func (c *VersionConstraint) CheckVersion(version string) bool {
 	switch c.Operator {
@@ -245,8 +258,9 @@ func (r *DependencyResolver) Resolve(plugins []PluginInfo) ([]string, error) {
 	for _, plugin := range plugins {
 		deps := make([]Dependency, len(plugin.Dependencies))
 		for i, dep := range plugin.Dependencies {
+			depName, _ := parseDependencySpec(dep)
 			deps[i] = Dependency{
-				Name:     dep,
+				Name:     depName,
 				Optional: false,
 			}
 		}
@@ -263,25 +277,41 @@ func (r *DependencyResolver) Resolve(plugins []PluginInfo) ([]string, error) {
 	return graph.TopologicalSort()
 }
 
-// CheckDependencies 检查依赖是否满足
+// CheckDependencies 检查依赖是否满足（存在性 + 版本约束）。
+//
+// 依赖声明支持 "name" 或 "name@constraint"（见 parseDependencySpec）。指定了约束时，
+// 用 ParseVersionConstraint 解析并校验已注册依赖的实际版本（VersionConstraint.CheckVersion）；
+// 未指定约束时仅检查依赖存在（任意版本满足，保持向后兼容）。
 func (r *DependencyResolver) CheckDependencies(plugin PluginInfo) error {
-	for _, depName := range plugin.Dependencies {
+	for _, depSpec := range plugin.Dependencies {
+		depName, constraint := parseDependencySpec(depSpec)
+
 		// 检查依赖是否存在
 		dep, err := r.registry.Get(depName)
 		if err != nil {
 			return fmt.Errorf("dependency %s not found for plugin %s", depName, plugin.Name)
 		}
 
-		// 获取依赖信息
-		depInfo := dep.Info()
-
-		// 检查版本约束（如果指定）
-		if depInfo.Version == "" {
-			continue // 无版本要求
+		// 无版本约束 → 任意版本满足
+		if constraint == "" {
+			continue
 		}
 
-		// TODO: 解析和检查版本约束
-		_ = depInfo
+		depInfo := dep.Info()
+		if depInfo.Version == "" {
+			return fmt.Errorf("plugin %s requires dependency %s %s, but %s declares no version",
+				plugin.Name, depName, constraint, depName)
+		}
+
+		vc, err := ParseVersionConstraint(constraint)
+		if err != nil {
+			return fmt.Errorf("plugin %s: invalid version constraint %q for dependency %s: %w",
+				plugin.Name, constraint, depName, err)
+		}
+		if !vc.CheckVersion(depInfo.Version) {
+			return fmt.Errorf("plugin %s requires dependency %s %s, but found version %s",
+				plugin.Name, depName, constraint, depInfo.Version)
+		}
 	}
 
 	return nil
@@ -392,7 +422,8 @@ func (r *DependencyResolver) ValidateDependencies(plugins []PluginInfo) error {
 	}
 
 	for _, plugin := range plugins {
-		for _, depName := range plugin.Dependencies {
+		for _, depSpec := range plugin.Dependencies {
+			depName, _ := parseDependencySpec(depSpec)
 			// 检查依赖是否存在
 			if _, exists := pluginMap[depName]; !exists {
 				return fmt.Errorf("plugin %s depends on %s which is not available", plugin.Name, depName)
@@ -456,7 +487,8 @@ func (r *DependencyResolver) BuildDependencyTree(pluginName string) (*Dependency
 	}
 
 	// 递归构建子树
-	for _, depName := range pluginInfo.Dependencies {
+	for _, depSpec := range pluginInfo.Dependencies {
+		depName, _ := parseDependencySpec(depSpec)
 		depTree, err := r.BuildDependencyTree(depName)
 		if err != nil {
 			continue // 忽略错误，继续构建其他依赖

@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // ============== 时间旅行核心 ==============
@@ -372,7 +374,7 @@ func (d *TimeTravelDebugger) Replay(ctx context.Context) (map[string]any, error)
 	}
 
 	snapshot := d.history[d.currentIndex]
-	branchID := fmt.Sprintf("branch_%d_%d", d.currentIndex, time.Now().UnixNano())
+	branchID := fmt.Sprintf("branch_%d_%s", d.currentIndex, idgen.NanoID())
 	state := d.cloneState(snapshot.State)
 	startNode := snapshot.NodeID
 	d.mu.RUnlock()

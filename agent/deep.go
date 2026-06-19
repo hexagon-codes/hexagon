@@ -3,7 +3,7 @@
 // DeepAgent 支持递归子任务分解：当遇到复杂任务时，通过内置的
 // "create_subtask" 工具自动创建子 Agent 处理子任务，将结果汇总返回。
 //
-// 借鉴 Google ADK 的 DeepAgent 概念，实现递归分解和层级执行。
+// 实现递归子任务分解与层级执行。
 //
 // 使用示例：
 //
@@ -28,10 +28,10 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/memory"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/ai-core/tool"
 	"github.com/hexagon-codes/hexagon/core"
 	"github.com/hexagon-codes/hexagon/internal/util"
-	"github.com/hexagon-codes/hexagon/stream"
 )
 
 // DeepAgent 深度 Agent

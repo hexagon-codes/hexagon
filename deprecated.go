@@ -6,9 +6,11 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/llm/openai"
 	"github.com/hexagon-codes/ai-core/memory"
+	"github.com/hexagon-codes/ai-core/store/vector"
+	"github.com/hexagon-codes/ai-core/store/vector/qdrant"
 	"github.com/hexagon-codes/hexagon/agent"
+	"github.com/hexagon-codes/hexagon/agent/skill"
 	"github.com/hexagon-codes/hexagon/llm/conversation"
-	"github.com/hexagon-codes/hexagon/llm/router"
 	"github.com/hexagon-codes/hexagon/mcp"
 	memstore "github.com/hexagon-codes/hexagon/memory/store"
 	"github.com/hexagon-codes/hexagon/observe/eventstream"
@@ -25,9 +27,6 @@ import (
 	"github.com/hexagon-codes/hexagon/rag/splitter"
 	"github.com/hexagon-codes/hexagon/security/cost"
 	"github.com/hexagon-codes/hexagon/security/guard"
-	"github.com/hexagon-codes/hexagon/skill"
-	"github.com/hexagon-codes/hexagon/store/vector"
-	"github.com/hexagon-codes/hexagon/store/vector/qdrant"
 )
 
 // ============== 重新导出子包便捷函数 ==============
@@ -105,7 +104,7 @@ const (
 //	)
 var NewTeam = agent.NewTeam
 
-// TransferTo 创建 Agent 交接工具（借鉴 OpenAI Swarm）
+// TransferTo 创建 Agent 交接工具
 //
 // 示例：
 //
@@ -710,44 +709,6 @@ type (
 	RAGEngine = rag.Engine
 )
 
-// ============== LLM 路由器 ==============
-
-// NewLLMRouter 创建 LLM 智能路由器
-//
-// 支持多种路由策略：优先级、成本、轮询、降级、复杂度。
-//
-// 示例：
-//
-//	r := hexagon.NewLLMRouter(configs, hexagon.LLMRouterStrategyCost)
-var NewLLMRouter = router.New
-
-// LLM 路由策略
-const (
-	LLMRouterStrategyPriority   = router.StrategyPriority
-	LLMRouterStrategyCost       = router.StrategyCost
-	LLMRouterStrategyRoundRobin = router.StrategyRoundRobin
-	LLMRouterStrategyFallback   = router.StrategyFallback
-	LLMRouterStrategyComplexity = router.StrategyComplexity
-)
-
-// LLM 路由相关类型
-type (
-	// LLMRouter 是 LLM 路由器
-	LLMRouter = router.Router
-
-	// LLMRouterConfig 是路由器 Provider 配置
-	LLMRouterConfig = router.ProviderConfig
-
-	// LLMRouterStrategy 是路由策略
-	LLMRouterStrategy = router.Strategy
-)
-
-// LLM 路由选项
-var (
-	LLMRouterWithStrategy = router.WithStrategy
-	LLMRouterWithFallback = router.WithFallback
-)
-
 // ============== 对话管理器 ==============
 
 // NewConversationManager 创建多轮对话管理器
@@ -789,23 +750,6 @@ type ConversationAgent = agent.ConversationAgent
 var (
 	ConvAgentMaxTurns  = agent.WithConvMaxTurns
 	ConvAgentMaxTokens = agent.WithConvMaxTokens
-)
-
-// ============== Agent 持久化 ==============
-
-// NewMemoryCheckpointStore 创建内存检查点存储
-var NewMemoryCheckpointStore = agent.NewMemoryCheckpointStore
-
-// NewFileCheckpointStore 创建文件检查点存储
-var NewFileCheckpointStore = agent.NewFileCheckpointStore
-
-// Agent 持久化相关类型
-type (
-	// Checkpoint 是 Agent 检查点
-	Checkpoint = agent.Checkpoint
-
-	// CheckpointStore 是检查点存储接口
-	CheckpointStore = agent.CheckpointStore
 )
 
 // ============== Skill 系统 ==============

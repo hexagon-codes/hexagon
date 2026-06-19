@@ -193,12 +193,16 @@ func (s *IncrementalSynthesizer) SynthesizeStream(ctx context.Context, query str
 					return
 				}
 
-				allDocs = append(allDocs, doc)
-				batch = append(batch, doc)
-
-				if len(allDocs) > s.maxDocs {
+				// 越界时停止收集：已收集文档达到 maxDocs 上限后，
+				// 不再把新文档追加进 allDocs/batch。否则新文档会泄漏进
+				// allDocs（导致最终 SourceDocs 计数虚高）并在 batch 中残留，
+				// 却既不触发增量合成、也不会反映到最终输出，造成信息丢失。
+				if len(allDocs) >= s.maxDocs {
 					continue
 				}
+
+				allDocs = append(allDocs, doc)
+				batch = append(batch, doc)
 
 				// 批次满，执行增量合成
 				if len(batch) >= s.batchSize {

@@ -398,8 +398,15 @@ func (s *MemoryGraphStore) SearchEntities(ctx context.Context, query EntityQuery
 	}
 
 	// 分页
-	if query.Offset > 0 && query.Offset < len(results) {
-		results = results[query.Offset:]
+	// Offset 越界 (>= 结果数) 时应返回空集而非全量数据:
+	// 原条件 `Offset > 0 && Offset < len` 在 Offset 越界时不成立, 切片被跳过,
+	// 错误地返回了全部结果, 违反分页语义。
+	if query.Offset > 0 {
+		if query.Offset >= len(results) {
+			results = nil
+		} else {
+			results = results[query.Offset:]
+		}
 	}
 	if query.Limit > 0 && query.Limit < len(results) {
 		results = results[:query.Limit]
@@ -417,9 +424,23 @@ func (s *MemoryGraphStore) UpdateEntity(ctx context.Context, entity *Entity) err
 		return fmt.Errorf("entity not found: %s", entity.ID)
 	}
 
+	// 实体改名时清理旧名索引, 否则 entityNames[旧名] 仍指向该实体,
+	// GetEntityByName(旧名) 会查到脏数据。
+	//
+	// 注意: 不能依赖 s.entities[entity.ID].Name 推断旧名 —— AddEntity 直接保存了
+	// 调用方传入的指针, 若调用方在 UpdateEntity 前就地修改了同一对象的 Name,
+	// 则旧实体的 Name 已等于新名, 无法判断改名。这里以 entityNames 反向索引为准:
+	// 删除所有指向本实体 ID 但 key 不等于新名的脏条目, 再写入新名索引。
+	newName := strings.ToLower(entity.Name)
+	for name, id := range s.entityNames {
+		if id == entity.ID && name != newName {
+			delete(s.entityNames, name)
+		}
+	}
+
 	entity.UpdatedAt = time.Now()
 	s.entities[entity.ID] = entity
-	s.entityNames[strings.ToLower(entity.Name)] = entity.ID
+	s.entityNames[newName] = entity.ID
 
 	return nil
 }
@@ -434,11 +455,21 @@ func (s *MemoryGraphStore) DeleteEntity(ctx context.Context, id string) error {
 		return fmt.Errorf("entity not found: %s", id)
 	}
 
-	// 删除相关关系
+	// 删除相关关系, 并清理另一端实体上残留的边引用,
+	// 否则邻居实体的 in/outEdges 会残留已删关系的 relID (悬空边引用),
+	// 导致 GetNeighbors / GetSubgraph 遍历时持续累积无效 relID。
 	for _, relID := range s.outEdges[id] {
+		// 出边: 另一端是关系的 TargetID, 其 inEdges 持有该 relID。
+		if rel, ok := s.relations[relID]; ok && rel.TargetID != id {
+			s.inEdges[rel.TargetID] = removeFromSlice(s.inEdges[rel.TargetID], relID)
+		}
 		delete(s.relations, relID)
 	}
 	for _, relID := range s.inEdges[id] {
+		// 入边: 另一端是关系的 SourceID, 其 outEdges 持有该 relID。
+		if rel, ok := s.relations[relID]; ok && rel.SourceID != id {
+			s.outEdges[rel.SourceID] = removeFromSlice(s.outEdges[rel.SourceID], relID)
+		}
 		delete(s.relations, relID)
 	}
 
@@ -473,9 +504,16 @@ func (s *MemoryGraphStore) AddRelation(ctx context.Context, relation *Relation) 
 		relation.Weight = 1.0
 	}
 
+	// 重复添加同 ID 关系时, relations 表会被覆盖 (仍为 1 条), 但若无条件 append,
+	// outEdges/inEdges 会膨胀为多条相同 relID → 边列表与关系表不一致;
+	// 且 DeleteRelation 用 removeFromSlice 只删首个匹配, 会残留悬空 relID。
+	// 因此对已存在的关系 ID 仅更新关系本体, 不再追加边引用。
+	_, exists := s.relations[relation.ID]
 	s.relations[relation.ID] = relation
-	s.outEdges[relation.SourceID] = append(s.outEdges[relation.SourceID], relation.ID)
-	s.inEdges[relation.TargetID] = append(s.inEdges[relation.TargetID], relation.ID)
+	if !exists {
+		s.outEdges[relation.SourceID] = append(s.outEdges[relation.SourceID], relation.ID)
+		s.inEdges[relation.TargetID] = append(s.inEdges[relation.TargetID], relation.ID)
+	}
 
 	return nil
 }
@@ -1103,9 +1141,13 @@ func NewGraphRetriever(store GraphStore, opts ...GraphRetrieverOption) *GraphRet
 
 // Retrieve 基于查询检索相关实体和上下文
 func (r *GraphRetriever) Retrieve(ctx context.Context, query string) (*GraphContext, error) {
-	// 1. 在图中搜索匹配的实体
+	// 1. 在图中搜索匹配的实体。
+	//    用户查询是任意文本, 直接拼进 NamePattern 会被 SearchEntities 当作正则编译,
+	//    若含 '(' / '[' 等正则元字符 (如 "C++"、"foo(bar") 会导致 regexp.Compile 失败报错。
+	//    这里对用户输入做 regexp.QuoteMeta 转义, 使其作为字面量参与子串匹配,
+	//    外层的 '*' 通配符仍由 SearchEntities 解释为 ".*"。
 	entities, err := r.store.SearchEntities(ctx, EntityQuery{
-		NamePattern: "*" + query + "*",
+		NamePattern: "*" + regexp.QuoteMeta(query) + "*",
 		Limit:       r.maxResults,
 	})
 	if err != nil {

@@ -481,17 +481,20 @@ func TestTextHash(t *testing.T) {
 		name      string
 		text      string
 		algorithm string
+		want      string // 期望哈希值，用于钉死与标准库等价（复用 toolkit/util/hash 后行为不变）
 		wantErr   bool
 	}{
 		{
 			name:      "MD5哈希",
 			text:      "hello",
 			algorithm: "md5",
+			want:      "5d41402abc4b2a76b9719d911017c592",
 		},
 		{
 			name:      "SHA256哈希",
 			text:      "hello",
 			algorithm: "sha256",
+			want:      "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
 		},
 	}
 
@@ -513,6 +516,9 @@ func TestTextHash(t *testing.T) {
 					if hash, ok := resultMap["hash"].(string); ok {
 						if hash == "" {
 							t.Error("hash should not be empty")
+						}
+						if tt.want != "" && hash != tt.want {
+							t.Errorf("hash = %q, want %q", hash, tt.want)
 						}
 					}
 				}

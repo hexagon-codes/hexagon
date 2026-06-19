@@ -37,7 +37,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/hexagon-codes/hexagon/store/vector"
+	"github.com/hexagon-codes/ai-core/store/vector"
 )
 
 // IndexType 索引类型

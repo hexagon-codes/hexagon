@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/hexagon-codes/hexagon/store/vector"
+	"github.com/hexagon-codes/ai-core/store/vector"
 )
 
 // Engine RAG 引擎
@@ -31,7 +31,7 @@ func WithStore(store vector.Store) EngineOption {
 	}
 }
 
-// WithEmbedder 设置向量生成器
+// WithEngineEmbedder 设置向量生成器
 func WithEngineEmbedder(embedder Embedder) EngineOption {
 	return func(e *Engine) {
 		e.embedder = embedder
@@ -45,7 +45,7 @@ func WithLoader(loader Loader) EngineOption {
 	}
 }
 
-// WithSplitter 设置文档分割器
+// WithEngineSplitter 设置文档分割器
 func WithEngineSplitter(splitter Splitter) EngineOption {
 	return func(e *Engine) {
 		e.splitter = splitter
@@ -130,6 +130,23 @@ func (e *Engine) IndexDocuments(ctx context.Context, docs []Document) error {
 		return fmt.Errorf("failed to embed documents: %w", err)
 	}
 
+	// 校验 embedder 返回的向量数量与文档数量一致。
+	// embedder 是外部接口, 返回数量不可信; 若数量不匹配, 直接按下标
+	// embeddings[i] 访问会越界 panic 或造成向量与文档错位, 因此在此显式拦截。
+	if len(embeddings) != len(docs) {
+		return fmt.Errorf("embedding count mismatch: embedder returned %d embeddings for %d documents", len(embeddings), len(docs))
+	}
+
+	// 维度校验: embedder.Dimension() 声明了期望维度, 逐一校验每个向量
+	// 长度与之一致, 避免维度错配的向量写入存储 (store 侧维度交叉校验为后续项)。
+	if dim := e.embedder.Dimension(); dim > 0 {
+		for i, emb := range embeddings {
+			if len(emb) != dim {
+				return fmt.Errorf("embedding dimension mismatch at index %d: got %d, want %d", i, len(emb), dim)
+			}
+		}
+	}
+
 	// 转换并存储
 	vectorDocs := make([]vector.Document, len(docs))
 	for i, doc := range docs {
@@ -160,6 +177,13 @@ func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOpt
 	}
 	for _, opt := range opts {
 		opt(cfg)
+	}
+
+	// 负数 TopK 是非法输入。底层 store.Search 对负数 k 执行
+	// make([]Document, k) 会 panic, 因此在 Engine 层做下限校验:
+	// 将负数 clamp 为 0 (语义同 TopK=0, 即返回空结果), 不向下游透传非法值。
+	if cfg.TopK < 0 {
+		cfg.TopK = 0
 	}
 
 	// 生成查询向量

@@ -8,10 +8,7 @@
 //   - 结构化解析器：解析到指定结构体
 //   - 组合解析器：链式组合多个解析器
 //
-// 设计借鉴：
-//   - LangChain: OutputParser
 //   - Semantic Kernel: OutputFilter
-//   - Instructor: 结构化输出
 //
 // 使用示例：
 //

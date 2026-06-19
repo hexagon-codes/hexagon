@@ -6,10 +6,7 @@ package text
 
 import (
 	"context"
-	"crypto/md5"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -17,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/hexagon-codes/ai-core/tool"
+	"github.com/hexagon-codes/toolkit/util/hash"
 )
 
 // Tools 返回文本处理工具集合
@@ -158,14 +156,14 @@ func Tools() []tool.Tool {
 			}) (struct {
 				Hash string `json:"hash"`
 			}, error) {
-				var hash string
+				var hashValue string
 				switch strings.ToLower(input.Algorithm) {
 				case "md5":
-					h := md5.Sum([]byte(input.Text))
-					hash = hex.EncodeToString(h[:])
+					// 复用 toolkit 的等价实现
+					hashValue = hash.MD5(input.Text)
 				case "sha256":
-					h := sha256.Sum256([]byte(input.Text))
-					hash = hex.EncodeToString(h[:])
+					// 复用 toolkit 的等价实现
+					hashValue = hash.SHA256(input.Text)
 				default:
 					return struct {
 						Hash string `json:"hash"`
@@ -173,7 +171,7 @@ func Tools() []tool.Tool {
 				}
 				return struct {
 					Hash string `json:"hash"`
-				}{Hash: hash}, nil
+				}{Hash: hashValue}, nil
 			},
 		),
 

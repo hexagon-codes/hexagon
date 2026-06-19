@@ -52,6 +52,17 @@ type ToolExecutor interface {
 	Execute(ctx context.Context, call llm.ToolCall) (ToolResult, error)
 }
 
+// SideEffectClassifier 是 ToolExecutor 的可选附加能力：声明某次工具调用在「崩溃后
+// 重放」语义下的安全性（只读 / 幂等 / 不安全）。
+//
+// 仅用于 Durable 执行的 exactly-once 保护：执行器若实现本接口，Runner 在工具执行前
+// 的意图快照里记录各工具的重放安全性，Resume 据此判定能否安全续跑。**未实现时所有
+// 工具按最保守的 SideEffectUnsafe 处理**——即崩溃在步内时 Resume 会 fail-closed，
+// 宁可显式失败也不静默重复副作用。
+type SideEffectClassifier interface {
+	SideEffectOf(call llm.ToolCall) ToolSideEffect
+}
+
 // ToolResult is a product-neutral tool result.
 type ToolResult struct {
 	Content string
@@ -74,10 +85,4 @@ type Memory interface {
 type MemoryEntry struct {
 	Role    string
 	Content string
-}
-
-// CheckpointStore persists runtime state snapshots.
-type CheckpointStore interface {
-	Save(ctx context.Context, state State) (string, error)
-	Load(ctx context.Context, id string) (*State, error)
 }

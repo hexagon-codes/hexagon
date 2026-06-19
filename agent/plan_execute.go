@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/ai-core/tool"
 	"github.com/hexagon-codes/hexagon/core"
 	"github.com/hexagon-codes/hexagon/hooks"
 	"github.com/hexagon-codes/hexagon/internal/util"
 	"github.com/hexagon-codes/hexagon/orchestration/planner"
-	"github.com/hexagon-codes/hexagon/stream"
 )
 
 // PlanExecuteAgent 计划执行分离的 Agent
@@ -337,7 +337,7 @@ func (a *PlanExecuteAgent) planWithLLM(ctx context.Context, runID, goal string) 
 
 只返回 JSON，不要其他内容。`, goal, toolsDesc)
 
-	resp, err := runCompletionWithRuntime(ctx, a.config.LLM, runID, []llm.Message{
+	resp, err := a.completeWithRuntime(ctx, runID, []llm.Message{
 		{Role: llm.RoleUser, Content: prompt},
 	}, nil)
 	if err != nil {
@@ -527,7 +527,7 @@ func (a *PlanExecuteAgent) executeWithLLM(ctx context.Context, runID string, ste
 
 	prompt := fmt.Sprintf("请执行以下任务并返回结果:\n\n%s", step.Description)
 
-	resp, err := runCompletionWithRuntime(ctx, a.config.LLM, runID, []llm.Message{
+	resp, err := a.completeWithRuntime(ctx, runID, []llm.Message{
 		{Role: llm.RoleUser, Content: prompt},
 	}, runtimeLLMHookSink(runID, a.config.LLM.Name(), hookManager))
 
@@ -647,7 +647,7 @@ func (a *PlanExecuteAgent) summarizeWithLLM(ctx context.Context, runID string, p
 3. 如果有失败的步骤，说明原因
 4. 用自然语言回复，不要使用 JSON`, plan.Goal, stepsBuilder.String())
 
-	resp, err := runCompletionWithRuntime(ctx, a.config.LLM, runID, []llm.Message{
+	resp, err := a.completeWithRuntime(ctx, runID, []llm.Message{
 		{Role: llm.RoleUser, Content: prompt},
 	}, nil)
 	if err != nil {

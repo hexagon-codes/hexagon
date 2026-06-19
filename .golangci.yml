@@ -1,100 +1,89 @@
-# golangci-lint 配置文件
-# 参考: https://golangci-lint.run/usage/configuration/
-
+version: "2"
 run:
-  timeout: 5m
   modules-download-mode: readonly
-
 linters:
   enable:
-    - errcheck
-    - gosimple
-    - govet
-    - ineffassign
-    - staticcheck
-    - typecheck
-    - unused
-    - gofmt
-    - goimports
-    - misspell
-    - unconvert
-    - gocritic
-    - revive
     - bodyclose
+    - gocritic
+    - misspell
     - noctx
     - prealloc
-    - exportloopref
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-
-  govet:
-    enable-all: true
-    disable:
-      - fieldalignment
-
-  gofmt:
-    simplify: true
-
-  goimports:
-    local-prefixes: github.com/hexagon-codes/hexagon
-
-  misspell:
-    locale: US
-
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-    disabled-checks:
-      - hugeParam
-
-  revive:
+    - revive
+    - unconvert
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    gocritic:
+      disabled-checks:
+        - hugeParam
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    govet:
+      disable:
+        - fieldalignment
+      enable-all: true
+    misspell:
+      locale: US
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+  exclusions:
+    generated: lax
     rules:
-      - name: blank-imports
-      - name: context-as-argument
-      - name: context-keys-type
-      - name: dot-imports
-      - name: error-return
-      - name: error-strings
-      - name: error-naming
-      - name: exported
-      - name: if-return
-      - name: increment-decrement
-      - name: var-naming
-      - name: var-declaration
-      - name: package-comments
-      - name: range
-      - name: receiver-naming
-      - name: time-naming
-      - name: unexported-return
-      - name: indent-error-flow
-      - name: errorf
-      - name: empty-block
-      - name: superfluous-else
-      - name: unreachable-code
-
+      - linters:
+          - errcheck
+          - gocritic
+        path: _test\.go
+      - linters:
+          - unused
+        path: examples/
+      - linters:
+          - gochecknoinits
+        source: ^func init\(
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
-  exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
-
-  exclude-rules:
-    # 测试文件中允许更宽松的规则
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gocritic
-
-    # examples 目录允许未使用的代码
-    - path: examples/
-      linters:
-        - unused
-
-    # 允许 init 函数
-    - source: "^func init\\("
-      linters:
-        - gochecknoinits
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/hexagon-codes/hexagon
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Server MCP 服务器
@@ -127,6 +128,8 @@ func (s *Server) Start() error {
 	s.httpServer = &http.Server{
 		Addr:    s.config.Addr,
 		Handler: mux,
+		// ReadHeaderTimeout 防 Slowloris（慢速请求头）DoS。
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	return s.httpServer.ListenAndServe()
@@ -360,6 +363,20 @@ func (s *Server) handleResourcesRead(ctx context.Context, req *MCPRequest) *MCPR
 			Error: &MCPError{
 				Code:    ErrorCodeInternalError,
 				Message: err.Error(),
+			},
+		}
+	}
+
+	// 守卫 handler 返回 (nil, nil) 的情况：直接解引用 *content 会触发
+	// nil 指针 panic（拖垮服务端 goroutine）。对齐 err!=nil 分支优雅降级，
+	// 返回结构化内部错误。
+	if content == nil {
+		return &MCPResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &MCPError{
+				Code:    ErrorCodeInternalError,
+				Message: fmt.Sprintf("Resource handler returned nil content: %s", uri),
 			},
 		}
 	}

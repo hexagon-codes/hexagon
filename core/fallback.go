@@ -6,8 +6,6 @@
 //   - CircuitBreaker: 熔断器
 //   - RunnableWithFallback: 带降级的 Runnable
 //
-// 设计借鉴：
-//   - LangChain: Runnable.with_fallbacks()
 //   - Resilience4j: 弹性模式
 //   - Polly: 弹性和瞬态故障处理
 package core
@@ -18,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/retry"
 )
 
 // ============== 错误定义 ==============
@@ -336,84 +336,80 @@ func (r *RunnableWithRetry[I, O]) OutputSchema() *Schema {
 	return r.runnable.OutputSchema()
 }
 
-// Invoke 执行（带重试）
-func (r *RunnableWithRetry[I, O]) Invoke(ctx context.Context, input I, opts ...Option) (O, error) {
-	var lastErr error
-	delay := r.config.InitialDelay
-
-	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
-		result, err := r.runnable.Invoke(ctx, input, opts...)
-		if err == nil {
-			return result, nil
-		}
-
-		lastErr = err
-
-		if r.config.RetryOn != nil && !r.config.RetryOn(err) {
-			return result, err
-		}
-
-		if attempt < r.config.MaxRetries {
-			if r.config.OnRetry != nil {
-				r.config.OnRetry(attempt, err)
-			}
-
-			// 等待
-			select {
-			case <-ctx.Done():
-				var zero O
-				return zero, ctx.Err()
-			case <-time.After(delay):
-			}
-
-			// 更新延迟
-			delay = time.Duration(float64(delay) * r.config.Multiplier)
-			if delay > r.config.MaxDelay {
-				delay = r.config.MaxDelay
-			}
-		}
+// retryOptions 将 RetryConfig 映射为 toolkit/util/retry 的 Option 列表。
+//
+// 语义对齐说明（与下沉前手写循环逐项等价）：
+//   - 总尝试次数：手写循环为 attempt 0..MaxRetries，即首次调用 + MaxRetries 次重试，
+//     共 MaxRetries+1 次。toolkit 的 MaxAttempts 即"总尝试次数"，故取 MaxRetries+1。
+//   - 退避曲线：手写循环首次重试等待 InitialDelay，之后每次乘以 Multiplier 并以
+//     MaxDelay 封顶；toolkit 在 Multiplier>0 时自动启用 ExponentialBackoff，其
+//     第 n 次（一基）延迟为 Delay*Multiplier^(n-1) 并由 MaxDelay 封顶，曲线一致。
+//     手写循环不使用 Jitter 字段，故此处也不设置抖动，保持无抖动行为。
+//   - RetryOn → RetryIf：判定为不可重试时直接返回原始错误，语义一致。
+//   - OnRetry 计数：手写循环以零基传入（首次重试 attempt==0），故开启
+//     WithOnRetryZeroBased() 将 toolkit 默认的一基计数平移为零基。
+//   - 最终错误可解包：手写循环重试耗尽直接返回原始 lastErr，调用方可
+//     errors.Is(err, 原始错误)。toolkit 默认用 %v 嵌入会丢失错误链，故开启
+//     WithUnwrapFinalError() 使最终错误多 %w 包装，errors.Is 同时命中
+//     ErrMaxAttemptsReached 与原始 lastErr。
+func (r *RunnableWithRetry[I, O]) retryOptions() []retry.Option {
+	opts := []retry.Option{
+		retry.Attempts(r.config.MaxRetries + 1),
+		retry.Delay(r.config.InitialDelay),
+		retry.MaxDelay(r.config.MaxDelay),
+		retry.Multiplier(r.config.Multiplier),
+		// OnRetry 采用零基计数，对齐手写循环的 attempt 语义
+		retry.WithOnRetryZeroBased(),
+		// 重试耗尽时最终错误可被 errors.Is 解包到原始 lastErr
+		retry.WithUnwrapFinalError(),
 	}
+	if r.config.RetryOn != nil {
+		opts = append(opts, retry.RetryIf(r.config.RetryOn))
+	}
+	if r.config.OnRetry != nil {
+		// toolkit 的 OnRetry(n, err) 中 n 已按零基平移，与手写循环一致
+		opts = append(opts, retry.OnRetry(r.config.OnRetry))
+	}
+	return opts
+}
 
-	var zero O
-	return zero, lastErr
+// Invoke 执行（带重试）
+//
+// 重试与退避逻辑下沉至 toolkit/util/retry.DoWithContext，
+// 本方法仅负责承接 RunnableWithRetry 的输入/输出并捕获最近一次结果。
+func (r *RunnableWithRetry[I, O]) Invoke(ctx context.Context, input I, opts ...Option) (O, error) {
+	var result O
+	err := retry.DoWithContext(ctx, func() error {
+		var callErr error
+		result, callErr = r.runnable.Invoke(ctx, input, opts...)
+		return callErr
+	}, r.retryOptions()...)
+
+	if err != nil {
+		// 失败时（不可重试 / 重试耗尽 / ctx 取消）返回最近一次调用的结果。
+		// 不可重试路径下 result 为该次失败调用的产出；其余路径下为零值或
+		// 最近一次产出，与下沉前手写循环的返回语义一致。
+		return result, err
+	}
+	return result, nil
 }
 
 // Stream 流式执行（带重试）
+//
+// 重试与退避逻辑下沉至 toolkit/util/retry.DoWithContext，
+// 本方法仅负责承接流的获取并捕获最近一次成功的流读取器。
 func (r *RunnableWithRetry[I, O]) Stream(ctx context.Context, input I, opts ...Option) (*StreamReader[O], error) {
-	var lastErr error
-	delay := r.config.InitialDelay
+	var stream *StreamReader[O]
+	err := retry.DoWithContext(ctx, func() error {
+		var callErr error
+		stream, callErr = r.runnable.Stream(ctx, input, opts...)
+		return callErr
+	}, r.retryOptions()...)
 
-	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
-		stream, err := r.runnable.Stream(ctx, input, opts...)
-		if err == nil {
-			return stream, nil
-		}
-
-		lastErr = err
-
-		if r.config.RetryOn != nil && !r.config.RetryOn(err) {
-			return nil, err
-		}
-
-		if attempt < r.config.MaxRetries {
-			if r.config.OnRetry != nil {
-				r.config.OnRetry(attempt, err)
-			}
-
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(delay):
-			}
-
-			delay = time.Duration(float64(delay) * r.config.Multiplier)
-			if delay > r.config.MaxDelay {
-				delay = r.config.MaxDelay
-			}
-		}
+	if err != nil {
+		return nil, err
 	}
-
-	return nil, lastErr
+	return stream, nil
 }
 
 // Batch 批量执行（带重试）

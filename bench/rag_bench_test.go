@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/hexagon-codes/ai-core/store/vector"
 	"github.com/hexagon-codes/hexagon/rag"
 	"github.com/hexagon-codes/hexagon/rag/embedder"
 	"github.com/hexagon-codes/hexagon/rag/retriever"
 	"github.com/hexagon-codes/hexagon/rag/splitter"
-	"github.com/hexagon-codes/hexagon/store/vector"
 )
 
 // BenchmarkDocumentCreation 测试文档创建性能

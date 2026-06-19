@@ -20,6 +20,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // ============== 核心类型 ==============
@@ -227,9 +229,17 @@ func NewRecorder(storage TraceStorage, config ...RecorderConfig) *Recorder {
 }
 
 // StartTrace 开始追踪
+//
+// 若已存在一个尚未 EndTrace 的 currentTrace（异常/重入路径），不会静默丢弃它，
+// 而是先将其作为"已中断"的 trace flush 保存，再开启新 trace，避免整条调用链丢失。
 func (r *Recorder) StartTrace(name string, input any) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// 在覆盖前先 flush 上一个未结束的 trace，防止调用链被静默丢失。
+	if r.currentTrace != nil {
+		r.finalizeCurrentLocked(nil, fmt.Errorf("trace interrupted by new StartTrace"))
+	}
 
 	id := generateID("trace")
 	r.currentTrace = &Trace{
@@ -240,6 +250,11 @@ func (r *Recorder) StartTrace(name string, input any) string {
 		Spans:     make([]*Span, 0),
 		Metadata:  make(map[string]any),
 	}
+
+	// 重置跨度栈，避免上一个未正常 EndTrace 的 trace 残留孤儿 span 污染当前 trace。
+	// 正常路径下 EndTrace 会清空 spanStack，但异常/重入路径不经过 EndTrace，
+	// 必须在开启新 trace 时主动清栈，保证 ParentID 等栈状态与当前 trace 一致。
+	r.spanStack = nil
 
 	if r.config.RecordInput {
 		r.currentTrace.Input = r.sanitize(input)
@@ -257,6 +272,15 @@ func (r *Recorder) EndTrace(output any, err error) {
 		return
 	}
 
+	r.finalizeCurrentLocked(output, err)
+}
+
+// finalizeCurrentLocked 收尾并持久化当前 trace，随后清空 currentTrace 与 spanStack。
+//
+// 调用方必须已持有 r.mu 且保证 r.currentTrace != nil。
+// 被 EndTrace（正常结束）与 StartTrace（覆盖前 flush 中断的旧 trace）共用，
+// 保证两条路径下的状态判定、脱敏与存储逻辑完全一致。
+func (r *Recorder) finalizeCurrentLocked(output any, err error) {
 	r.currentTrace.EndTime = time.Now()
 	r.currentTrace.Duration = r.currentTrace.EndTime.Sub(r.currentTrace.StartTime)
 
@@ -273,11 +297,9 @@ func (r *Recorder) EndTrace(output any, err error) {
 
 	// 保存追踪
 	if r.storage != nil {
-		if err := r.storage.Save(context.Background(), r.currentTrace); err != nil {
+		if saveErr := r.storage.Save(context.Background(), r.currentTrace); saveErr != nil {
 			// 使用错误处理函数处理存储失败
-			if r.config.ErrorHandler != nil {
-				r.config.ErrorHandler(fmt.Errorf("failed to save trace: %w", err))
-			}
+			r.reportError(fmt.Errorf("failed to save trace: %w", saveErr))
 		}
 	}
 
@@ -386,30 +408,69 @@ func (r *Recorder) GetCurrentTrace() *Trace {
 }
 
 // sanitize 脱敏处理
+//
+// 将输入序列化为通用结构后递归下钻，对所有层级（嵌套 map / slice）中命中
+// SensitiveFields 的字段统一替换为脱敏标记，避免敏感数据以明文录制。
+//
+// 错误处理：json 编解码失败时，不能静默把原始（可能含敏感字段）数据原样录制，
+// 否则脱敏会被悄悄绕过。此处通过 reportError 上报告警（若配置了 ErrorHandler），
+// 并退回返回原始数据以保证录制不中断（可观测性优先于无声失败）。
 func (r *Recorder) sanitize(data any) any {
 	if len(r.config.SensitiveFields) == 0 {
 		return data
 	}
 
-	// 转换为 map 进行处理
+	// 转换为通用结构（map/slice/标量）进行递归处理
 	dataBytes, err := json.Marshal(data)
 	if err != nil {
+		r.reportError(fmt.Errorf("sanitize marshal failed, 数据未脱敏即录制: %w", err))
 		return data
 	}
 
-	var dataMap map[string]any
-	if err := json.Unmarshal(dataBytes, &dataMap); err != nil {
+	var generic any
+	if err := json.Unmarshal(dataBytes, &generic); err != nil {
+		r.reportError(fmt.Errorf("sanitize unmarshal failed, 数据未脱敏即录制: %w", err))
 		return data
 	}
 
-	// 脱敏处理
+	// 构建敏感字段集合，便于递归时 O(1) 命中判断
+	sensitive := make(map[string]struct{}, len(r.config.SensitiveFields))
 	for _, field := range r.config.SensitiveFields {
-		if _, exists := dataMap[field]; exists {
-			dataMap[field] = "***REDACTED***"
-		}
+		sensitive[field] = struct{}{}
 	}
 
-	return dataMap
+	return redactValue(generic, sensitive)
+}
+
+// redactValue 递归脱敏：对 map 的命中 key 替换值，并下钻 map/slice 的所有子节点。
+func redactValue(value any, sensitive map[string]struct{}) any {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, child := range v {
+			if _, hit := sensitive[key]; hit {
+				v[key] = "***REDACTED***"
+				continue
+			}
+			v[key] = redactValue(child, sensitive)
+		}
+		return v
+	case []any:
+		for i, child := range v {
+			v[i] = redactValue(child, sensitive)
+		}
+		return v
+	default:
+		// 标量（string/number/bool/nil）无需处理
+		return v
+	}
+}
+
+// reportError 上报非致命错误。若配置了 ErrorHandler 则回调，否则静默忽略
+// （保持与现有约定一致：ErrorHandler 为 nil 时不打断录制流程）。
+func (r *Recorder) reportError(err error) {
+	if r.config.ErrorHandler != nil {
+		r.config.ErrorHandler(err)
+	}
 }
 
 // ============== 重放器 ==============
@@ -610,9 +671,19 @@ func (r *Replayer) shouldBreak(span *Span) bool {
 }
 
 // defaultCompare 默认比较
+//
+// 通过 JSON 序列化后比对字符串判断是否一致。
+// 注意：不能静默吞掉 Marshal 错误——否则两个不可序列化的值会双双得到空串而被
+// 误判为"匹配"（假阳性）。任一侧序列化失败时一律视为不匹配。
 func (r *Replayer) defaultCompare(expected, actual any) bool {
-	expectedJSON, _ := json.Marshal(expected)
-	actualJSON, _ := json.Marshal(actual)
+	expectedJSON, err := json.Marshal(expected)
+	if err != nil {
+		return false
+	}
+	actualJSON, err := json.Marshal(actual)
+	if err != nil {
+		return false
+	}
 	return string(expectedJSON) == string(actualJSON)
 }
 
@@ -785,11 +856,18 @@ func (s *FileStorage) List(ctx context.Context, filter TraceFilter) ([]*Trace, e
 			continue
 		}
 
-		// 应用过滤器
+		// 应用过滤器（需与 MemoryStorage.List 保持一致的过滤语义）
 		if filter.Name != "" && trace.Name != filter.Name {
 			continue
 		}
 		if filter.Status != "" && trace.Status != filter.Status {
+			continue
+		}
+		// StartTime/EndTime 时间范围过滤，与 MemoryStorage 行为对齐
+		if filter.StartTime != nil && trace.StartTime.Before(*filter.StartTime) {
+			continue
+		}
+		if filter.EndTime != nil && trace.EndTime.After(*filter.EndTime) {
 			continue
 		}
 
@@ -804,9 +882,18 @@ func (s *FileStorage) List(ctx context.Context, filter TraceFilter) ([]*Trace, e
 }
 
 // Delete 删除追踪
+//
+// 对不存在的 ID 采用幂等语义（不返回错误），与 MemoryStorage.Delete 行为一致。
 func (s *FileStorage) Delete(ctx context.Context, id string) error {
 	path := fmt.Sprintf("%s/%s.json", s.dir, id)
-	return os.Remove(path)
+	if err := os.Remove(path); err != nil {
+		// 文件不存在视为删除成功（幂等），其余错误向上包装传播
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to delete trace %s: %w", id, err)
+	}
+	return nil
 }
 
 // ============== 导出导入 ==============
@@ -837,5 +924,5 @@ func generateID(prefix string) string {
 	idCounter++
 	id := idCounter
 	idMu.Unlock()
-	return fmt.Sprintf("%s_%d_%d", prefix, time.Now().UnixNano(), id)
+	return fmt.Sprintf("%s_%s_%d", prefix, idgen.NanoID(), id)
 }

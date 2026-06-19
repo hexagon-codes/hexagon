@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/retry"
 )
 
 // ============== Future 类型 ==============
@@ -347,24 +349,47 @@ func Delay[T any](duration time.Duration, fn func() (T, error)) *Future[T] {
 }
 
 // Retry 重试执行
+//
+// 在独立 goroutine 中以固定延迟重试 fn，结果经 Future 异步返回。
+// 重试循环本身下沉至 toolkit/util/retry.Do，本函数保留 Future/goroutine 封装。
+//
+// 语义对齐说明（与下沉前手写循环逐项等价）：
+//   - 总尝试次数：手写循环为 i 0..maxRetries，即首次调用 + maxRetries 次重试，
+//     共 maxRetries+1 次，故 toolkit 的 Attempts 取 maxRetries+1。
+//   - 固定延迟：手写循环每次重试前固定 Sleep(delay)，无指数退避。toolkit 的
+//     DefaultConfig 默认 Multiplier=2.0 会自动启用指数退避，故显式以
+//     DelayType(FixedDelay) 覆盖为固定延迟；同时将 MaxDelay 设为 delay，
+//     避免默认 30s 上限在 delay>30s 时反向裁剪固定延迟（FixedDelay 返回值
+//     会被 MaxDelay 封顶）。FixedDelay 路径不叠加抖动，与手写循环一致。
+//   - 重试条件：手写循环对任意非 nil 错误重试，等同 toolkit 默认 RetryIf。
+//   - 最终错误可解包：手写循环重试耗尽直接返回原始 lastErr。toolkit 默认用
+//     %v 嵌入会丢失错误链，故开启 WithUnwrapFinalError() 使最终错误多 %w
+//     包装，errors.Is(err, 原始错误) 仍成立（错误文案会带 ErrMaxAttemptsReached 前缀）。
+//
+// 说明：本函数签名不含 context.Context，仍使用 retry.Do（非 ctx 版），
+// 延迟期间不感知取消——这是签名约束，ctx 感知属另一议题，本次下沉不引入。
 func Retry[T any](maxRetries int, delay time.Duration, fn func() (T, error)) *Future[T] {
 	future := NewFuture[T]()
 
 	go func() {
-		var lastErr error
-		for i := 0; i <= maxRetries; i++ {
-			if i > 0 {
-				time.Sleep(delay)
-			}
-			result, err := fn()
-			if err == nil {
-				future.Complete(result, nil)
-				return
-			}
-			lastErr = err
+		var result T
+		err := retry.Do(func() error {
+			var callErr error
+			result, callErr = fn()
+			return callErr
+		},
+			retry.Attempts(maxRetries+1),
+			retry.Delay(delay),
+			retry.MaxDelay(delay),
+			retry.DelayType(retry.FixedDelay),
+			retry.WithUnwrapFinalError(),
+		)
+		if err != nil {
+			var zero T
+			future.Complete(zero, err)
+			return
 		}
-		var zero T
-		future.Complete(zero, lastErr)
+		future.Complete(result, nil)
 	}()
 
 	return future

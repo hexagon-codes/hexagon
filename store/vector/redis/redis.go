@@ -43,7 +43,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/hexagon-codes/hexagon/store/vector"
+	"github.com/hexagon-codes/ai-core/store/vector"
 )
 
 // DistanceMetric 距离度量

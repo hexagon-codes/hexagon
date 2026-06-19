@@ -6,7 +6,7 @@
 //   - Compose: 组合两个 Runnable，自动处理类型和流转换
 //   - ComposeStream: 组合两个 Runnable，输出始终为流
 //
-// 设计借鉴 Eino 的 Concat（流→值）和 Box（值→流）在编排层自动应用。
+// 在编排层自动应用 Concat（流→值）与 Box（值→流）。
 //
 // 使用示例：
 //
@@ -22,7 +22,7 @@ package core
 import (
 	"context"
 
-	"github.com/hexagon-codes/hexagon/stream"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 )
 
 // InvokeToStream 将 Invoke-only 的 Runnable 适配为返回流

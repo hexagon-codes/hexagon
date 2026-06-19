@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -471,19 +473,9 @@ func (l *AuditLogger) Log(event *AuditEvent) {
 		l.bufferOverflowCount++
 		l.mu.Unlock()
 
-		// 直接同步写入存储
-		// 审计日志不可静默丢弃，记录失败时更新失败计数并写入 stderr
-		if l.store != nil {
-			if err := l.store.Save(context.Background(), event); err != nil {
-				l.mu.Lock()
-				l.storeFailCount++
-				l.mu.Unlock()
-				// 审计日志写入存储失败，输出到 stderr 确保可观测
-				fmt.Fprintf(os.Stderr, "hexagon/audit: store.Save failed: %v\n", err)
-			}
-		}
-
-		// 直接写入 writers
+		// 直接同步写入存储与 writers。
+		// writeEventDirect 内部负责落库 store(失败时累加 storeFailCount 并写 stderr)
+		// 与写入 writers, 与未启动路径保持一致的落库语义(W3-46)。
 		l.writeEventDirect(event)
 	}
 }
@@ -584,11 +576,26 @@ func (l *AuditLogger) shouldLog(level AuditLevel) bool {
 	return levels[level] >= levels[l.config.LogLevel]
 }
 
-// writeEventDirect 直接写入事件（用于缓冲区溢出时的同步写入）
+// writeEventDirect 直接写入事件（用于未启动或缓冲区溢出时的同步写入）
 //
-// 此方法绕过缓冲区，直接将事件写入所有配置的 writers。
-// 用于确保即使在高负载下审计事件也不会丢失。
+// 此方法绕过缓冲区，直接将事件同时写入存储 store 与所有配置的 writers。
+// 用于确保即使在未启动 (running=false) 或高负载溢出时审计事件也不会丢失,
+// 与溢出路径保持一致的落库语义(W3-46: 审计日志不可静默丢弃)。
 func (l *AuditLogger) writeEventDirect(event *AuditEvent) {
+	// 写入存储, 确保未启动时审计事件仍落库(与溢出路径一致)。
+	// 写入失败时更新失败计数并输出到 stderr 确保可观测。
+	l.mu.RLock()
+	store := l.store
+	l.mu.RUnlock()
+	if store != nil {
+		if err := store.Save(context.Background(), event); err != nil {
+			l.mu.Lock()
+			l.storeFailCount++
+			l.mu.Unlock()
+			fmt.Fprintf(os.Stderr, "hexagon/audit: store.Save failed: %v\n", err)
+		}
+	}
+
 	l.mu.RLock()
 	writers := l.writers
 	l.mu.RUnlock()
@@ -617,10 +624,26 @@ func (l *AuditLogger) GetBufferOverflowCount() int64 {
 	return l.bufferOverflowCount
 }
 
+// GetStoreFailCount 获取存储写入失败次数
+//
+// 与 GetBufferOverflowCount 对称, 可用于监控审计日志落库丢失情况。
+// storeFailCount 在溢出同步写入 store 失败时累加。
+func (l *AuditLogger) GetStoreFailCount() int64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.storeFailCount
+}
+
 // sanitize 脱敏处理
+//
+// 对 Details、Metadata 以及 Request.Body / Response.Body 中的敏感字段统一脱敏。
+// Metadata 与 Details 同样可能携带敏感数据, 必须一并脱敏(W3-47), 否则原样泄漏。
 func (l *AuditLogger) sanitize(event *AuditEvent) {
 	if event.Details != nil {
 		event.Details = l.sanitizeMap(event.Details)
+	}
+	if event.Metadata != nil {
+		event.Metadata = l.sanitizeMap(event.Metadata)
 	}
 	if event.Request != nil && event.Request.Body != nil {
 		if m, ok := event.Request.Body.(map[string]any); ok {
@@ -635,28 +658,82 @@ func (l *AuditLogger) sanitize(event *AuditEvent) {
 }
 
 // sanitizeMap 脱敏 map
+//
+// 对敏感 key 直接打码; 非敏感 key 的值递归脱敏(支持嵌套 map 与 slice),
+// 确保 slice 内的 map 中的敏感字段同样被脱敏(W3-48)。
 func (l *AuditLogger) sanitizeMap(m map[string]any) map[string]any {
 	result := make(map[string]any)
 	for k, v := range m {
 		if l.isSensitive(k) {
 			result[k] = "***REDACTED***"
-		} else if nested, ok := v.(map[string]any); ok {
-			result[k] = l.sanitizeMap(nested)
 		} else {
-			result[k] = v
+			result[k] = l.sanitizeValue(v)
 		}
 	}
 	return result
 }
 
+// sanitizeValue 递归脱敏任意值
+//
+// 支持 map[string]any、[]any 与 []map[string]any 三类容器, 其余值原样返回。
+// slice 内的元素逐个递归处理, 确保 []any / []map 中嵌套的敏感字段不被遗漏(W3-48)。
+func (l *AuditLogger) sanitizeValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		return l.sanitizeMap(val)
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = l.sanitizeValue(item)
+		}
+		return out
+	case []map[string]any:
+		// 强类型 slice 也需递归; 统一转为 []any 以便嵌套元素被一致脱敏。
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = l.sanitizeMap(item)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
 // isSensitive 检查是否敏感字段
+//
+// 大小写不敏感, 并匹配常见变体(W3-49):
+//   - 子串包含: "user_password" 包含 "password" -> 命中
+//   - 分隔符归一化: 去除 '_'、'-' 后比较, 使 "apikey" 命中 "api_key"
+//
+// 这样既能识别 Password / PASSWORD 等大小写变体, 也能识别带前后缀或无分隔符的变体,
+// 避免敏感字段因命名差异而泄漏。
 func (l *AuditLogger) isSensitive(field string) bool {
+	lf := strings.ToLower(field)
+	// 归一化: 去除常见分隔符, 用于无下划线变体匹配(如 apikey vs api_key)
+	nf := normalizeFieldName(lf)
 	for _, sensitive := range l.config.SensitiveFields {
-		if field == sensitive {
+		ls := strings.ToLower(sensitive)
+		if ls == "" {
+			continue
+		}
+		// 子串包含匹配(大小写不敏感)
+		if strings.Contains(lf, ls) {
+			return true
+		}
+		// 分隔符归一化后的子串包含匹配
+		ns := normalizeFieldName(ls)
+		if ns != "" && strings.Contains(nf, ns) {
 			return true
 		}
 	}
 	return false
+}
+
+// normalizeFieldName 归一化字段名, 去除下划线与连字符。
+// 用于匹配无分隔符的敏感字段变体(如 "apikey" 与 "api_key")。
+func normalizeFieldName(s string) string {
+	r := strings.ReplaceAll(s, "_", "")
+	return strings.ReplaceAll(r, "-", "")
 }
 
 // ============== Event Filter & Hook ==============
@@ -792,8 +869,14 @@ func (s *MemoryAuditStore) Query(ctx context.Context, query AuditQuery) ([]*Audi
 	}
 
 	// 应用分页
-	if query.Offset > 0 && query.Offset < len(results) {
-		results = results[query.Offset:]
+	// Offset 越界(>= 结果数)时返回空集合, 而非静默忽略 offset 返回全量。
+	// 与同类分页语义统一(W3-33/W3-45): offset 超出范围视为已翻过所有页。
+	if query.Offset > 0 {
+		if query.Offset >= len(results) {
+			results = results[:0]
+		} else {
+			results = results[query.Offset:]
+		}
 	}
 	if query.Limit > 0 && query.Limit < len(results) {
 		results = results[:query.Limit]
@@ -979,6 +1062,10 @@ func AgentActor(id, name string) *Actor {
 
 // ============== Report ==============
 
+// topReportN 审计报告中 TopActors / TopActions 的最大保留条数。
+// 报告按计数降序排序后截断到该上限, 体现 "Top-N" 语义。
+const topReportN = 10
+
 // AuditReport 审计报告
 type AuditReport struct {
 	// Period 时间段
@@ -1072,17 +1159,29 @@ func (l *AuditLogger) GenerateReport(ctx context.Context, start, end time.Time) 
 		}
 	}
 
-	// 转换 top actors
+	// 转换 top actors: 按计数降序排序后截断到 topReportN(W3-51)
 	for _, stats := range actorCounts {
 		report.TopActors = append(report.TopActors, *stats)
 	}
+	sort.Slice(report.TopActors, func(i, j int) bool {
+		return report.TopActors[i].Count > report.TopActors[j].Count
+	})
+	if len(report.TopActors) > topReportN {
+		report.TopActors = report.TopActors[:topReportN]
+	}
 
-	// 转换 top actions
+	// 转换 top actions: 按计数降序排序后截断到 topReportN(W3-51)
 	for action, count := range actionCounts {
 		report.TopActions = append(report.TopActions, ActionStats{
 			Action: action,
 			Count:  count,
 		})
+	}
+	sort.Slice(report.TopActions, func(i, j int) bool {
+		return report.TopActions[i].Count > report.TopActions[j].Count
+	})
+	if len(report.TopActions) > topReportN {
+		report.TopActions = report.TopActions[:topReportN]
 	}
 
 	return report, nil

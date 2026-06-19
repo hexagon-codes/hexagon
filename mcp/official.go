@@ -3,10 +3,13 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/tool"
@@ -67,7 +70,11 @@ func (t *MCPProxyToolV2) Execute(ctx context.Context, args map[string]any) (tool
 
 	output := strings.Join(texts, "\n")
 	if result.IsError {
-		return tool.Result{Output: output}, fmt.Errorf("MCP 工具 %s 返回错误: %s", t.mcpTool.Name, output)
+		// 对齐 V1 (proxy_tool.go) 契约：用 tool.NewErrorResult 构造结果，使
+		// Success=false 且错误文本写入 Error 字段。直接放进 Output 会被
+		// Result.String() 在 Success=false 时丢弃（只输出 "Error: " 前缀）。
+		err := fmt.Errorf("MCP 工具 %s 返回错误: %s", t.mcpTool.Name, output)
+		return tool.NewErrorResult(err), err
 	}
 
 	return tool.NewResult(output), nil
@@ -292,6 +299,59 @@ func (s *ServerV2) RegisterTools(tools ...tool.Tool) {
 // 阻塞直到 context 取消或连接断开。
 func (s *ServerV2) ServeStdio(ctx context.Context) error {
 	return s.server.Run(ctx, &sdkmcp.StdioTransport{})
+}
+
+// HTTPHandler 返回基于 Streamable HTTP 传输的 http.Handler。
+//
+// 适合挂载到调用方自己的 mux/路由（如鉴权中间件之后），所有请求复用本服务器实例。
+// Streamable HTTP 是 MCP 的现代远程传输（单端点 POST + 可选 SSE 响应）。
+func (s *ServerV2) HTTPHandler() http.Handler {
+	return sdkmcp.NewStreamableHTTPHandler(
+		func(*http.Request) *sdkmcp.Server { return s.server },
+		nil,
+	)
+}
+
+// SSEHandler 返回基于 SSE 传输的 http.Handler（兼容较旧的 SSE 客户端）。
+func (s *ServerV2) SSEHandler() http.Handler {
+	return sdkmcp.NewSSEHandler(
+		func(*http.Request) *sdkmcp.Server { return s.server },
+		nil,
+	)
+}
+
+// ServeHTTP 以 Streamable HTTP 模式在 addr 上运行 MCP 服务器。
+//
+// 阻塞直到 ctx 取消（取消时优雅关闭，最长等待 5s）。需要把 handler 挂到既有
+// HTTP 服务时改用 HTTPHandler()。
+//
+// 注意：本方法签名为 (ctx, addr)，与 http.Handler.ServeHTTP(w, r) 不同，
+// ServerV2 不是 http.Handler。
+func (s *ServerV2) ServeHTTP(ctx context.Context, addr string) error {
+	return serveHTTP(ctx, addr, s.HTTPHandler())
+}
+
+// ServeSSE 以 SSE 模式在 addr 上运行 MCP 服务器（兼容旧客户端）。
+func (s *ServerV2) ServeSSE(ctx context.Context, addr string) error {
+	return serveHTTP(ctx, addr, s.SSEHandler())
+}
+
+// serveHTTP 在 addr 上启动一个 HTTP 服务承载给定 handler，ctx 取消时优雅关闭。
+func serveHTTP(ctx context.Context, addr string, h http.Handler) error {
+	// ReadHeaderTimeout 防 Slowloris（慢速发送请求头耗尽连接）DoS。
+	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
+
+	go func() {
+		<-ctx.Done()
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutCtx)
+	}()
+
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 // Server 返回底层官方 SDK Server，用于高级配置

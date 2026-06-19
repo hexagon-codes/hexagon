@@ -6,15 +6,19 @@
 //   - 速率限制：控制 API 调用频率
 //   - 自动重试：处理临时错误
 //
-// 设计借鉴：
 //   - OpenAI Batch API: 批量处理
-//   - LangChain: 请求批处理
 //   - gRPC: 请求流和批处理
 //
-// 使用示例：
+// 使用示例（Batcher 实例方式，需手动 Start/Stop）：
 //
 //	batcher := batch.NewBatcher(provider, batch.DefaultConfig())
-//	results := batcher.BatchComplete(ctx, requests)
+//	batcher.Start()
+//	defer batcher.Stop()
+//	results := batcher.BatchSubmit(ctx, requests)
+//
+// 使用示例（包级辅助函数，自动管理生命周期）：
+//
+//	results := batch.BatchComplete(ctx, provider, requests)
 package batch
 
 import (
@@ -212,6 +216,18 @@ func NewBatcher(provider Provider, config ...*Config) *Batcher {
 		cfg = config[0]
 	}
 
+	// 速率限制规范化：
+	// RateLimit<=0 表示"不限流"。此时必须将 limiter 置为 nil，
+	// 而不能交给 rate.NewTokenBucket(0, 0)——后者 capacity=0、rate=0，
+	// 令牌桶 Wait() 内部计算 waitTime = (1-0)/0*1000 → +Inf，
+	// 会陷入 time.Sleep(+Inf) 死循环，导致 worker 永久卡死、
+	// Stop 的 wg.Wait 永不返回（死锁）、goroutine 泄漏。
+	// 限流场景下令牌桶容量与速率均取 RateLimit（每秒请求数）。
+	var limiter *rate.TokenBucket
+	if cfg.RateLimit > 0 {
+		limiter = rate.NewTokenBucket(cfg.RateLimit, float64(cfg.RateLimit))
+	}
+
 	return &Batcher{
 		provider:  provider,
 		config:    cfg,
@@ -219,7 +235,7 @@ func NewBatcher(provider Provider, config ...*Config) *Batcher {
 		batchChan: make(chan []*pendingRequest, cfg.MaxConcurrent),
 		stopChan:  make(chan struct{}),
 		stats:     &Stats{},
-		limiter:   rate.NewTokenBucket(cfg.RateLimit, float64(cfg.RateLimit)),
+		limiter:   limiter,
 	}
 }
 
@@ -241,6 +257,10 @@ func (b *Batcher) Start() {
 }
 
 // Stop 停止批处理器
+//
+// 停止流程：先关闭 stopChan 通知 collector 退出，collector 退出前会把
+// 残留在 batch 缓冲里的请求做一次最终 flush（阻塞发送，确保不丢弃），
+// 随后 close(batchChan) 让所有 worker 自然退出，最后 wg.Wait 等待收尾。
 func (b *Batcher) Stop() {
 	if !atomic.CompareAndSwapInt32(&b.running, 1, 0) {
 		return
@@ -313,19 +333,37 @@ func (b *Batcher) collector() {
 
 	batch := make([]*pendingRequest, 0, b.config.MaxBatchSize)
 
-	flush := func() {
+	// flush 把当前 batch 缓冲发往 batchChan 交给 worker 处理。
+	//
+	// final 区分两种语境：
+	//   - 稳态 flush（final=false）：运行期间因数量/ticker 触发，
+	//     发送时仍监听 stopChan，以便在停止信号到来时及时退出，避免阻塞。
+	//   - 最终 flush（final=true）：Stop 路径下退出前的收尾 flush，
+	//     此时 stopChan 已 close，若再把 <-stopChan 放进发送 select，
+	//     则 close 后的 stopChan 与可发送的 batchChan 会"双就绪"，
+	//     Go 在多个就绪 case 间随机选择，约 50% 概率走 stopChan 分支，
+	//     导致残留批次被静默丢弃、对应请求的 response 通道永不写入、
+	//     Submit 调用方永久挂起。因此最终 flush 必须做"无 stopChan 逃逸"的
+	//     阻塞发送，确保残留请求一定被交付。batchChan 有 MaxConcurrent
+	//     的缓冲且 worker 在 batchChan close 后才退出，故此发送不会死锁。
+	flush := func(final bool) {
 		if len(batch) == 0 {
 			return
 		}
 
-		// 发送批次
+		// 发送批次（拷贝快照，避免后续复用底层数组）
 		batchCopy := make([]*pendingRequest, len(batch))
 		copy(batchCopy, batch)
 
-		select {
-		case b.batchChan <- batchCopy:
-		case <-b.stopChan:
-			return
+		if final {
+			// 最终 flush：阻塞发送，保证残留请求不被丢弃
+			b.batchChan <- batchCopy
+		} else {
+			select {
+			case b.batchChan <- batchCopy:
+			case <-b.stopChan:
+				return
+			}
 		}
 
 		batch = batch[:0]
@@ -334,18 +372,32 @@ func (b *Batcher) collector() {
 	for {
 		select {
 		case <-b.stopChan:
-			flush()
+			// 收尾：先把队列中已入队但尚未被收集的请求一并纳入，
+			// 再做最终阻塞 flush，确保所有已入队请求都被交付处理。
+			for {
+				select {
+				case req := <-b.queue:
+					batch = append(batch, req)
+					if len(batch) >= b.config.MaxBatchSize {
+						flush(true)
+					}
+					continue
+				default:
+				}
+				break
+			}
+			flush(true)
 			close(b.batchChan)
 			return
 
 		case req := <-b.queue:
 			batch = append(batch, req)
 			if len(batch) >= b.config.MaxBatchSize {
-				flush()
+				flush(false)
 			}
 
 		case <-ticker.C:
-			flush()
+			flush(false)
 		}
 	}
 }
@@ -392,8 +444,11 @@ func (b *Batcher) processRequest(pending *pendingRequest) {
 	atomic.AddInt64(&b.stats.TotalRequests, 1)
 	startTime := time.Now()
 
-	// 速率限制（使用 toolkit 令牌桶，在锁外等待避免持锁 sleep）
-	b.limiter.Wait()
+	// 速率限制（使用 toolkit 令牌桶，在锁外等待避免持锁 sleep）。
+	// limiter 为 nil 表示 RateLimit<=0 即不限流，直接跳过等待。
+	if b.limiter != nil {
+		b.limiter.Wait()
+	}
 
 	// 创建带超时的 context
 	ctx, cancel := context.WithTimeout(context.Background(), b.config.Timeout)
@@ -402,10 +457,22 @@ func (b *Batcher) processRequest(pending *pendingRequest) {
 	var resp *Response
 	var err error
 
+	// lastCallErr 记录 provider.Complete 最近一次返回的原始错误。
+	//
+	// 不能依赖 retry.DoWithContext 的返回值来还原原始错误：
+	//   - 不可重试早退路径（RetryIf=false）返回的是【裸错误】（无 %w 包装），
+	//     对它调用 errors.Unwrap 得到 nil，会把真实原因（如 "invalid api key"）误丢。
+	//   - 重试耗尽路径返回 fmt.Errorf("%w: %v", ErrMaxAttemptsReached, lastErr)，
+	//     Unwrap 只能拿到 ErrMaxAttemptsReached 哨兵，原始原因（如 timeout）从错误链中丢失。
+	// 当前 toolkit v0.0.6 的 retry 尚未提供 WithUnwrapFinalError/WithReturnLastError
+	// 补偿选项，因此在本包内通过闭包捕获最近一次回调错误，保证原始失败原因不丢。
+	var lastCallErr error
+
 	// 使用 toolkit/util/retry 实现重试逻辑
 	err = retry.DoWithContext(ctx, func() error {
 		var callErr error
 		resp, callErr = b.provider.Complete(ctx, pending.request)
+		lastCallErr = callErr
 		return callErr
 	},
 		retry.Attempts(b.config.MaxRetries+1),
@@ -413,11 +480,14 @@ func (b *Batcher) processRequest(pending *pendingRequest) {
 		retry.DelayType(retry.LinearBackoff),
 		retry.RetryIf(func(err error) bool { return isRetryableError(err) }),
 	)
-	// 如果 retry.Do 返回了 ErrMaxAttemptsReached 包装的错误，提取原始错误
+	// 归一化错误：优先保留 provider 返回的原始失败原因，
+	// 仅在确实拿不到任何原始错误时才回退到 ErrBatchFailed 哨兵。
 	if err != nil && resp == nil {
-		err = errors.Unwrap(err)
-		if err == nil {
-			err = ErrBatchFailed
+		switch {
+		case lastCallErr != nil:
+			err = lastCallErr
+		default:
+			err = fmt.Errorf("%w: %v", ErrBatchFailed, err)
 		}
 	}
 

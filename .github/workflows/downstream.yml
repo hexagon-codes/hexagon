@@ -1,0 +1,29 @@
+name: Downstream Contract
+
+# 接缝契约门禁：hexagon（L2）任何改动，必须让直接消费者（hexclaw）在 go.work 下
+# build+test 仍全绿。下游绿才算导出 API 未破。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  downstream:
+    name: hexclaw against this hexagon
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { repository: hexagon-codes/toolkit, path: toolkit }
+      - uses: actions/checkout@v4
+        with: { repository: hexagon-codes/ai-core, path: ai-core }
+      - uses: actions/checkout@v4
+        with: { path: hexagon }
+      - uses: actions/checkout@v4
+        with: { repository: hexagon-codes/hexclaw, path: hexclaw }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.x' }
+      - name: go.work（下游用本 PR 的 hexagon）
+        run: go work init ./toolkit ./ai-core ./hexagon ./hexclaw
+      - name: hexclaw build + test
+        run: (cd hexclaw && go build ./... && go test ./...)

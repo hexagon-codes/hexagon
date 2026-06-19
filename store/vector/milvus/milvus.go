@@ -37,7 +37,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hexagon-codes/hexagon/store/vector"
+	"github.com/hexagon-codes/ai-core/store/vector"
 )
 
 // DefaultDimension 默认向量维度

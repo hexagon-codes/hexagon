@@ -7,9 +7,9 @@ import (
 	"sync"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/hexagon/core"
 	"github.com/hexagon-codes/hexagon/internal/util"
-	"github.com/hexagon-codes/hexagon/stream"
 )
 
 // TeamMode 团队工作模式

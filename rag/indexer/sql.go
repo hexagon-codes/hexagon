@@ -416,7 +416,13 @@ func NewQueryBuilder(table string) *QueryBuilder {
 }
 
 // Select 选择列
+//
+// 不传任何列名时退回默认的 "*", 避免 Build 生成非法 SQL "SELECT  FROM t"。
 func (b *QueryBuilder) Select(columns ...string) *QueryBuilder {
+	if len(columns) == 0 {
+		b.columns = []string{"*"}
+		return b
+	}
 	b.columns = columns
 	return b
 }

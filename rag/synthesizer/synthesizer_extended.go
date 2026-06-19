@@ -341,11 +341,9 @@ func (s *CompactAndRefineSynthesizer) Synthesize(ctx context.Context, query stri
 		opt(config)
 	}
 
-	// 计算总上下文长度
-	var contents []string
+	// 计算总上下文长度（用于在 compact / refine 策略间选择）
 	totalLength := 0
 	for _, doc := range docs {
-		contents = append(contents, doc.Content)
 		totalLength += len(doc.Content)
 	}
 
@@ -428,6 +426,13 @@ func NewAsyncTreeSummarizeSynthesizer(opts ...AsyncTreeOption) *AsyncTreeSummari
 	for _, opt := range opts {
 		opt(s)
 	}
+	// chunkSize 最小值守卫：合并阶段每轮必须至少把 2 个摘要合成 1 个，
+	// 才能保证 summaries 长度严格递减并最终收敛到 1。若 chunkSize<2
+	// （含 0、负数），分组结果与输入等长，合并循环将无法收敛甚至死循环，
+	// 故统一矫正为 2，与 TreeSummarizeSynthesizer 行为保持一致。
+	if s.chunkSize < 2 {
+		s.chunkSize = 2
+	}
 	return s
 }
 
@@ -479,6 +484,11 @@ func (s *AsyncTreeSummarizeSynthesizer) Synthesize(ctx context.Context, query st
 
 	// 递归并行合并
 	for len(summaries) > 1 {
+		// 合并循环每轮检查 ctx.Done()：不依赖 LLM 自行感知取消，
+		// 上下文取消后及时返回，避免在多层合并中继续无谓的 LLM 调用。
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		level++
 		var newSummaries []string
 		var mu sync.Mutex

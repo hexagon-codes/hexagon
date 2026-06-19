@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/ai-core/tokenizer"
 )
 
 // ============== 对话消息 ==============
@@ -138,7 +140,8 @@ func (c *ConversationAgent) Chat(ctx context.Context, userMessage string) (Outpu
 // buildContext 构建对话上下文字符串（需持锁调用）
 //
 // 从最近的消息向前填充，确保不超过 Token 预算。
-// Token 估算：每 4 个字符约 1 个 Token。
+// Token 估算复用 ai-core/tokenizer，按字符类型（中文/英文/特殊）分别估算，
+// 比按字节长度粗算更贴近真实 Token 数。
 func (c *ConversationAgent) buildContext() string {
 	msgs := c.messages
 
@@ -165,7 +168,8 @@ func (c *ConversationAgent) buildContext() string {
 		usedTokens := 0
 		startIdx := len(msgs)
 		for i := len(msgs) - 1; i >= 0; i-- {
-			tokens := len(msgs[i].Content) / 4
+			// 复用 ai-core/tokenizer 估算 Token 数（GPT-4 参数，含缓存计数器，无额外分配）
+			tokens := tokenizer.CountGPT4(msgs[i].Content)
 			if tokens == 0 {
 				tokens = 1
 			}

@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // WorkflowStatus 工作流状态
@@ -395,7 +397,7 @@ func (r *WorkflowRegistry) Remove(id string) {
 
 // generateExecutionID 生成执行实例 ID
 func generateExecutionID() string {
-	return fmt.Sprintf("exec-%d", time.Now().UnixNano())
+	return fmt.Sprintf("exec-%s", idgen.NanoID())
 }
 
 // NewExecution 创建执行实例

@@ -25,13 +25,16 @@ package agent
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/memory"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/ai-core/tool"
+	"github.com/hexagon-codes/hexagon/checkpoint"
 	"github.com/hexagon-codes/hexagon/core"
 	"github.com/hexagon-codes/hexagon/internal/util"
-	"github.com/hexagon-codes/hexagon/stream"
+	agentruntime "github.com/hexagon-codes/hexagon/runtime"
 )
 
 // Input 是 Agent 的输入
@@ -126,6 +129,47 @@ type Config struct {
 
 	// Verbose 是否输出详细日志
 	Verbose bool
+
+	// Middleware 注入到底层 runtime 的中间件链（按序在每步 BeforeLLM/AfterLLM/
+	// BeforeTool/AfterTool/Finalize 触发）。这是 runtime 中间件扩展点在 Agent 层的出口。
+	//
+	// 典型用途——接入运行时预算（token+墙钟+成本三维 fail-closed 单一强制点）：
+	//
+	//	ctrl := cost.NewController(cost.WithBudget(10.0))
+	//	agent := NewReAct(WithLLM(p), WithMiddleware(middleware.Budget{
+	//	    Limits: middleware.BudgetLimits{MaxCostUSD: 10.0, MaxTokens: 100000},
+	//	    Cost:   ctrl.BudgetCostFunc(), // 成本估算所有权仍在 cost.Controller
+	//	}))
+	//
+	// 为空时（默认）底层 runner 不挂任何中间件，行为不变。
+	//
+	// ⚠️ Budget 语义按 agent 类型不同：中间件按"每次 runtime run"作用。
+	//   - ReActAgent：单次多轮 run → Budget 是**整次执行的累计上限**。
+	//   - PlanExecute / Reflection：planner / step / replan / critique 各是一次独立 run
+	//     → Budget 退化为**每次 LLM 调用各自封顶**，非 agent 全程累计。
+	// logging / metrics / 自定义等无状态中间件不受此影响（按调用作用语义一致）。
+	// 需要"多 run agent 全程累计预算"时，须另行设计跨 run 共享累加器。
+	Middleware []agentruntime.Middleware
+
+	// Durable 可选：开启可持久化/可恢复执行（经 WithCheckpointer 设置）。
+	//
+	// 非 nil 时，Agent 的底层 runtime run 会在每步边界持久化快照，并支持经 Resume
+	// 从最近快照续跑。nil 时（默认）不触碰持久化、行为不变。
+	//
+	// 语义按 agent 类型：仅 ReActAgent（单次多轮 run）有干净的"整次执行可恢复"语义；
+	// 多 run agent（PlanExecute/Reflection）每次内部调用是独立 run，Durable 不适用其整体恢复。
+	Durable agentruntime.DurableExecution
+
+	// Strategy 可选：选择统一 agent loop 的执行策略（经 WithStrategy 设置）。
+	//
+	// 统一 runtime 的回合循环由 Strategy 定制（系统前缀 / 是否继续 / 收尾）。nil 时
+	// 默认 NoopStrategy（等价 ReAct）。借助 runtime/strategy 包可让同一个 ReActAgent
+	// 以 ReAct / PlanExecute / Reflection 三种策略在**同一个统一回合循环**上运行
+	// （提示词引导式），无需各自独立的 loop 实现。
+	//
+	// 注：独立的 PlanExecuteAgent / ReflectionAgent 是功能更丰富的多调用编排实现，
+	// 与本"统一 loop + 策略"轻量路径并存，互不影响。
+	Strategy agentruntime.Strategy
 }
 
 // Option 是 Agent 配置选项
@@ -201,6 +245,43 @@ func WithRole(role Role) Option {
 	}
 }
 
+// WithMiddleware 追加注入到底层 runtime 的中间件（runtime 中间件扩展点在 Agent 层的出口）。
+//
+// 最常见用途是接入运行时预算 middleware.Budget（token+墙钟+成本三维单一 fail-closed 强制点）；
+// 成本维度通过 cost.Controller.BudgetCostFunc() 注入，成本估算所有权仍在 security/cost，
+// Agent 不引入对 security/cost 的硬依赖。
+func WithMiddleware(mws ...agentruntime.Middleware) Option {
+	return func(c *Config) {
+		c.Middleware = append(c.Middleware, mws...)
+	}
+}
+
+// WithStrategy 选择统一 agent loop 的执行策略。
+//
+// 传入 runtime/strategy 包提供的策略（strategy.ReAct{} / strategy.PlanExecute{} /
+// strategy.Reflection{}），即可让 ReActAgent 以对应策略（提示词引导式）在同一个
+// 统一回合循环上运行。nil 时默认 ReAct 行为。
+func WithStrategy(s agentruntime.Strategy) Option {
+	return func(c *Config) {
+		c.Strategy = s
+	}
+}
+
+// WithCheckpointer 开启 Agent 的可持久化/可恢复执行，以给定 Checkpointer 作为存储后端。
+//
+// 设置后，ReActAgent.Run 会在每步边界持久化执行快照（命名空间为本次 run 的 run_id，
+// 经 Output.Metadata["run_id"] 返回），并可用该 run_id 调 ReActAgent.Resume 续跑或
+// 取回已完成结果。cp 为 nil 时本选项 no-op。
+//
+// 仅 ReActAgent（单次多轮 run）有干净的整次可恢复语义；多 run agent 不适用。
+func WithCheckpointer(cp checkpoint.Checkpointer) Option {
+	return func(c *Config) {
+		if cp != nil {
+			c.Durable = agentruntime.NewDurableExecution(cp)
+		}
+	}
+}
+
 // MemorySetter 允许外部替换 Agent 的记忆系统
 //
 // 用于共享记忆场景：Team 通过此接口将 Agent 原始记忆包装为 SharedMemoryProxy，
@@ -212,6 +293,11 @@ type MemorySetter interface {
 // BaseAgent 提供 Agent 的基础实现
 type BaseAgent struct {
 	config Config
+
+	// 单轮补全 runtime runner 在 agent 生命周期内复用（避免每次 LLM 调用重新构造）。
+	// 由 PlanExecute/Reflection 的内部补全经 completeWithRuntime 使用；惰性构造、并发安全。
+	runnerOnce sync.Once
+	runner     *agentruntime.DefaultRunner
 }
 
 // SetMemory 替换 Agent 的记忆系统

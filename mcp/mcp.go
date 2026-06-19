@@ -268,8 +268,11 @@ func (c *Client) Initialize(ctx context.Context) error {
 		if caps, ok := result["capabilities"]; ok {
 			capsBytes, _ := json.Marshal(caps)
 			var serverCaps ServerCapabilities
-			json.Unmarshal(capsBytes, &serverCaps)
-			c.serverCapabilities = &serverCaps
+			// 守卫 Unmarshal 错误：畸形 capabilities（如字符串而非对象）解析失败时
+			// 不应把半解析/零值的 caps 写入 serverCapabilities，对齐 transport.go 行为。
+			if err := json.Unmarshal(capsBytes, &serverCaps); err == nil {
+				c.serverCapabilities = &serverCaps
+			}
 		}
 	}
 

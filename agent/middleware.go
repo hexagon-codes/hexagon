@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexagon/internal/util"
+	"github.com/hexagon-codes/toolkit/util/retry"
 )
 
 // AgentHandler Agent 处理函数
@@ -310,35 +311,40 @@ const maxBackoffDuration = 30 * time.Second
 func RetryMiddleware(maxRetries int, backoff time.Duration) AgentMiddleware {
 	return func(next AgentHandler) AgentHandler {
 		return func(ctx context.Context, input Input) (Output, error) {
+			var output Output
 			var lastErr error
 
-			for attempt := 0; attempt <= maxRetries; attempt++ {
-				output, err := next(ctx, input)
-				if err == nil {
-					return output, nil
+			// 复用 toolkit/util/retry 的指数退避与上下文控制，
+			// 与 llm/batch、mcp/reconnect、a2a/push 保持一致。
+			// 退避等价于原实现：backoff * 2^attempt，封顶 maxBackoffDuration。
+			//   - Attempts = maxRetries+1（1 次初始 + maxRetries 次重试）
+			//   - Delay = backoff，Multiplier = 2，DelayType = ExponentialBackoff
+			//   - MaxDelay = maxBackoffDuration
+			err := retry.DoWithContext(ctx, func() error {
+				out, err := next(ctx, input)
+				if err != nil {
+					lastErr = err
+					return err
 				}
-
-				lastErr = err
-
-				// 检查是否应该重试
-				if attempt < maxRetries {
-					// 计算指数退避时间：backoff * 2^attempt
-					waitDuration := backoff * (1 << uint(attempt))
-					// 限制最大退避时间
-					if waitDuration > maxBackoffDuration {
-						waitDuration = maxBackoffDuration
-					}
-
-					// 检查上下文是否已取消
-					select {
-					case <-ctx.Done():
-						return Output{}, ctx.Err()
-					case <-time.After(waitDuration):
-						// 继续重试
-					}
-				}
+				output = out
+				return nil
+			},
+				retry.Attempts(maxRetries+1),
+				retry.Delay(backoff),
+				retry.MaxDelay(maxBackoffDuration),
+				retry.Multiplier(2),
+				retry.DelayType(retry.ExponentialBackoff),
+			)
+			if err == nil {
+				return output, nil
 			}
 
+			// 上下文取消时直接返回 ctx.Err()，与原实现一致。
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return Output{}, ctxErr
+			}
+
+			// 保留原始错误的 %w 包装，确保调用方仍可 errors.Is/As。
 			return Output{}, fmt.Errorf("all %d retries failed: %w", maxRetries, lastErr)
 		}
 	}

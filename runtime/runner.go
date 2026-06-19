@@ -21,6 +21,16 @@ type Config struct {
 	ToolExecutor     ToolExecutor
 	Middleware       []Middleware
 	DefaultMaxTurns  int
+
+	// Durable 可选：开启可持久化/可恢复执行。
+	//
+	// 非 nil 时，Runner 在每个步边界把执行快照 Save 到该端口（详见 durable.go 的
+	// DurableExecution 契约），并支持 Resume 从最近快照续跑。nil 时（默认）完全不
+	// 触碰持久化，行为与无此字段时一致。
+	//
+	// 持久化以 Request.ID 作为 RunID（命名空间）；Request.ID 为空时 Save 静默跳过
+	// （无可供恢复的标识符）。Resume 必须由调用方提供同一 RunID。
+	Durable DurableExecution
 }
 
 // DefaultRunner is the default runtime kernel implementation.
@@ -29,6 +39,7 @@ type DefaultRunner struct {
 	toolExecutor    ToolExecutor
 	middleware      []Middleware
 	defaultMaxTurns int
+	durable         DurableExecution
 }
 
 // NewRunner creates a runtime runner.
@@ -42,6 +53,7 @@ func NewRunner(cfg Config) *DefaultRunner {
 		toolExecutor:    cfg.ToolExecutor,
 		middleware:      append([]Middleware(nil), cfg.Middleware...),
 		defaultMaxTurns: maxTurns,
+		durable:         cfg.Durable,
 	}
 }
 
@@ -68,19 +80,78 @@ func (r *DefaultRunner) Stream(ctx context.Context, req Request, sink EventSink)
 }
 
 func (r *DefaultRunner) runStateMachine(ctx context.Context, req Request, sink EventSink) (*Result, error) {
+	return r.execute(ctx, req, sink, nil, 0, nil)
+}
+
+// Resume 从某次执行最近的持久化快照续跑（需在 Config.Durable 配置持久化端口）。
+//
+// 行为：
+//   - 未配置 Durable → ErrNoDurable。
+//   - runID 无任何快照 → ErrNoSnapshot。
+//   - 命中的快照已是终态（Final）→ 该次执行早已完成，直接返回其最终结果，不重跑。
+//   - 否则用快照重建 State，从"快照步号 + 1"继续状态机；req 提供 provider 选择 /
+//     工具 / 策略 / 限额等运行配置（消息历史以快照为准）。
+func (r *DefaultRunner) Resume(ctx context.Context, runID string, req Request, sink EventSink) (*Result, error) {
+	if r.durable == nil {
+		return nil, ErrNoDurable
+	}
+	snap, ok, err := r.durable.Load(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrNoSnapshot
+	}
+	if snap.Final {
+		return snapshotResult(snap), nil
+	}
+	if req.StreamMode == "" {
+		req.StreamMode = StreamModeEvents
+	}
+	// 步内进度/意图快照（Pending 非空）= 该步工具已发起但未确认全部完成（崩溃窗口）。
+	if len(snap.Pending) > 0 {
+		// 已完成工具（结果已在快照 ToolCalls）按 ID 跳过；仅「在途未完成的 Unsafe 工具」
+		// 才 fail-closed —— 把 fail-closed 窗口从「整步含任一 Unsafe」收窄到「真正在途的」。
+		done := make(map[string]bool, len(snap.ToolCalls))
+		for _, rec := range snap.ToolCalls {
+			if rec.ID != "" {
+				done[rec.ID] = true
+			}
+		}
+		if UnsafeNotDone(snap.Pending, done) {
+			return nil, ErrUnsafeReplay
+		}
+		// 精确续跑：补跑未完成的工具（execute 在进入循环前完成该步），再从下一步继续。
+		return r.execute(ctx, req, sink, snap.RestoreState(), snap.Step+1, snap.Pending)
+	}
+	return r.execute(ctx, req, sink, snap.RestoreState(), snap.Step+1, nil)
+}
+
+// execute 是状态机核心：seed 为 nil 时从 req 全新开始（startTurn=0）；seed 非 nil 时
+// 从恢复出的 State 续跑（startTurn=快照步号+1）。fresh 路径行为与重构前完全一致。
+func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink, seed *State, startTurn int, resumePending []PendingTool) (*Result, error) {
 	if r.selector == nil {
 		return nil, ErrNoProvider
 	}
 	emitter := newRunEmitter(req, sink)
 	strategy := strategyOrDefault(req.Strategy)
-	state := &State{
-		Request:    req,
-		Messages:   append([]llm.Message(nil), req.Messages...),
-		Attributes: map[string]any{},
-		emit:       emitter.emit,
-	}
-	if prefix := strings.TrimSpace(strategy.BuildSystemPrefix(ctx, req)); prefix != "" {
-		state.Messages = prependSystemPrefix(state.Messages, prefix)
+
+	var state *State
+	if seed != nil {
+		// resume：消息历史已含 system prefix（首跑时已 prepend 并随快照持久化），不重复注入。
+		state = seed
+		state.Request = req
+		state.emit = emitter.emit
+	} else {
+		state = &State{
+			Request:    req,
+			Messages:   append([]llm.Message(nil), req.Messages...),
+			Attributes: map[string]any{},
+			emit:       emitter.emit,
+		}
+		if prefix := strings.TrimSpace(strategy.BuildSystemPrefix(ctx, req)); prefix != "" {
+			state.Messages = prependSystemPrefix(state.Messages, prefix)
+		}
 	}
 
 	selection, err := r.selector.Select(ctx, req)
@@ -112,7 +183,32 @@ func (r *DefaultRunner) runStateMachine(ctx context.Context, req Request, sink E
 		maxTurns = r.defaultMaxTurns
 	}
 
-	for state.Turn = 0; state.Turn < maxTurns; state.Turn++ {
+	// runID 作为持久化命名空间（仅 Durable 已配置且 Request.ID 非空时生效）。
+	runID := requestID(req)
+
+	// 续跑步内中断：在进入主循环前，先精确补跑被中断步的未完成工具（按 ID 跳过已完成），
+	// 完成该步后由下方循环从 startTurn（=中断步+1）继续。主循环本身不受影响。
+	if len(resumePending) > 0 {
+		var remaining []llm.ToolCall
+		for _, p := range resumePending {
+			remaining = append(remaining, p.Call)
+		}
+		// executeToolCalls 内部按 ID 跳过已完成的，故可传全部 pending 调用。
+		if err := r.executeToolCalls(ctx, state, remaining, emitter, runID, resumePending); err != nil {
+			_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("resume_tool_execution", err)})
+			return nil, err
+		}
+		if err := strategy.AfterLLM(ctx, state); err != nil {
+			_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("strategy_after_llm", err)})
+			return nil, err
+		}
+		// 被中断步在此完成 —— 落完成快照（同步号覆盖进度/意图快照，Pending 清空）。
+		if err := r.saveSnapshot(ctx, state, runID, emitter); err != nil {
+			return nil, err
+		}
+	}
+
+	for state.Turn = startTurn; state.Turn < maxTurns; state.Turn++ {
 		if err := ctx.Err(); err != nil {
 			_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("context_canceled", err)})
 			return nil, err
@@ -208,12 +304,25 @@ func (r *DefaultRunner) runStateMachine(ctx context.Context, req Request, sink E
 			ToolCalls: toolCallRefs(resp.ToolCalls),
 		})
 
-		if err := r.executeToolCalls(ctx, state, resp.ToolCalls, emitter); err != nil {
+		// Durable exactly-once：工具执行**前**先落「意图快照」（含完整 pending 工具调用
+		// 与重放安全性，消息已含本轮 assistant 工具调用消息）。崩溃后 Resume 据此精确
+		// 续跑：按 ID 跳过已完成工具、补跑未完成工具，仅对在途 Unsafe 工具 fail-closed。
+		// 步正常完成时下方完成快照以同步号覆盖它。
+		pending := classifyPending(r.toolExecutor, resp.ToolCalls)
+		if err := r.savePendingProgress(ctx, state, runID, pending, emitter); err != nil {
+			return nil, err
+		}
+
+		if err := r.executeToolCalls(ctx, state, resp.ToolCalls, emitter, runID, pending); err != nil {
 			_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("tool_execution", err)})
 			return nil, err
 		}
 		if err := strategy.AfterLLM(ctx, state); err != nil {
 			_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("strategy_after_llm", err)})
+			return nil, err
+		}
+		// 步边界持久化（本步工具已执行、未终态）—— 供进程中断后从此步之后续跑。
+		if err := r.saveSnapshot(ctx, state, runID, emitter); err != nil {
 			return nil, err
 		}
 		if !strategy.ShouldContinue(ctx, state) {
@@ -232,6 +341,11 @@ func (r *DefaultRunner) runStateMachine(ctx context.Context, req Request, sink E
 	}
 	if err := runFinalize(ctx, r.middleware, state); err != nil {
 		_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("middleware_finalize", err)})
+		return nil, err
+	}
+	// 终态持久化（Final=true，含 Finalize/middleware 后处理后的最终结果）—— Resume
+	// 命中该快照时直接返回结果、不重跑。
+	if err := r.saveSnapshot(ctx, state, runID, emitter); err != nil {
 		return nil, err
 	}
 	result := stateResult(state)
@@ -301,8 +415,19 @@ func streamError(stream *llm.Stream) error {
 	}
 }
 
-func (r *DefaultRunner) executeToolCalls(ctx context.Context, state *State, calls []llm.ToolCall, emitter *runEmitter) error {
+func (r *DefaultRunner) executeToolCalls(ctx context.Context, state *State, calls []llm.ToolCall, emitter *runEmitter, runID string, pending []PendingTool) error {
+	// 已完成工具（结果已在 state.ToolCalls）按 ID 跳过 —— 续跑时实现 per-tool 幂等：
+	// 已执行过的工具不再重复执行（含其副作用）。
+	done := make(map[string]bool, len(state.ToolCalls))
+	for _, rec := range state.ToolCalls {
+		if rec.ID != "" {
+			done[rec.ID] = true
+		}
+	}
 	for _, call := range calls {
+		if call.ID != "" && done[call.ID] {
+			continue // 已完成，跳过（per-tool exactly-once）
+		}
 		if err := runBeforeTool(ctx, r.middleware, state, call); err != nil {
 			return err
 		}
@@ -338,6 +463,10 @@ func (r *DefaultRunner) executeToolCalls(ctx context.Context, state *State, call
 			return err
 		}
 		if err := emitter.emit(ctx, Event{Type: EventToolCallCompleted, State: state, ToolCall: &call, ToolResult: &result}); err != nil {
+			return err
+		}
+		// 逐工具落进度快照（Durable）：记录本工具已完成，使崩溃后 Resume 能跳过它。
+		if err := r.savePendingProgress(ctx, state, runID, pending, emitter); err != nil {
 			return err
 		}
 	}
@@ -395,6 +524,66 @@ func stateResult(state *State) *Result {
 		ToolCalls: append([]ToolCallRecord(nil), state.ToolCalls...),
 		Usage:     state.Usage,
 		Metadata:  state.Attributes,
+	}
+}
+
+// saveSnapshot 在步边界持久化执行快照。仅当 Config.Durable 已配置且 runID 非空时生效。
+//
+// 持久化失败按 fatal 处理并上报 —— 调用方已显式 opt-in 持久化，Save 失败意味着该步
+// 不可恢复，与其它步边界操作（middleware/strategy 失败）一致地中断执行，避免静默
+// 产出"看似成功却无法 Resume"的运行。
+func (r *DefaultRunner) saveSnapshot(ctx context.Context, state *State, runID string, emitter *runEmitter) error {
+	if r.durable == nil || runID == "" {
+		return nil
+	}
+	if err := r.durable.Save(ctx, SnapshotState(state, runID)); err != nil {
+		runErr := fmt.Errorf("durable save: %w", err)
+		_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: runErr, RuntimeError: runtimeError("durable_save", runErr)})
+		return runErr
+	}
+	return nil
+}
+
+// classifyPending 把一组待执行工具调用按重放安全性分类。
+//
+// 执行器实现 SideEffectClassifier 时按其声明，否则一律按 SideEffectUnsafe（保守默认）。
+func classifyPending(exec ToolExecutor, calls []llm.ToolCall) []PendingTool {
+	classifier, _ := exec.(SideEffectClassifier)
+	out := make([]PendingTool, len(calls))
+	for i, c := range calls {
+		se := SideEffectUnsafe
+		if classifier != nil {
+			se = classifier.SideEffectOf(c)
+		}
+		out[i] = PendingTool{Call: c, SideEffect: se}
+	}
+	return out
+}
+
+// savePendingProgress 持久化「步内进度快照」：当前消息/工具结果 + 仍登记的 pending
+// 列表。逐工具完成后调用，使崩溃后 Resume 能按 ToolCalls 里已记录的 ID 跳过已完成
+// 工具，只补跑未完成的（per-tool exactly-once）。仅 Durable + runID 非空时生效。
+func (r *DefaultRunner) savePendingProgress(ctx context.Context, state *State, runID string, pending []PendingTool, emitter *runEmitter) error {
+	if r.durable == nil || runID == "" {
+		return nil
+	}
+	snap := SnapshotState(state, runID)
+	snap.Pending = pending
+	if err := r.durable.Save(ctx, snap); err != nil {
+		runErr := fmt.Errorf("durable save progress: %w", err)
+		_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: runErr, RuntimeError: runtimeError("durable_save_progress", runErr)})
+		return runErr
+	}
+	return nil
+}
+
+
+// snapshotResult 由终态快照重建最终结果（Resume 命中 Final 快照时返回，不重跑）。
+func snapshotResult(snap Snapshot) *Result {
+	return &Result{
+		Content:   snap.FinalText,
+		ToolCalls: append([]ToolCallRecord(nil), snap.ToolCalls...),
+		Usage:     snap.Usage,
 	}
 }
 

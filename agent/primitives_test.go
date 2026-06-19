@@ -11,9 +11,9 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/memory"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/ai-core/tool"
 	"github.com/hexagon-codes/hexagon/core"
-	"github.com/hexagon-codes/hexagon/stream"
 )
 
 // ============== Mock Agent ==============

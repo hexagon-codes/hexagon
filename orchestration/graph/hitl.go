@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // ============== HITL 核心类型 ==============
@@ -281,7 +283,7 @@ func (n *HITLNode[S]) Execute(ctx context.Context, state S) (S, error) {
 	// 构建请求
 	request := n.RequestBuilder(state)
 	if request.ID == "" {
-		request.ID = fmt.Sprintf("hitl_%s_%d", n.ID, time.Now().UnixNano())
+		request.ID = fmt.Sprintf("hitl_%s_%s", n.ID, idgen.NanoID())
 	}
 	request.NodeID = n.ID
 	request.Type = n.Type

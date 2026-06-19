@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // WorkflowBuilder 工作流构建器
@@ -193,7 +195,7 @@ func (b *WorkflowBuilder) MustBuild() *Workflow {
 
 // generateWorkflowID 生成工作流 ID
 func generateWorkflowID() string {
-	return fmt.Sprintf("wf-%d", time.Now().UnixNano())
+	return fmt.Sprintf("wf-%s", idgen.NanoID())
 }
 
 // ============== ConditionalBuilder ==============

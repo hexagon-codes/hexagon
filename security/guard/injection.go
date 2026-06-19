@@ -3,6 +3,7 @@ package guard
 import (
 	"context"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -236,6 +237,76 @@ type piiPattern struct {
 	name    string
 	pattern *regexp.Regexp
 	redact  func(string) string
+	// valid 可选的有效性校验函数：仅当返回 true 时该匹配才被视为真正的 PII。
+	// 用于卡号类模式做 Luhn 校验，确保 Check 与 Redact 共用同一套判定逻辑，
+	// 避免"被判为 PII 却原样泄漏"的安全漏洞（回归: B11）。
+	// 为 nil 时表示无需额外校验，匹配即命中。
+	valid func(string) bool
+}
+
+// matchedRegion 单次正则命中的区间及其归属模式，用于跨模式重叠消解。
+type matchedRegion struct {
+	start   int
+	end     int
+	pattern *piiPattern
+}
+
+// collectPIIRegions 在 input 上运行所有 PII 模式，收集通过有效性校验的命中区间，
+// 并消解重叠：同一字符区间只允许一个模式生效。
+//
+// 重叠消解规则（回归: B9/B10）：
+//   - 优先保留更长的匹配（更长通常意味着更精确，如 id_card_cn 比内部的 phone_cn 长）；
+//   - 长度相同时，保留 patterns 切片中靠前的模式（声明顺序即优先级）。
+//
+// 这样可避免 phone_cn/ssn_us 把身份证号切碎，也避免多个模式对同一区间重复替换。
+// 返回的区间按 start 升序排列且互不重叠，可直接用于一次性脱敏或检测。
+func (g *PIIGuard) collectPIIRegions(input string) []matchedRegion {
+	var regions []matchedRegion
+
+	// 第一步：收集所有通过有效性校验的命中。
+	for i := range g.patterns {
+		p := g.patterns[i]
+		matches := p.pattern.FindAllStringIndex(input, -1)
+		for _, m := range matches {
+			// 卡号等模式可能携带 Luhn 校验，校验失败则不视为 PII，
+			// 保证 Check 与 Redact 判定一致。
+			if p.valid != nil && !p.valid(input[m[0]:m[1]]) {
+				continue
+			}
+			regions = append(regions, matchedRegion{start: m[0], end: m[1], pattern: p})
+		}
+	}
+
+	// 第二步：消解重叠。按"起点升序、长度降序、声明顺序靠前"排序，
+	// 然后贪心选择互不重叠的区间。
+	patternRank := make(map[*piiPattern]int, len(g.patterns))
+	for i := range g.patterns {
+		patternRank[g.patterns[i]] = i
+	}
+	sort.SliceStable(regions, func(a, b int) bool {
+		ra, rb := regions[a], regions[b]
+		if ra.start != rb.start {
+			return ra.start < rb.start
+		}
+		la, lb := ra.end-ra.start, rb.end-rb.start
+		if la != lb {
+			return la > lb // 更长的优先
+		}
+		return patternRank[ra.pattern] < patternRank[rb.pattern] // 声明靠前的优先
+	})
+
+	var resolved []matchedRegion
+	lastEnd := -1
+	for _, r := range regions {
+		if r.start < lastEnd {
+			// 与已选区间重叠：但排序保证此处被跳过的是更短/更低优先级的匹配。
+			// 仍需处理"起点不同但区间交叉"的情况，统一以 lastEnd 为界跳过。
+			continue
+		}
+		resolved = append(resolved, r)
+		lastEnd = r.end
+	}
+	return resolved
 }
 
 // NewPIIGuard 创建 PII 守卫
@@ -283,17 +354,17 @@ func (g *PIIGuard) Check(ctx context.Context, input string) (*CheckResult, error
 	var findings []Finding
 	var maxScore float64 = 0
 
-	for _, p := range g.patterns {
-		matches := p.pattern.FindAllStringIndex(input, -1)
-		for _, match := range matches {
-			findings = append(findings, Finding{
-				Type:     p.name,
-				Text:     "[REDACTED]", // 不输出实际 PII
-				Position: Position{Start: match[0], End: match[1]},
-				Severity: "high",
-			})
-			maxScore = 0.9
-		}
+	// 使用与 Redact 相同的区间收集逻辑：
+	//   - 卡号类模式经过 Luhn 校验，未通过则不计入 PII（回归: B11，保证检测与脱敏一致）；
+	//   - 重叠区间已消解，避免同一片敏感串被多个模式重复上报（回归: B9/B10）。
+	for _, region := range g.collectPIIRegions(input) {
+		findings = append(findings, Finding{
+			Type:     region.pattern.name,
+			Text:     "[REDACTED]", // 不输出实际 PII
+			Position: Position{Start: region.start, End: region.end},
+			Severity: "high",
+		})
+		maxScore = 0.9
 	}
 
 	passed := maxScore < g.config.Threshold
@@ -313,12 +384,34 @@ func (g *PIIGuard) Check(ctx context.Context, input string) (*CheckResult, error
 }
 
 // Redact 脱敏处理
+//
+// 采用"先收集互斥区间、再一次性替换"的方式，替代过去对每个模式独立做
+// ReplaceAllStringFunc 的多遍替换。多遍替换会因模式相互遮蔽（如 phone_cn
+// 先把身份证中间切碎）导致输出错乱（回归: B9/B10）。
+// 卡号类模式的 Luhn 校验在区间收集阶段完成，与 Check 共用同一判定，
+// 确保"被判为 PII 的串脱敏后绝不原样残留"（回归: B11）。
 func (g *PIIGuard) Redact(input string) string {
-	result := input
-	for _, p := range g.patterns {
-		result = p.pattern.ReplaceAllStringFunc(result, p.redact)
+	return g.redactRegions(input, g.collectPIIRegions(input))
+}
+
+// redactRegions 按给定的互不重叠区间（须按 start 升序）对 input 执行一次性脱敏。
+func (g *PIIGuard) redactRegions(input string, regions []matchedRegion) string {
+	if len(regions) == 0 {
+		return input
 	}
-	return result
+	var b strings.Builder
+	last := 0
+	for _, r := range regions {
+		if r.start < last {
+			// 防御性跳过：理论上区间已互斥，此处仅防止越界。
+			continue
+		}
+		b.WriteString(input[last:r.start])
+		b.WriteString(r.pattern.redact(input[r.start:r.end]))
+		last = r.end
+	}
+	b.WriteString(input[last:])
+	return b.String()
 }
 
 // IsInputGuard 标记为输入守卫
@@ -328,12 +421,37 @@ var _ InputGuard = (*PIIGuard)(nil)
 
 // defaultPIIPatterns 默认 PII 模式
 func defaultPIIPatterns() []*piiPattern {
+	// 注意：模式声明顺序即重叠消解的优先级（长度相同时靠前者胜）。
+	// id_card_cn 必须排在 phone_cn / ssn_us 之前，避免身份证号被这两个
+	// 较短模式遮蔽切碎（回归: B9）。
 	return []*piiPattern{
 		// 邮箱
 		{
 			name:    "email",
 			pattern: regexp.MustCompile(`[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`),
 			redact:  maskEmail,
+		},
+		// 身份证号（中国）—— 18 位，须先于 phone_cn/ssn_us 命中以免被切碎
+		{
+			name:    "id_card_cn",
+			pattern: regexp.MustCompile(`[1-9]\d{5}(18|19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{3}[\dXx]`),
+			redact:  maskIDCard,
+		},
+		// 银行卡号（16-19 位纯数字，使用 Luhn 校验减少误报）
+		// 须先于 credit_card 命中，使纯数字卡号走 bank_card 脱敏规则（回归: B10）。
+		{
+			name:    "bank_card",
+			pattern: regexp.MustCompile(`\b\d{16,19}\b`),
+			redact:  maskBankCard,
+			valid:   func(s string) bool { return validateLuhn(extractDigits(s)) },
+		},
+		// 信用卡号（必须含至少一个分隔符的分组格式，使用 Luhn 校验）
+		// 要求分隔符以与 bank_card 明确互斥：纯数字交由 bank_card 处理（回归: B10）。
+		{
+			name:    "credit_card",
+			pattern: regexp.MustCompile(`\d{4}[\s-]\d{4}[\s-]\d{4}[\s-]\d{4}`),
+			redact:  maskCreditCard,
+			valid:   func(s string) bool { return validateLuhn(extractDigits(s)) },
 		},
 		// 手机号（中国）
 		{
@@ -346,24 +464,6 @@ func defaultPIIPatterns() []*piiPattern {
 			name:    "phone_intl",
 			pattern: regexp.MustCompile(`\+\d{1,3}[- ]?\d{6,14}`),
 			redact:  maskPhone,
-		},
-		// 身份证号（中国）
-		{
-			name:    "id_card_cn",
-			pattern: regexp.MustCompile(`[1-9]\d{5}(18|19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{3}[\dXx]`),
-			redact:  maskIDCard,
-		},
-		// 信用卡号（带分隔符格式，使用 Luhn 校验）
-		{
-			name:    "credit_card",
-			pattern: regexp.MustCompile(`\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}`),
-			redact:  maskCreditCard,
-		},
-		// 银行卡号（16-19 位纯数字，使用 Luhn 校验减少误报）
-		{
-			name:    "bank_card",
-			pattern: regexp.MustCompile(`\b\d{16,19}\b`),
-			redact:  maskBankCard,
 		},
 		// IP 地址
 		{
@@ -536,11 +636,17 @@ func RedactPIISelective(text string, types ...string) string {
 		typeSet[t] = true
 	}
 
-	result := text
-	for _, p := range guard.patterns {
-		if len(typeSet) == 0 || typeSet[p.name] {
-			result = p.pattern.ReplaceAllStringFunc(result, p.redact)
+	// 复用统一的区间收集（含 Luhn 校验与重叠消解），再按类型过滤，
+	// 保证选择性脱敏与全量脱敏使用同一套判定逻辑（回归: B9/B10/B11）。
+	regions := guard.collectPIIRegions(text)
+	if len(typeSet) != 0 {
+		filtered := regions[:0]
+		for _, r := range regions {
+			if typeSet[r.pattern.name] {
+				filtered = append(filtered, r)
+			}
 		}
+		regions = filtered
 	}
-	return result
+	return guard.redactRegions(text, regions)
 }

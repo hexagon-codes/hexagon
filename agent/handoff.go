@@ -7,6 +7,7 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/tool"
+	"github.com/hexagon-codes/toolkit/lang/mapx"
 )
 
 // Handoff 交接结果
@@ -38,7 +39,7 @@ type TransferToInput struct {
 }
 
 // TransferTool 创建转交工具
-// 借鉴 OpenAI Swarm 的设计
+// 通过工具调用触发的 Agent 交接（handoff）机制。
 func TransferTo(target Agent) tool.Tool {
 	return &transferTool{
 		target: target,
@@ -119,7 +120,7 @@ func (h *HandoffHandler) ProcessToolResult(ctx context.Context, result tool.Resu
 	return &handoff, nil
 }
 
-// SwarmRunner 模仿 OpenAI Swarm 的运行器
+// SwarmRunner 多 Agent 交接（handoff）运行器
 // 自动处理 Agent 之间的交接
 type SwarmRunner struct {
 	// InitialAgent 初始 Agent
@@ -360,11 +361,7 @@ func (s *SafeContextVariables) Len() int {
 func (s *SafeContextVariables) Keys() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	keys := make([]string, 0, len(s.data))
-	for k := range s.data {
-		keys = append(keys, k)
-	}
-	return keys
+	return mapx.Keys(s.data)
 }
 
 // safeContextVariablesKey context key for SafeContextVariables

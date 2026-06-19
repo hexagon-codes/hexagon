@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // Interaction 表示一次 LLM 交互
@@ -154,7 +155,7 @@ func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 
 	// 录制交互
 	interaction := Interaction{
-		ID:          fmt.Sprintf("int_%d", time.Now().UnixNano()),
+		ID:          fmt.Sprintf("int_%s", idgen.NanoID()),
 		Request:     req,
 		Duration:    time.Since(start),
 		Timestamp:   start,

@@ -27,19 +27,36 @@ package client
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"sync"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/ai-core/tool"
-	"github.com/hexagon-codes/hexagon/advisor"
-	"github.com/hexagon-codes/hexagon/stream"
+	"github.com/hexagon-codes/toolkit/lang/conv"
 )
+
+// ErrNoProvider 表示 ChatClient 没有可用的 LLM Provider。
+//
+// 当通过 Chat() 便捷入口创建客户端但未事先调用 SetDefaultProvider 设置默认
+// Provider 时，Call/CallStream 会返回包装了本错误的结果，而非直接 nil 解引用 panic。
+var ErrNoProvider = fmt.Errorf("client: 未配置 LLM Provider")
 
 // ============== ChatClient ==============
 
 // ChatClient Fluent 风格的聊天客户端
+//
+// 线程安全：ChatClient 内部使用 mu 保护共享可变的 *chatConfig，因此在同一实例上
+// 并发调用 Fluent 方法（如 User/Assistant/Metadata）不会触发 "concurrent map writes"
+// 之类的 fatal error。但 Fluent builder 语义本身是"在单实例上累积状态"，并发写入的
+// 最终状态顺序仍不确定，建议典型用法是每个 goroutine 使用独立的 ChatClient 实例。
 type ChatClient struct {
 	provider llm.Provider
-	config   *chatConfig
+
+	// mu 保护 config 的并发读写，避免同一实例上并发 Fluent 调用触发数据竞争。
+	mu     sync.Mutex
+	config *chatConfig
 }
 
 type chatConfig struct {
@@ -56,9 +73,6 @@ type chatConfig struct {
 
 	// 工具
 	tools []tool.Tool
-
-	// 切面
-	advisors []advisor.Advisor
 
 	// 流式
 	streaming bool
@@ -82,18 +96,24 @@ func NewChatClient(provider llm.Provider) *ChatClient {
 
 // Model 设置模型
 func (c *ChatClient) Model(model string) *ChatClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.config.model = model
 	return c
 }
 
 // System 设置系统提示
 func (c *ChatClient) System(prompt string) *ChatClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.config.systemPrompt = prompt
 	return c
 }
 
 // User 添加用户消息
 func (c *ChatClient) User(content string) *ChatClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.config.messages = append(c.config.messages, llm.Message{
 		Role:    llm.RoleUser,
 		Content: content,
@@ -103,6 +123,8 @@ func (c *ChatClient) User(content string) *ChatClient {
 
 // Assistant 添加助手消息
 func (c *ChatClient) Assistant(content string) *ChatClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.config.messages = append(c.config.messages, llm.Message{
 		Role:    llm.RoleAssistant,
 		Content: content,
@@ -111,13 +133,21 @@ func (c *ChatClient) Assistant(content string) *ChatClient {
 }
 
 // Messages 设置消息列表
+//
+// 注意：此处对传入切片做防御性拷贝（defensive copy），避免 ChatClient 与调用方共享
+// 同一底层数组，从而杜绝后续 User()/Assistant() 的 append 写穿调用方原始切片的别名副作用。
 func (c *ChatClient) Messages(messages []llm.Message) *ChatClient {
-	c.config.messages = messages
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// 复制一份独立的底层数组，切断与调用方切片的别名关系。
+	c.config.messages = append([]llm.Message(nil), messages...)
 	return c
 }
 
 // AddMessage 添加消息
 func (c *ChatClient) AddMessage(role llm.Role, content string) *ChatClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.config.messages = append(c.config.messages, llm.Message{
 		Role:    role,
 		Content: content,
@@ -127,48 +157,56 @@ func (c *ChatClient) AddMessage(role llm.Role, content string) *ChatClient {
 
 // Tools 设置工具
 func (c *ChatClient) Tools(tools ...tool.Tool) *ChatClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.config.tools = tools
 	return c
 }
 
 // Temperature 设置温度
 func (c *ChatClient) Temperature(temp float64) *ChatClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.config.temperature = &temp
 	return c
 }
 
 // MaxTokens 设置最大 token 数
 func (c *ChatClient) MaxTokens(max int) *ChatClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.config.maxTokens = max
 	return c
 }
 
 // TopP 设置 TopP
 func (c *ChatClient) TopP(p float64) *ChatClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.config.topP = &p
 	return c
 }
 
 // Stop 设置停止序列
 func (c *ChatClient) Stop(sequences ...string) *ChatClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.config.stop = sequences
-	return c
-}
-
-// Advisors 设置切面
-func (c *ChatClient) Advisors(advisors ...advisor.Advisor) *ChatClient {
-	c.config.advisors = advisors
 	return c
 }
 
 // Metadata 设置元数据
 func (c *ChatClient) Metadata(key string, value any) *ChatClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.config.metadata[key] = value
 	return c
 }
 
 // Stream 启用流式输出
 func (c *ChatClient) Stream() *ChatClient {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.config.streaming = true
 	return c
 }
@@ -200,11 +238,19 @@ type ChatChunk struct {
 
 // Call 执行调用
 func (c *ChatClient) Call(ctx context.Context) (*ChatResponse, error) {
-	// 构建请求
-	req := c.buildRequest()
+	// 入口校验 Provider，避免默认 Provider 未设置时直接 nil 解引用 panic。
+	if c.provider == nil {
+		return nil, ErrNoProvider
+	}
+
+	c.mu.Lock()
+	// 构建请求（持锁读取 config，避免与并发 Fluent 写竞争）。
+	req := c.buildRequestLocked()
+	streaming := c.config.streaming
+	c.mu.Unlock()
 
 	// 如果是流式
-	if c.config.streaming {
+	if streaming {
 		return c.callStreaming(ctx, req)
 	}
 
@@ -214,8 +260,17 @@ func (c *ChatClient) Call(ctx context.Context) (*ChatResponse, error) {
 
 // CallStream 流式调用
 func (c *ChatClient) CallStream(ctx context.Context) (*StreamResponse, error) {
+	// 入口校验 Provider，避免默认 Provider 未设置时直接 nil 解引用 panic。
+	if c.provider == nil {
+		return nil, ErrNoProvider
+	}
+
+	c.mu.Lock()
 	c.config.streaming = true
-	req := c.buildRequest()
+	req := c.buildRequestLocked()
+	// 拷贝 metadata，避免返回值与内部 config.metadata 共享同一 map 引用。
+	meta := copyMetadata(c.config.metadata)
+	c.mu.Unlock()
 
 	streamResp, err := c.provider.Stream(ctx, req)
 	if err != nil {
@@ -239,12 +294,14 @@ func (c *ChatClient) CallStream(ctx context.Context) (*StreamResponse, error) {
 
 	return &StreamResponse{
 		Stream:   reader,
-		Metadata: c.config.metadata,
+		Metadata: meta,
 	}, nil
 }
 
-// buildRequest 构建请求
-func (c *ChatClient) buildRequest() llm.CompletionRequest {
+// buildRequestLocked 构建请求。
+//
+// 调用方必须已持有 c.mu，本方法只读 c.config，不再额外加锁。
+func (c *ChatClient) buildRequestLocked() llm.CompletionRequest {
 	messages := make([]llm.Message, 0, len(c.config.messages)+1)
 
 	// 添加系统消息
@@ -295,7 +352,8 @@ func (c *ChatClient) callNonStreaming(ctx context.Context, req llm.CompletionReq
 		ToolCalls:    resp.ToolCalls,
 		Usage:        resp.Usage,
 		FinishReason: resp.FinishReason,
-		Metadata:     c.config.metadata,
+		// 拷贝 metadata，避免响应与内部 config.metadata 共享同一 map 引用导致跨响应别名。
+		Metadata: c.snapshotMetadata(),
 	}, nil
 }
 
@@ -317,8 +375,31 @@ func (c *ChatClient) callStreaming(ctx context.Context, req llm.CompletionReques
 		ToolCalls:    result.ToolCalls,
 		FinishReason: result.FinishReason,
 		Usage:        result.Usage,
-		Metadata:     c.config.metadata,
+		// 拷贝 metadata，避免响应与内部 config.metadata 共享同一 map 引用导致跨响应别名。
+		Metadata: c.snapshotMetadata(),
 	}, nil
+}
+
+// snapshotMetadata 返回 config.metadata 的浅拷贝快照。
+//
+// 持锁读取后拷贝，确保返回给调用方的 map 与内部状态解耦，
+// 避免复用 client 或并发读取响应时产生意外耦合。
+func (c *ChatClient) snapshotMetadata() map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return copyMetadata(c.config.metadata)
+}
+
+// copyMetadata 对 metadata map 做浅拷贝。nil 输入返回 nil。
+func copyMetadata(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 // ============== 便捷函数 ==============
@@ -372,13 +453,16 @@ func (p *PromptClient) Vars(vars map[string]any) *PromptClient {
 }
 
 // Render 渲染模板
+//
+// 使用 {key} 形式的占位符：将模板中所有 {key} 替换为对应变量的字符串值。
+// 变量值通过 toolkit conv.String 统一转换为字符串，支持任意类型。
+// 未在 vars 中出现的占位符保持原样不替换。
 func (p *PromptClient) Render() (string, error) {
-	// 简单实现：使用 {} 占位符
 	result := p.template
 	for k, v := range p.vars {
-		// 简化实现
-		_ = k
-		_ = v
+		// 将 {key} 占位符替换为变量值的字符串形式。
+		placeholder := "{" + k + "}"
+		result = strings.ReplaceAll(result, placeholder, conv.String(v))
 	}
 	return result, nil
 }

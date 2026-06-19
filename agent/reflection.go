@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/hexagon/core"
 	"github.com/hexagon-codes/hexagon/hooks"
 	"github.com/hexagon-codes/hexagon/internal/util"
-	"github.com/hexagon-codes/hexagon/stream"
 )
 
 // ReflectionAgent 自我反思 Agent
@@ -279,7 +279,7 @@ func (a *ReflectionAgent) executeTask(ctx context.Context, runID string, input I
 		Content: promptBuilder.String(),
 	})
 
-	resp, err := runCompletionWithRuntime(ctx, a.config.LLM, runID, messages, runtimeLLMHookSink(runID, a.config.LLM.Name(), hookManager))
+	resp, err := a.completeWithRuntime(ctx, runID, messages, runtimeLLMHookSink(runID, a.config.LLM.Name(), hookManager))
 	if err != nil {
 		return Output{}, fmt.Errorf("LLM completion failed: %w", err)
 	}
@@ -329,7 +329,7 @@ func (a *ReflectionAgent) reflectWithLLM(ctx context.Context, input Input, outpu
 
 只返回 JSON，不要其他内容。`, input.Query, output.Content)
 
-	resp, err := runCompletionWithRuntime(ctx, a.config.LLM, util.GenerateID("run"), []llm.Message{
+	resp, err := a.completeWithRuntime(ctx, util.GenerateID("run"), []llm.Message{
 		{Role: llm.RoleUser, Content: prompt},
 	}, nil)
 	if err != nil {

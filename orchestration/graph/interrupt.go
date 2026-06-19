@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // InterruptType 中断类型
@@ -355,7 +357,7 @@ func (h *MemoryInterruptHandler) WaitWithTimeout(ctx context.Context, id string,
 
 // generateInterruptID 生成中断 ID
 func generateInterruptID() string {
-	return fmt.Sprintf("int-%d", time.Now().UnixNano())
+	return fmt.Sprintf("int-%s", idgen.NanoID())
 }
 
 // InterruptError 中断错误

@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/hexagon/core"
 	"github.com/hexagon-codes/hexagon/hooks"
 	"github.com/hexagon-codes/hexagon/internal/util"
-	"github.com/hexagon-codes/hexagon/stream"
 )
 
 // SelfDiscoveryAgent 自我发现 Agent
@@ -602,9 +602,11 @@ func (a *SelfDiscoveryAgent) BatchStream(ctx context.Context, inputs []Input, op
 // mergeUsage 合并 Token 使用统计
 func mergeUsage(a, b llm.Usage) llm.Usage {
 	return llm.Usage{
-		PromptTokens:     a.PromptTokens + b.PromptTokens,
-		CompletionTokens: a.CompletionTokens + b.CompletionTokens,
-		TotalTokens:      a.TotalTokens + b.TotalTokens,
+		PromptTokens:        a.PromptTokens + b.PromptTokens,
+		CompletionTokens:    a.CompletionTokens + b.CompletionTokens,
+		TotalTokens:         a.TotalTokens + b.TotalTokens,
+		CacheCreationTokens: a.CacheCreationTokens + b.CacheCreationTokens,
+		CacheReadTokens:     a.CacheReadTokens + b.CacheReadTokens,
 	}
 }
 

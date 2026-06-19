@@ -6,7 +6,6 @@
 //   - 能力匹配：匹配任务需求与 Agent 能力
 //   - 能力协商：多 Agent 能力协商
 //
-// 设计借鉴：
 //   - A2A Protocol: Agent 能力协商
 //   - OpenAPI: 接口描述规范
 //   - WSDL: 服务描述语言

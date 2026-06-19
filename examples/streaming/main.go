@@ -17,7 +17,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/hexagon-codes/hexagon/stream"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 )
 
 func main() {

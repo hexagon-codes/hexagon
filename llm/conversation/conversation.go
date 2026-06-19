@@ -267,6 +267,12 @@ func (m *Manager) History() []TimedMessage {
 // 然后用摘要替换旧消息。
 // 注意：LLM 调用在锁外进行，不会阻塞其他 goroutine。
 func (m *Manager) Summarize(ctx context.Context, provider llm.Provider, keepRecent int) error {
+	// 防御负值：keepRecent<0 在语义上等价于"不保留任何最近消息"，
+	// 同时避免后续 m.messages[:len-keepRecent]（len-keepRecent>len）切片越界 panic。
+	if keepRecent < 0 {
+		keepRecent = 0
+	}
+
 	// 第一阶段：在锁内读取需要摘要的消息
 	m.mu.RLock()
 	if len(m.messages) <= keepRecent {

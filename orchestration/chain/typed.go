@@ -20,8 +20,8 @@ import (
 	"context"
 	"fmt"
 
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/hexagon/core"
-	"github.com/hexagon-codes/hexagon/stream"
 )
 
 // Pipe2 连接两个类型安全的函数，编译时检查类型匹配

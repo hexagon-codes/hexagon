@@ -3,14 +3,15 @@ package plugin
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/lang/mapx"
+	"github.com/hexagon-codes/toolkit/util/hash"
 )
 
 // HotReloadManager 插件热更新管理器
@@ -385,9 +386,8 @@ func computeConfigHash(config map[string]any) string {
 		return ""
 	}
 
-	// 计算 MD5 哈希
-	hash := md5.Sum(data)
-	return hex.EncodeToString(hash[:])
+	// 计算 MD5 哈希（复用 toolkit 的等价实现）
+	return hash.MD5Bytes(data)
 }
 
 // sortMapForHash 递归排序 map 的 key 以确保哈希稳定性
@@ -397,10 +397,7 @@ func sortMapForHash(m map[string]any) map[string]any {
 	}
 
 	// 获取排序后的 key
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
+	keys := mapx.Keys(m)
 	sort.Strings(keys)
 
 	// 构建有序 map（Go 1.12+ 的 json.Marshal 会保持 map 的插入顺序）
@@ -539,11 +536,7 @@ func (m *HotReloadManager) GetWatchedPlugins() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	names := make([]string, 0, len(m.configPaths))
-	for name := range m.configPaths {
-		names = append(names, name)
-	}
-	return names
+	return mapx.Keys(m.configPaths)
 }
 
 // Stats 获取统计信息

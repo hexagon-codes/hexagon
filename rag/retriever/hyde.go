@@ -30,8 +30,8 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/store/vector"
 	"github.com/hexagon-codes/hexagon/rag"
-	"github.com/hexagon-codes/hexagon/store/vector"
 )
 
 // VectorMergeStrategy 假设文档向量合并策略

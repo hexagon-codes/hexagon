@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/hexagon-codes/hexagon/checkpoint"
 	"github.com/hexagon-codes/hexagon/interrupt"
 )
 
@@ -59,7 +60,7 @@ type StateMachine[S any] struct {
 	maxSteps    int
 
 	// 检查点
-	checkpointer interrupt.Checkpointer
+	checkpointer checkpoint.Checkpointer
 
 	// 中断处理
 	interruptHandler *interrupt.Handler
@@ -187,7 +188,7 @@ func (sm *StateMachine[S]) SetMaxSteps(max int) *StateMachine[S] {
 }
 
 // SetCheckpointer 设置检查点存储
-func (sm *StateMachine[S]) SetCheckpointer(cp interrupt.Checkpointer) *StateMachine[S] {
+func (sm *StateMachine[S]) SetCheckpointer(cp checkpoint.Checkpointer) *StateMachine[S] {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -395,7 +396,7 @@ func (b *StateMachineBuilder[S]) MaxSteps(max int) *StateMachineBuilder[S] {
 }
 
 // Checkpointer 设置检查点存储
-func (b *StateMachineBuilder[S]) Checkpointer(cp interrupt.Checkpointer) *StateMachineBuilder[S] {
+func (b *StateMachineBuilder[S]) Checkpointer(cp checkpoint.Checkpointer) *StateMachineBuilder[S] {
 	b.sm.SetCheckpointer(cp)
 	return b
 }

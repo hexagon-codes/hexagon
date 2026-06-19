@@ -37,8 +37,8 @@ import (
 	"io"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/hexagon/internal/pool"
-	"github.com/hexagon-codes/hexagon/stream"
 )
 
 // ============== 类型别名 ==============

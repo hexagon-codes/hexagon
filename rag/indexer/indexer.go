@@ -7,15 +7,14 @@ package indexer
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/store/vector"
 	"github.com/hexagon-codes/hexagon/internal/util"
 	"github.com/hexagon-codes/hexagon/rag"
-	"github.com/hexagon-codes/hexagon/store/vector"
+	"github.com/hexagon-codes/toolkit/util/hash"
 )
 
 // ============== VectorIndexer ==============
@@ -37,15 +36,23 @@ func WithBatchSize(size int) VectorIndexerOption {
 	}
 }
 
+// defaultBatchSize 索引器默认批量大小
+const defaultBatchSize = 100
+
 // NewVectorIndexer 创建向量索引器
 func NewVectorIndexer(store vector.Store, embedder vector.Embedder, opts ...VectorIndexerOption) *VectorIndexer {
 	idx := &VectorIndexer{
 		store:     store,
 		embedder:  embedder,
-		batchSize: 100,
+		batchSize: defaultBatchSize,
 	}
 	for _, opt := range opts {
 		opt(idx)
+	}
+	// batchSize 下界校验: 0 或负数会导致 Index 循环 start 永不前进 (死循环)
+	// 或 docs[start:end] 切片越界 panic, 回退到默认值。
+	if idx.batchSize <= 0 {
+		idx.batchSize = defaultBatchSize
 	}
 	return idx
 }
@@ -79,6 +86,14 @@ func (i *VectorIndexer) Index(ctx context.Context, docs []rag.Document) error {
 		embeddings, err := i.embedder.Embed(ctx, texts)
 		if err != nil {
 			return fmt.Errorf("failed to embed documents: %w", err)
+		}
+
+		// 断言返回向量数量与输入文本数量一致。
+		// 异常的 Provider 可能返回数量不等长的结果, 若不校验, 下方
+		// embeddings[j] 在 j 超出 embeddings 长度时会发生越界 panic,
+		// 拖垮整个进程; 这里改为返回明确错误而非崩溃。
+		if len(embeddings) != len(texts) {
+			return fmt.Errorf("embedding count mismatch: got %d embeddings for %d texts", len(embeddings), len(texts))
 		}
 
 		// 转换为 vector.Document
@@ -155,11 +170,21 @@ func NewConcurrentIndexer(store vector.Store, embedder vector.Embedder, opts ...
 	idx := &ConcurrentIndexer{
 		store:       store,
 		embedder:    embedder,
-		batchSize:   100,
+		batchSize:   defaultBatchSize,
 		concurrency: 4,
 	}
 	for _, opt := range opts {
 		opt(idx)
+	}
+	// batchSize 下界校验: 0 或负数会导致分批循环异常 (死循环或切片越界),
+	// 回退到默认值。
+	if idx.batchSize <= 0 {
+		idx.batchSize = defaultBatchSize
+	}
+	// concurrency 下界校验: 0 或负数会导致 sem 容量非法 → goroutine 永久阻塞,
+	// 回退到至少 1。
+	if idx.concurrency <= 0 {
+		idx.concurrency = 1
 	}
 	return idx
 }
@@ -207,6 +232,15 @@ func (i *ConcurrentIndexer) Index(ctx context.Context, docs []rag.Document) erro
 			embeddings, err := i.embedder.Embed(ctx, texts)
 			if err != nil {
 				errCh <- err
+				return
+			}
+
+			// 断言返回向量数量与输入文本数量一致。
+			// 并发路径的越界 panic 发生在库内部 worker goroutine 中,
+			// 调用方无法 recover, 会直接 crash 整个进程; 这里在 worker
+			// 内部校验后通过 error channel 返回错误, 避免崩溃。
+			if len(embeddings) != len(texts) {
+				errCh <- fmt.Errorf("embedding count mismatch: got %d embeddings for %d texts", len(embeddings), len(texts))
 				return
 			}
 
@@ -303,11 +337,28 @@ func NewIncrementalIndexer(store vector.Store, embedder vector.Embedder, opts ..
 func (i *IncrementalIndexer) Index(ctx context.Context, docs []rag.Document) error {
 	// 过滤出需要更新的文档
 	var toIndex []rag.Document
+	// batchSeen 记录本批次内已纳入 toIndex 的文档 ID, 防止同一批次内出现
+	// 多篇相同 (派生) ID 的文档被重复索引 → store 端重复写入同一 ID 的文档。
+	// 仅靠 i.checksums 无法去重, 因为本批次的 checksum 要等索引成功后才写入,
+	// 同批多篇相同 ID 文档在过滤时 i.checksums 中尚不存在该 key, 会全部通过。
+	batchSeen := make(map[string]struct{}, len(docs))
 
 	i.mu.RLock()
 	for _, doc := range docs {
+		// 空 ID 文档先生成稳定 ID 再作 checksum key:
+		// 否则所有空 ID 文档共享空字符串槽位 checksums[""], 互相覆盖状态,
+		// 且底层 VectorIndexer 会为每篇生成不同随机 ID 造成重复存储。
+		// 基于内容派生稳定 ID, 使相同内容的空 ID 文档落到同一槽位, 实现去重。
+		if doc.ID == "" {
+			doc.ID = stableDocID(doc.Content)
+		}
+		// 同批次内重复 ID 去重: 已纳入的 ID 直接跳过。
+		if _, dup := batchSeen[doc.ID]; dup {
+			continue
+		}
 		checksum := computeChecksum(doc.Content)
 		if existing, ok := i.checksums[doc.ID]; !ok || existing != checksum {
+			batchSeen[doc.ID] = struct{}{}
 			toIndex = append(toIndex, doc)
 		}
 	}
@@ -317,7 +368,8 @@ func (i *IncrementalIndexer) Index(ctx context.Context, docs []rag.Document) err
 		return nil
 	}
 
-	// 使用基础索引器索引
+	// 使用基础索引器索引。toIndex 中的文档已带有稳定 ID,
+	// VectorIndexer 不会再为其生成随机 ID, store 端 ID 与 checksum key 保持一致。
 	baseIndexer := NewVectorIndexer(i.store, i.embedder, WithBatchSize(i.batchSize))
 	if err := baseIndexer.Index(ctx, toIndex); err != nil {
 		return err
@@ -376,6 +428,16 @@ func computeChecksum(content string) string {
 	if len(content) == 0 {
 		return "empty"
 	}
-	h := sha256.Sum256([]byte(content))
-	return hex.EncodeToString(h[:])
+	return hash.SHA256(content)
+}
+
+// stableDocID 为空 ID 文档基于内容派生稳定的文档 ID。
+//
+// 增量索引器要求空 ID 文档拥有可重现的 ID, 以便:
+//   - 多个空 ID 文档不再共享空字符串 checksum 槽位互相覆盖;
+//   - 相同内容的文档跨批次落到同一 store ID, 实现幂等去重。
+//
+// 采用内容 SHA256 哈希前缀作为后缀, 保证相同内容得到相同 ID。
+func stableDocID(content string) string {
+	return "doc-" + computeChecksum(content)
 }

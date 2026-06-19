@@ -2,7 +2,7 @@
 package agent
 
 // Role 角色定义
-// 借鉴 CrewAI 的角色系统设计
+// 角色系统：定义 Agent 的 Name/Goal/Backstory。
 type Role struct {
 	// Name 角色名称
 	Name string `yaml:"name" json:"name"`

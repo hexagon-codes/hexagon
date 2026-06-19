@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/tool"
+	iputil "github.com/hexagon-codes/toolkit/net/ip"
 )
 
 const (
@@ -366,7 +367,7 @@ func validateURLSafety(u *url.URL) error {
 	// 检查 IP 地址是否为内网/保留地址
 	ip := net.ParseIP(host)
 	if ip != nil {
-		if isPrivateIP(ip) {
+		if iputil.IsPrivateOrReservedIP(ip) {
 			return fmt.Errorf("不允许访问内网地址: %s", host)
 		}
 	}
@@ -378,36 +379,11 @@ func validateURLSafety(u *url.URL) error {
 			return fmt.Errorf("DNS 解析失败: %w", err)
 		}
 		for _, resolved := range ips {
-			if isPrivateIP(resolved) {
+			if iputil.IsPrivateOrReservedIP(resolved) {
 				return fmt.Errorf("域名 %s 解析到内网地址: %s", host, resolved)
 			}
 		}
 	}
 
 	return nil
-}
-
-// isPrivateIP 检查 IP 是否为内网/保留地址
-func isPrivateIP(ip net.IP) bool {
-	// 回环地址: 127.0.0.0/8, ::1
-	if ip.IsLoopback() {
-		return true
-	}
-
-	// 私有地址: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7
-	if ip.IsPrivate() {
-		return true
-	}
-
-	// 链路本地: 169.254.0.0/16（含 AWS/GCP 元数据服务 169.254.169.254）, fe80::/10
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return true
-	}
-
-	// 未指定地址: 0.0.0.0, ::
-	if ip.IsUnspecified() {
-		return true
-	}
-
-	return false
 }

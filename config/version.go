@@ -2,8 +2,6 @@
 package config
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hexagon-codes/toolkit/util/hash"
 	"gopkg.in/yaml.v3"
 )
 
@@ -379,8 +378,7 @@ func (m *VersionManager) TagVersion(id string, tags ...string) error {
 
 // calculateHash 计算配置哈希
 func (m *VersionManager) calculateHash(data []byte) string {
-	hash := sha256.Sum256(data)
-	return hex.EncodeToString(hash[:])
+	return hash.SHA256Bytes(data)
 }
 
 // saveVersionToFile 保存版本到文件

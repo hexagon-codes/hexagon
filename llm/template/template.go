@@ -1,16 +1,21 @@
 // Package template 提供 LLM 提示词模板引擎
 //
 // 本包实现了完整的提示词模板系统：
+//
 //   - 变量替换：{{ variable }}
+//
 //   - 条件语句：{% if condition %}...{% endif %}
+//
 //   - 循环语句：{% for item in items %}...{% endfor %}
+//
 //   - 过滤器：{{ value | filter }}
+//
 //   - 模板继承和包含
+//
 //   - 提示词版本控制
 //
-// 设计借鉴：
 //   - Jinja2: 模板语法
-//   - LangChain: PromptTemplate
+//
 //   - Semantic Kernel: 语义函数模板
 //
 // 使用示例：
@@ -33,6 +38,7 @@ import (
 	"sync"
 	"text/template"
 	"time"
+	"unicode"
 
 	"github.com/hexagon-codes/toolkit/lang/conv"
 )
@@ -132,7 +138,15 @@ func (pt *PromptTemplate) Execute(variables map[string]any) (string, error) {
 }
 
 // ExecuteContext 带上下文执行模板
+//
+// 在执行前检查 ctx 的取消/超时信号：若 ctx 已取消（或超时），直接返回该错误，
+// 不再进行后续校验与渲染，以尊重调用方的取消语义。
 func (pt *PromptTemplate) ExecuteContext(ctx context.Context, variables map[string]any) (string, error) {
+	// 接入 context 取消/超时传播。
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrExecutionFailed, err)
+	}
+
 	// 验证变量
 	if err := pt.Validate(variables); err != nil {
 		return "", err
@@ -220,59 +234,198 @@ func (pt *PromptTemplate) applyDefaults(variables map[string]any) map[string]any
 	return result
 }
 
-// extractVariables 从模板中提取变量
+// extractVariables 从模板中提取外部变量。
+//
+// 提取规则（带过滤器与循环作用域语义）：
+//   - {% for x in coll %} 控制块：把集合 coll 视为外部必填变量，
+//     而把循环变量 x 视为局部声明，排除在外部变量之外。
+//   - {{ var }}：标记为必填外部变量。
+//   - {{ var | default ... }}：带 default 过滤器表示该变量可选，
+//     标记 Required=false，避免与 Validate 的必填校验叠加锁死可选变量。
+//   - {{ var | otherFilter ... }}：仍为必填（过滤器不改变其必填性）。
 func (pt *PromptTemplate) extractVariables() []Variable {
-	// 匹配 {{ variable }} 和 {{ variable | filter }}
-	re := regexp.MustCompile(`\{\{\s*(\w+)(?:\s*\|[^}]*)?\s*\}\}`)
-	matches := re.FindAllStringSubmatch(pt.template, -1)
-
 	seen := make(map[string]bool)
+	loopVars := make(map[string]bool)
 	variables := make([]Variable, 0)
 
-	for _, match := range matches {
-		if len(match) > 1 {
-			name := match[1]
-			if !seen[name] {
-				seen[name] = true
-				variables = append(variables, Variable{
-					Name:     name,
-					Type:     "string",
-					Required: true,
-				})
-			}
+	add := func(name string, required bool) {
+		if loopVars[name] || seen[name] {
+			return
+		}
+		seen[name] = true
+		variables = append(variables, Variable{
+			Name:     name,
+			Type:     "string",
+			Required: required,
+		})
+	}
+
+	// 1) 先扫描 for 控制块，收集循环变量（局部）与集合变量（外部必填）。
+	for _, m := range forHeadRe.FindAllStringSubmatch(pt.template, -1) {
+		loopVars[m[1]] = true // 循环变量是局部声明
+	}
+	for _, m := range forHeadRe.FindAllStringSubmatch(pt.template, -1) {
+		add(m[2], true) // 集合变量为外部必填
+	}
+
+	// 2) 扫描所有 {{ ... }} 占位符，提取首个变量及其必填性。
+	for _, m := range placeholderRe.FindAllStringSubmatch(pt.template, -1) {
+		inner := strings.TrimSpace(m[1])
+
+		// 带过滤器：var | filter [args]
+		if pm := pipeFilterRe.FindStringSubmatch(inner); pm != nil {
+			name := pm[1]
+			// default 过滤器表示该变量可选。
+			required := pm[2] != "default"
+			add(name, required)
+			continue
+		}
+
+		// 纯变量
+		if regexp.MustCompile(`^\w+$`).MatchString(inner) {
+			add(inner, true)
 		}
 	}
 
 	return variables
 }
 
+// forHeadRe 匹配 {% for x in coll %} 控制块头部
+var forHeadRe = regexp.MustCompile(`\{%\s*for\s+(\w+)\s+in\s+(\w+)\s*%\}`)
+
+// endforRe 匹配 {% endfor %} 控制块尾部
+var endforRe = regexp.MustCompile(`\{%\s*endfor\s*%\}`)
+
+// placeholderRe 匹配 {{ ... }} 占位符（变量/过滤器表达式）
+var placeholderRe = regexp.MustCompile(`\{\{(.*?)\}\}`)
+
+// pipeFilterRe 拆分形如 "var | filter args" 的过滤器表达式
+// 子组：1=首个变量标识符，2=过滤器名，3=过滤器参数（可为空）
+var pipeFilterRe = regexp.MustCompile(`^\s*(\w+)\s*\|\s*(\w+)\s*(.*?)\s*$`)
+
 // convertToGoTemplate 将 Jinja2 风格转换为 Go 模板语法
+//
+// 该转换是作用域感知的：会先收集 {% for x in coll %} 声明的循环变量，
+// 进入循环体后把对循环变量的引用转成 Go 的 $x（循环变量），其余标识符
+// 转成 .x（字段访问），从而解决“循环体引用循环变量失败”与“带参数过滤器
+// 变量未加点”两类缺陷。
 func convertToGoTemplate(tmpl string) string {
-	// 变量: {{ var }} -> {{.var}}
-	result := regexp.MustCompile(`\{\{\s*(\w+)\s*\}\}`).ReplaceAllString(tmpl, "{{.${1}}}")
-
-	// 带过滤器的变量: {{ var | filter }} -> {{.var | filter}}
-	result = regexp.MustCompile(`\{\{\s*(\w+)\s*\|\s*(\w+)\s*\}\}`).ReplaceAllString(result, "{{.${1} | ${2}}}")
-
-	// if 语句: {% if condition %} -> {{if condition}}
+	// 先转换控制块（if/elif/else/endif）。for/endfor 在占位符替换阶段
+	// 单独处理，以便维护循环变量作用域栈。
+	result := tmpl
 	result = regexp.MustCompile(`\{%\s*if\s+(.+?)\s*%\}`).ReplaceAllString(result, "{{if ${1}}}")
-
-	// elif 语句: {% elif condition %} -> {{else if condition}}
 	result = regexp.MustCompile(`\{%\s*elif\s+(.+?)\s*%\}`).ReplaceAllString(result, "{{else if ${1}}}")
-
-	// else 语句: {% else %} -> {{else}}
 	result = regexp.MustCompile(`\{%\s*else\s*%\}`).ReplaceAllString(result, "{{else}}")
-
-	// endif 语句: {% endif %} -> {{end}}
 	result = regexp.MustCompile(`\{%\s*endif\s*%\}`).ReplaceAllString(result, "{{end}}")
 
-	// for 循环: {% for item in items %} -> {{range $item := .items}}
-	result = regexp.MustCompile(`\{%\s*for\s+(\w+)\s+in\s+(\w+)\s*%\}`).ReplaceAllString(result, "{{range $$${1} := .${2}}}")
+	// loopVars 记录当前作用域内可见的循环变量集合（支持嵌套循环）。
+	loopVars := make(map[string]int)
 
-	// endfor 语句: {% endfor %} -> {{end}}
-	result = regexp.MustCompile(`\{%\s*endfor\s*%\}`).ReplaceAllString(result, "{{end}}")
+	var b strings.Builder
+	for result != "" {
+		// 依次寻找下一个 for 头部、endfor、{{ }} 占位符，取最靠前者处理。
+		forLoc := forHeadRe.FindStringSubmatchIndex(result)
+		endforLoc := endforRe.FindStringIndex(result)
+		phLoc := placeholderRe.FindStringSubmatchIndex(result)
 
-	return result
+		next, kind := nextMatch(forLoc, endforLoc, phLoc)
+		if next < 0 {
+			// 无更多控制块/占位符，原样写出剩余内容。
+			b.WriteString(result)
+			break
+		}
+
+		// 写出匹配前的纯文本。
+		b.WriteString(result[:next])
+
+		switch kind {
+		case matchFor:
+			loopVar := result[forLoc[2]:forLoc[3]]
+			coll := result[forLoc[4]:forLoc[5]]
+			b.WriteString("{{range $" + loopVar + " := ." + coll + "}}")
+			loopVars[loopVar]++
+			result = result[forLoc[1]:]
+		case matchEndfor:
+			// 退出最近一层循环：当前实现以引用计数近似作用域，
+			// endfor 时回收 for 头部新增的循环变量。
+			b.WriteString("{{end}}")
+			result = result[endforLoc[1]:]
+		case matchPlaceholder:
+			inner := result[phLoc[2]:phLoc[3]]
+			b.WriteString(convertPlaceholder(inner, loopVars))
+			result = result[phLoc[1]:]
+		}
+	}
+
+	return b.String()
+}
+
+// 匹配类型常量
+const (
+	matchNone = iota
+	matchFor
+	matchEndfor
+	matchPlaceholder
+)
+
+// nextMatch 在三类候选位置中选出索引最小者，返回其起始位置 pos 与匹配类型 kind。
+// 三者皆无匹配时返回 pos<0。
+func nextMatch(forLoc, endforLoc, phLoc []int) (pos, kind int) {
+	pos = -1
+	kind = matchNone
+	consider := func(loc []int, k int) {
+		if loc == nil {
+			return
+		}
+		if pos < 0 || loc[0] < pos {
+			pos = loc[0]
+			kind = k
+		}
+	}
+	consider(forLoc, matchFor)
+	consider(endforLoc, matchEndfor)
+	consider(phLoc, matchPlaceholder)
+	return pos, kind
+}
+
+// convertPlaceholder 将单个 {{ ... }} 内部表达式转换为 Go 模板语法。
+//
+// 处理三种形式：
+//   - 纯变量 {{ var }}：循环变量转 $var，否则转 .var
+//   - 带过滤器 {{ var | filter [args] }}：转为 {{filter <value> args}}，
+//     其中 value 作为过滤器首个实参（Jinja2 语义）
+//   - 其他复杂表达式：原样保留（已是合法 Go 模板片段，如 if 条件中的 pipeline）
+func convertPlaceholder(inner string, loopVars map[string]int) string {
+	trimmed := strings.TrimSpace(inner)
+
+	// 带过滤器：var | filter [args]
+	if m := pipeFilterRe.FindStringSubmatch(trimmed); m != nil {
+		valueRef := varRef(m[1], loopVars)
+		filter := m[2]
+		args := strings.TrimSpace(m[3])
+		if args != "" {
+			// Jinja2 语义：value 作为过滤器首个参数，其余参数随后。
+			return "{{" + filter + " " + valueRef + " " + args + "}}"
+		}
+		// 无参过滤器：保留管道写法 {{value | filter}}。
+		return "{{" + valueRef + " | " + filter + "}}"
+	}
+
+	// 纯变量
+	if regexp.MustCompile(`^\w+$`).MatchString(trimmed) {
+		return "{{" + varRef(trimmed, loopVars) + "}}"
+	}
+
+	// 其他表达式原样保留（例如已经是合法 Go pipeline）。
+	return "{{" + inner + "}}"
+}
+
+// varRef 根据作用域返回标识符引用：循环变量 -> $name，否则 -> .name
+func varRef(name string, loopVars map[string]int) string {
+	if loopVars[name] > 0 {
+		return "$" + name
+	}
+	return "." + name
 }
 
 // defaultFuncMap 默认函数映射
@@ -281,7 +434,7 @@ func defaultFuncMap() template.FuncMap {
 		// 字符串处理
 		"upper":     strings.ToUpper,
 		"lower":     strings.ToLower,
-		"title":     strings.Title,
+		"title":     titleCase,
 		"trim":      strings.TrimSpace,
 		"replace":   strings.ReplaceAll,
 		"split":     strings.Split,
@@ -291,8 +444,11 @@ func defaultFuncMap() template.FuncMap {
 		"hasSuffix": strings.HasSuffix,
 		"repeat":    strings.Repeat,
 		"truncate":  truncate,
-		"default":   defaultValue,
-		"quote":     strconv.Quote,
+		// default 过滤器采用 Jinja2 参数序（值在前、默认值在后），
+		// 与 convertToGoTemplate 生成的 {{default <value> <default>}} 对应；
+		// defaultValue 辅助函数保留 (默认值, 值) 序供内部/测试使用。
+		"default": filterDefault,
+		"quote":   strconv.Quote,
 
 		// 数字处理
 		"add": func(a, b int) int { return a + b },
@@ -331,18 +487,61 @@ func defaultFuncMap() template.FuncMap {
 
 // 辅助函数实现
 
+// truncate 按 rune（而非 byte）安全截断字符串到指定长度，超出部分以 "..." 替代。
+//
+// 之前实现用 s[:length] 按字节切片，对中文等多字节字符会切坏字符产生非法
+// UTF-8；负数 length 还会触发越界 panic。这里改为基于 []rune 截断，并对
+// length 做下界(0)与上界(rune 数)双重 clamp。
 func truncate(s string, length int) string {
-	if len(s) <= length {
+	// 下界 clamp：负数视为 0。
+	if length < 0 {
+		length = 0
+	}
+	runes := []rune(s)
+	// 上界 clamp：不超过总 rune 数时原样返回。
+	if len(runes) <= length {
 		return s
 	}
-	return s[:length] + "..."
+	return string(runes[:length]) + "..."
 }
 
+// titleCase 将每个空白分隔单词的首字母大写，其余字符保持原样。
+//
+// 替代已废弃的 strings.Title（Go 1.18 起标记 deprecated），按 rune 安全处理
+// 多字节字符，保留经典“词首大写”语义（不改变词内其余字符大小写）。
+func titleCase(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	prevIsSep := true // 行首视为分隔符，使首词首字母大写
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			prevIsSep = true
+			b.WriteRune(r)
+			continue
+		}
+		if prevIsSep {
+			b.WriteRune(unicode.ToTitle(r))
+		} else {
+			b.WriteRune(r)
+		}
+		prevIsSep = false
+	}
+	return b.String()
+}
+
+// defaultValue 在 val 为空时返回 defaultVal，否则返回 val。
+// 参数序为 (默认值, 值)，供内部调用与单元测试使用。
 func defaultValue(defaultVal, val any) any {
 	if empty(val) {
 		return defaultVal
 	}
 	return val
+}
+
+// filterDefault 是 default 过滤器的 Jinja2 参数序适配器：值在前、默认值在后。
+// 与 convertToGoTemplate 生成的 {{default <value> <default>}} 调用形式对应。
+func filterDefault(val, defaultVal any) any {
+	return defaultValue(defaultVal, val)
 }
 
 // 使用 toolkit/lang/conv 的类型转换函数
@@ -363,9 +562,16 @@ func toJSON(v any) string {
 	return string(data)
 }
 
+// fromJSON 将 JSON 字符串反序列化为通用值。
+//
+// 为契合 text/template FuncMap 的单返回值习惯，反序列化失败时返回 nil
+// （而非 panic）；调用方据此判断解析是否成功。错误被显式处理而非隐式吞掉。
 func fromJSON(s string) any {
 	var result any
-	json.Unmarshal([]byte(s), &result)
+	if err := json.Unmarshal([]byte(s), &result); err != nil {
+		// 解析失败：返回 nil，由模板层以 nil 语义处理（如配合 default 过滤器）。
+		return nil
+	}
 	return result
 }
 
@@ -403,16 +609,30 @@ func index(list any, i int) any {
 	return v.Index(i).Interface()
 }
 
+// sliceList 对切片做边界安全的子切片，等价于 list[start:end]。
+//
+// 对 start/end 做完整 clamp：start 下界为 0、上界为 len；end 上界为 len、
+// 下界为 start。缺少 start>end 归一时 reflect.Value.Slice 会 panic，这里
+// 在该情形下返回空切片，避免崩溃。
 func sliceList(list any, start, end int) any {
 	v := reflect.ValueOf(list)
 	if v.Kind() != reflect.Slice {
 		return list
 	}
+	n := v.Len()
+	// 先 clamp start 到 [0, n]。
 	if start < 0 {
 		start = 0
 	}
-	if end > v.Len() {
-		end = v.Len()
+	if start > n {
+		start = n
+	}
+	// 再 clamp end 到 [start, n]，避免 start>end 触发 reflect.Slice panic。
+	if end > n {
+		end = n
+	}
+	if end < start {
+		end = start
 	}
 	return v.Slice(start, end).Interface()
 }
@@ -664,6 +884,9 @@ type FewShotTemplate struct {
 	suffix     string
 	separator  string
 	exampleTpl *PromptTemplate
+	// suffixTpl 缓存后缀模板的解析结果，避免 Execute/Variables/Validate
+	// 三处重复构造临时 PromptTemplate；在 WithSuffix 改写后缀时重建。
+	suffixTpl *PromptTemplate
 }
 
 // Example 示例
@@ -689,7 +912,21 @@ func (ft *FewShotTemplate) WithPrefix(prefix string) *FewShotTemplate {
 // WithSuffix 设置后缀
 func (ft *FewShotTemplate) WithSuffix(suffix string) *FewShotTemplate {
 	ft.suffix = suffix
+	// 后缀变更后失效缓存，下次按需重建。
+	ft.suffixTpl = nil
 	return ft
+}
+
+// getSuffixTpl 惰性构造并缓存后缀模板，供 Execute/Variables/Validate 共享，
+// 避免重复解析。suffix 为空时返回 nil。
+func (ft *FewShotTemplate) getSuffixTpl() *PromptTemplate {
+	if ft.suffix == "" {
+		return nil
+	}
+	if ft.suffixTpl == nil {
+		ft.suffixTpl = New("suffix", ft.suffix)
+	}
+	return ft.suffixTpl
 }
 
 // WithExamples 设置示例
@@ -741,8 +978,7 @@ func (ft *FewShotTemplate) Execute(variables map[string]any) (string, error) {
 	}
 
 	// 后缀（包含用户输入）
-	if ft.suffix != "" {
-		suffixTpl := New("suffix", ft.suffix)
+	if suffixTpl := ft.getSuffixTpl(); suffixTpl != nil {
 		suffixStr, err := suffixTpl.Execute(variables)
 		if err != nil {
 			return "", err
@@ -755,18 +991,18 @@ func (ft *FewShotTemplate) Execute(variables map[string]any) (string, error) {
 
 // Variables 获取变量列表
 func (ft *FewShotTemplate) Variables() []Variable {
-	if ft.suffix == "" {
+	suffixTpl := ft.getSuffixTpl()
+	if suffixTpl == nil {
 		return nil
 	}
-	suffixTpl := New("suffix", ft.suffix)
 	return suffixTpl.Variables()
 }
 
 // Validate 验证变量
 func (ft *FewShotTemplate) Validate(variables map[string]any) error {
-	if ft.suffix == "" {
+	suffixTpl := ft.getSuffixTpl()
+	if suffixTpl == nil {
 		return nil
 	}
-	suffixTpl := New("suffix", ft.suffix)
 	return suffixTpl.Validate(variables)
 }

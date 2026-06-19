@@ -1,14 +1,19 @@
 // Package agent 提供 AI Agent 核心功能
 //
 // 本文件实现 Agent 发现与注册功能：
+//
 //   - Agent 注册表：中央注册和管理 Agent
+//
 //   - 服务发现：动态发现可用 Agent
+//
 //   - 健康检查：监控 Agent 状态
+//
 //   - 负载均衡：智能路由请求
 //
-// 设计借鉴：
 //   - Consul: 服务注册与发现
+//
 //   - Kubernetes: Service Discovery
+//
 //   - gRPC: 服务发现机制
 package agent
 
@@ -16,6 +21,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // ============== Agent 注册表 ==============
@@ -606,7 +613,7 @@ func (r *Registry) Watch(callback WatchCallback) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	id := fmt.Sprintf("watch_%d", time.Now().UnixNano())
+	id := fmt.Sprintf("watch_%s", idgen.NanoID())
 	r.watches[id] = append(r.watches[id], callback)
 	return id
 }

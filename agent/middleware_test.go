@@ -331,6 +331,64 @@ func TestRetryMiddleware(t *testing.T) {
 			t.Errorf("attempts = %d, want 3", attempts)
 		}
 	})
+
+	// 等价性测试：复用 toolkit/util/retry 后，最终错误仍以 %w 包装原始错误，
+	// 调用方可继续用 errors.Is 检索底层错误。
+	t.Run("最终错误保留底层错误链", func(t *testing.T) {
+		sentinel := errors.New("sentinel error")
+		chain := NewMiddlewareChain(RetryMiddleware(2, 1*time.Millisecond))
+
+		handler := chain.Wrap(func(ctx context.Context, input Input) (Output, error) {
+			return Output{}, sentinel
+		})
+
+		_, err := handler(context.Background(), Input{})
+		if !errors.Is(err, sentinel) {
+			t.Errorf("err 应包装 sentinel，errors.Is 失败: %v", err)
+		}
+	})
+
+	// 等价性测试：退避采用指数策略 backoff*2^attempt，
+	// 第一次重试约等待 1 个 backoff，第二次约 2 个 backoff，总计约 3 个 backoff。
+	t.Run("指数退避时序", func(t *testing.T) {
+		backoff := 20 * time.Millisecond
+		chain := NewMiddlewareChain(RetryMiddleware(2, backoff))
+
+		handler := chain.Wrap(func(ctx context.Context, input Input) (Output, error) {
+			return Output{}, errors.New("always fail")
+		})
+
+		start := time.Now()
+		_, _ = handler(context.Background(), Input{})
+		elapsed := time.Since(start)
+
+		// 两次退避：backoff(第一次) + 2*backoff(第二次) = 3*backoff
+		// 留出调度余量，仅校验下界，确保确实发生了指数退避等待。
+		if elapsed < 3*backoff {
+			t.Errorf("elapsed = %v, 应不小于 %v（指数退避总时长）", elapsed, 3*backoff)
+		}
+	})
+
+	// 等价性测试：上下文取消时返回 ctx.Err()，而非重试耗尽错误。
+	t.Run("上下文取消返回 ctx 错误", func(t *testing.T) {
+		chain := NewMiddlewareChain(RetryMiddleware(5, 50*time.Millisecond))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		handler := chain.Wrap(func(c context.Context, input Input) (Output, error) {
+			return Output{}, errors.New("fail to trigger backoff")
+		})
+
+		// 在第一次退避等待期间取消
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			cancel()
+		}()
+
+		_, err := handler(ctx, Input{})
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("err 应为 context.Canceled，实际: %v", err)
+		}
+	})
 }
 
 // TestTracingMiddleware 测试追踪中间件

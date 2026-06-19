@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/tool"
@@ -121,7 +122,11 @@ func (t *MCPProxyTool) Validate(args map[string]any) error {
 // 并提供统一的生命周期管理（如关闭连接）
 type MCPToolSet struct {
 	client *TransportClient
-	tools  []tool.Tool
+
+	mu        sync.RWMutex
+	tools     []tool.Tool
+	onChange  func([]tool.Tool) // 可选：工具集变化回调（Refresh 后触发）
+	reconnect *ReconnectConfig  // 可选：自动重连策略（nil=禁用，Refresh 失败不重连）
 }
 
 // NewMCPToolSet 从 MCP 服务器创建工具集合
@@ -136,19 +141,92 @@ func NewMCPToolSet(client *TransportClient, mcpTools []Tool) *MCPToolSet {
 	}
 }
 
-// Tools 返回所有工具
+// Tools 返回所有工具（并发安全：与 Refresh 互斥）
 func (s *MCPToolSet) Tools() []tool.Tool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.tools
 }
 
 // Get 按名称获取工具
 func (s *MCPToolSet) Get(name string) (tool.Tool, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, t := range s.tools {
 		if t.Name() == name {
 			return t, true
 		}
 	}
 	return nil, false
+}
+
+// SetOnToolsChanged 注册工具集变化回调。
+//
+// Refresh 重建工具集后会触发该回调，便于上层（如 Agent 工具注册表）同步
+// 动态发现的工具集。传 nil 可清除回调。
+func (s *MCPToolSet) SetOnToolsChanged(fn func([]tool.Tool)) {
+	s.mu.Lock()
+	s.onChange = fn
+	s.mu.Unlock()
+}
+
+// Refresh 重新从 MCP 服务器拉取工具列表并重建工具集（动态发现）。
+//
+// 适用场景：收到 notifications/tools/list_changed 通知时、或需要主动刷新远端
+// 工具时调用。客户端在初始化握手中已声明 tools.listChanged 能力，服务器据此
+// 在工具集变化时推送通知；上层把通知路由到本方法即可实现动态工具发现。
+// 成功刷新后若注册了 OnToolsChanged 回调会被触发。
+// 若配置了重连策略（SetReconnectPolicy），首次拉取失败时会按指数退避自动重连
+// 后再列一次；重连仍失败才返回错误。未配置策略时行为不变（失败即返回）。
+func (s *MCPToolSet) Refresh(ctx context.Context) error {
+	err := s.listAndRebuild(ctx)
+	if err == nil {
+		return nil
+	}
+
+	s.mu.RLock()
+	cfg := s.reconnect
+	s.mu.RUnlock()
+	if cfg != nil {
+		if reconnErr := s.reconnectWithBackoff(ctx, cfg); reconnErr == nil {
+			if listErr := s.listAndRebuild(ctx); listErr == nil {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("mcp: 刷新工具列表失败: %w", err)
+}
+
+// listAndRebuild 拉取工具列表并重建工具集（不含重连）。
+func (s *MCPToolSet) listAndRebuild(ctx context.Context) error {
+	mcpTools, err := s.client.ListTools(ctx)
+	if err != nil {
+		return err
+	}
+	s.rebuild(mcpTools)
+	return nil
+}
+
+// HandleListChanged 是 MCP notifications/tools/list_changed 通知的处理入口，
+// 语义等价于 Refresh——收到该通知时调用即可动态更新工具集。
+func (s *MCPToolSet) HandleListChanged(ctx context.Context) error {
+	return s.Refresh(ctx)
+}
+
+// rebuild 用新的 MCP 工具列表重建代理工具集并触发变化回调。
+func (s *MCPToolSet) rebuild(mcpTools []Tool) {
+	tools := make([]tool.Tool, len(mcpTools))
+	for i, t := range mcpTools {
+		tools[i] = NewMCPProxyTool(t, s.client)
+	}
+	s.mu.Lock()
+	s.tools = tools
+	cb := s.onChange
+	s.mu.Unlock()
+
+	if cb != nil {
+		cb(tools)
+	}
 }
 
 // Close 关闭工具集合（关闭底层传输连接）

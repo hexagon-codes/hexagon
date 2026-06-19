@@ -2,16 +2,14 @@ package store
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"fmt"
 	"maps"
 	"slices"
 	"sort"
-	"sync/atomic"
 	"time"
 
 	coremem "github.com/hexagon-codes/ai-core/memory"
+
+	"github.com/hexagon-codes/hexagon/internal/util"
 )
 
 // PersistentMemory 将 MemoryStore 适配为 ai-core memory.Memory 接口
@@ -311,12 +309,11 @@ func mapToEntry(item *Item) coremem.Entry {
 
 // ============== ID 生成 ==============
 
-var memIDCounter atomic.Uint64
-
 // generateMemoryID 生成唯一的记忆 ID
+//
+// 复用本仓 internal/util.GenerateID（底层为 toolkit/util/idgen），
+// 生成 "pmem-{nanoid}" 形式的唯一标识。ID 仅作唯一性标识使用，
+// 时序由 CreatedAt 保证，不依赖 ID 内部结构。
 func generateMemoryID() string {
-	counter := memIDCounter.Add(1)
-	randomBytes := make([]byte, 4)
-	_, _ = rand.Read(randomBytes)
-	return fmt.Sprintf("pmem-%d-%s", counter, hex.EncodeToString(randomBytes))
+	return util.GenerateID("pmem")
 }

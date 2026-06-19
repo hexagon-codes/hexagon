@@ -17,7 +17,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.5'
+          go-version: '1.25.x'
 
       - name: Download dependencies
         run: go mod download
@@ -40,14 +40,17 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # only-new-issues 需完整历史以计算与基线的差异
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25.5'
+          go-version: '1.25.x'
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.12.2          # 固定版本保证可复现; v8 action 支持 golangci-lint v2 (.golangci.yml 为 version "2")
           args: --timeout=5m
+          only-new-issues: true     # 既有问题不阻断, 仅对新增引入的问题门禁 (大型既有代码库渐进采纳 lint 的标准做法)

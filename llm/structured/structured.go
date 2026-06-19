@@ -6,7 +6,7 @@
 //   - 自动解析验证：JSON 解析 + 自定义验证
 //   - 失败重试修复：解析失败时自动重试并附带错误信息
 //
-// 本包借鉴了 Python Instructor 库的设计理念，结合 Go 泛型提供了
+// 本包用 Go 泛型提供了
 // 编译时类型安全的结构化输出体验。核心思路是：
 //  1. 从 Go 类型自动推导 JSON Schema
 //  2. 将 Schema 作为格式指令注入到系统提示词中
@@ -132,6 +132,16 @@ type config struct {
 	// StrictMode 严格模式
 	// 开启后 JSON 解析不允许多余字段
 	StrictMode bool
+
+	// NativeJSONSchema 启用 provider 原生 JSON Schema 强制解码
+	// 开启后经 CompletionRequest.ResponseFormat 把 Schema 下发给 provider
+	// （json_schema + strict），由 provider 端约束解码，而非仅靠 prompt 注入。
+	// 对支持的 provider（如 OpenAI GPT-4o+）能从根本上保证输出合法；不支持的
+	// provider 会忽略该字段并退化为 prompt 注入 + 重试（行为不变）。
+	NativeJSONSchema bool
+
+	// SchemaName 原生 json_schema 模式下的 schema 名称（默认 "structured_output"）
+	SchemaName string
 }
 
 // defaultConfig 返回默认配置
@@ -208,6 +218,21 @@ func WithSystemPrompt(prompt string) Option {
 func WithStrictMode(strict bool) Option {
 	return func(c *config) {
 		c.StrictMode = strict
+	}
+}
+
+// WithNativeJSONSchema 启用 provider 原生 JSON Schema 强制解码
+//
+// 开启后把从类型 T 生成的（严格化）Schema 经 ResponseFormat 下发给 provider，
+// 由 provider 端约束解码，而非仅靠 prompt 注入 + 解析重试。对支持的 provider
+// 能从根本上保证输出合法；不支持的 provider 忽略该字段、自动退化为 prompt 注入。
+// name 为可选的 schema 名称（空则用 "structured_output"）。
+func WithNativeJSONSchema(name ...string) Option {
+	return func(c *config) {
+		c.NativeJSONSchema = true
+		if len(name) > 0 && name[0] != "" {
+			c.SchemaName = name[0]
+		}
 	}
 }
 
@@ -323,6 +348,25 @@ func generateInternal[T any](ctx context.Context, provider llm.Provider, message
 	allMessages = append(allMessages, llm.SystemMessage(systemPrompt))
 	allMessages = append(allMessages, messages...)
 
+	// 启用原生强制解码时，构造 provider 端的 json_schema 约束（一次构造、各次重试复用）。
+	// 用 Strict() 把 Schema 收紧（additionalProperties:false + 全字段 required），
+	// 配合 provider 的 strict 模式从根本上约束输出。
+	var responseFormat *llm.ResponseFormat
+	if cfg.NativeJSONSchema {
+		schemaName := cfg.SchemaName
+		if schemaName == "" {
+			schemaName = "structured_output"
+		}
+		responseFormat = &llm.ResponseFormat{
+			Type: "json_schema",
+			JSONSchema: &llm.ResponseFormatJSONSchema{
+				Name:   schemaName,
+				Schema: llm.SchemaOf[T]().Strict(),
+				Strict: true,
+			},
+		}
+	}
+
 	// 创建 JSON 解析器
 	jsonParser := parser.NewJSONParser[T]().
 		WithStrictMode(cfg.StrictMode).
@@ -341,10 +385,11 @@ func generateInternal[T any](ctx context.Context, provider llm.Provider, message
 
 		// 构建 LLM 请求
 		req := llm.CompletionRequest{
-			Model:       cfg.Model,
-			Messages:    allMessages,
-			MaxTokens:   cfg.MaxTokens,
-			Temperature: cfg.Temperature,
+			Model:          cfg.Model,
+			Messages:       allMessages,
+			MaxTokens:      cfg.MaxTokens,
+			Temperature:    cfg.Temperature,
+			ResponseFormat: responseFormat,
 		}
 
 		// 调用 LLM

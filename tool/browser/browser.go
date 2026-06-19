@@ -7,7 +7,6 @@
 //   - JavaScript 执行：运行自定义脚本
 //   - 多标签页管理
 //
-// 设计借鉴：
 //   - Playwright: 浏览器自动化
 //   - Puppeteer: Chrome DevTools Protocol
 //   - Selenium: WebDriver API
@@ -32,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	iputil "github.com/hexagon-codes/toolkit/net/ip"
 	"golang.org/x/net/html"
 )
 
@@ -375,9 +375,28 @@ func (bt *BrowserTool) Validate(args map[string]any) error {
 
 // ============== 截图工具 ==============
 
+// ScreenshotOptions 截图参数。
+type ScreenshotOptions struct {
+	FullPage bool // 是否整页截图
+	Width    int  // 视口宽度
+	Height   int  // 视口高度
+}
+
+// ScreenshotBackend 是真实截图后端接口。
+//
+// 框架不内置浏览器自动化（Playwright/Puppeteer/chromedp 等为重依赖），通过本接口
+// 让用户注入真实后端。注入后 ScreenshotTool 返回真实截图字节；未注入时返回带明确
+// 标注的占位 SVG（不伪造成真实截图）。
+//
+// Capture 返回截图字节与图像格式（如 "png"/"jpeg"）。
+type ScreenshotBackend interface {
+	Capture(ctx context.Context, url string, opts ScreenshotOptions) (image []byte, format string, err error)
+}
+
 // ScreenshotTool 截图工具
 type ScreenshotTool struct {
-	config *BrowserConfig
+	config  *BrowserConfig
+	backend ScreenshotBackend
 }
 
 // NewScreenshotTool 创建截图工具
@@ -387,6 +406,13 @@ func NewScreenshotTool(config ...*BrowserConfig) *ScreenshotTool {
 		cfg = config[0]
 	}
 	return &ScreenshotTool{config: cfg}
+}
+
+// WithBackend 注入真实截图后端并返回自身（链式）。
+// 注入后 Execute 返回真实截图；未注入时返回占位 SVG。
+func (st *ScreenshotTool) WithBackend(b ScreenshotBackend) *ScreenshotTool {
+	st.backend = b
+	return st
 }
 
 // Name 工具名称
@@ -435,7 +461,27 @@ func (st *ScreenshotTool) Execute(ctx context.Context, args map[string]any) (any
 		return nil, errors.New("url is required")
 	}
 
-	// 占位实现：返回一个简单的 SVG 占位图
+	// 已注入真实后端：返回真实截图字节。
+	if st.backend != nil {
+		full, _ := args["full_page"].(bool)
+		img, format, err := st.backend.Capture(ctx, urlStr, ScreenshotOptions{
+			FullPage: full,
+			Width:    st.config.ViewportWidth,
+			Height:   st.config.ViewportHeight,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"url":    urlStr,
+			"image":  base64.StdEncoding.EncodeToString(img),
+			"format": format,
+			"width":  st.config.ViewportWidth,
+			"height": st.config.ViewportHeight,
+		}, nil
+	}
+
+	// 未注入后端：返回一个明确标注的 SVG 占位图（不伪造成真实截图）
 	placeholder := fmt.Sprintf(`<svg width="%d" height="%d" xmlns="http://www.w3.org/2000/svg">
 		<rect width="100%%" height="100%%" fill="#f0f0f0"/>
 		<text x="50%%" y="50%%" text-anchor="middle" dy=".3em" fill="#666">
@@ -476,7 +522,7 @@ func extractTitle(htmlContent string) string {
 // extractText 提取纯文本
 func extractText(htmlContent string) string {
 	// 移除 script 和 style
-	re := regexp.MustCompile(`(?is)<(script|style|noscript)[^>]*>.*?</\1>`)
+	re := regexp.MustCompile(`(?is)<(?:script|style|noscript)[^>]*>.*?</(?:script|style|noscript)>`)
 	text := re.ReplaceAllString(htmlContent, "")
 
 	// 移除 HTML 注释
@@ -503,7 +549,7 @@ func htmlToMarkdown(htmlContent string) string {
 	text := htmlContent
 
 	// 移除 script 和 style
-	re := regexp.MustCompile(`(?is)<(script|style|noscript)[^>]*>.*?</\1>`)
+	re := regexp.MustCompile(`(?is)<(?:script|style|noscript)[^>]*>.*?</(?:script|style|noscript)>`)
 	text = re.ReplaceAllString(text, "")
 
 	// 转换标题
@@ -523,11 +569,11 @@ func htmlToMarkdown(htmlContent string) string {
 	text = re.ReplaceAllString(text, "[$2]($1)")
 
 	// 转换粗体
-	re = regexp.MustCompile(`(?is)<(strong|b)[^>]*>([^<]*)</\1>`)
+	re = regexp.MustCompile(`(?is)<(strong|b)[^>]*>([^<]*)</(?:strong|b)>`)
 	text = re.ReplaceAllString(text, "**$2**")
 
 	// 转换斜体
-	re = regexp.MustCompile(`(?is)<(em|i)[^>]*>([^<]*)</\1>`)
+	re = regexp.MustCompile(`(?is)<(em|i)[^>]*>([^<]*)</(?:em|i)>`)
 	text = re.ReplaceAllString(text, "*$2*")
 
 	// 转换代码
@@ -884,7 +930,7 @@ func validateBrowserURL(rawURL string) error {
 
 	// 检查 IP 地址是否为内网/保留地址
 	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		if iputil.IsPrivateOrReservedIP(ip) {
 			return fmt.Errorf("不允许访问内网地址: %s", host)
 		}
 	}

@@ -1,6 +1,6 @@
 // Package agent 提供 AI Agent 核心接口和实现
 //
-// primitives.go 实现高级 Agent 编排原语，参考 Google ADK Go 设计：
+// primitives.go 实现高级 Agent 编排原语：
 //   - SequentialAgent: 按顺序依次执行多个子 Agent
 //   - ParallelAgent: 并行执行多个子 Agent，合并结果
 //   - LoopAgent: 循环执行子 Agent 直到满足条件
@@ -34,10 +34,11 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/memory"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/ai-core/tool"
 	"github.com/hexagon-codes/hexagon/core"
 	"github.com/hexagon-codes/hexagon/internal/util"
-	"github.com/hexagon-codes/hexagon/stream"
+	"github.com/hexagon-codes/toolkit/lang/syncx"
 )
 
 // ============== primitiveBase 公共基础 ==============
@@ -296,10 +297,11 @@ func (a *ParallelAgent) Run(ctx context.Context, input Input) (Output, error) {
 
 	results := make(chan result, len(a.agents))
 
-	// 使用 semaphore 控制并发度
-	var sem chan struct{}
+	// 使用 toolkit/lang/syncx.Semaphore 控制并发度
+	// maxParallel <= 0 时不限制并发，保持原有语义
+	var sem *syncx.Semaphore
 	if a.maxParallel > 0 {
-		sem = make(chan struct{}, a.maxParallel)
+		sem = syncx.NewSemaphore(a.maxParallel)
 	}
 
 	var wg sync.WaitGroup
@@ -309,8 +311,8 @@ func (a *ParallelAgent) Run(ctx context.Context, input Input) (Output, error) {
 			defer wg.Done()
 
 			if sem != nil {
-				sem <- struct{}{}
-				defer func() { <-sem }()
+				sem.Acquire()
+				defer sem.Release()
 			}
 
 			output, err := ag.Run(ctx, input)

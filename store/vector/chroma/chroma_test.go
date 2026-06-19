@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hexagon-codes/hexagon/store/vector"
+	"github.com/hexagon-codes/ai-core/store/vector"
 )
 
 // TestNewStore 测试创建存储

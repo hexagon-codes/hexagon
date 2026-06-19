@@ -1,7 +1,7 @@
 // supervisor.go 实现监督者 Agent 模式
 //
 // SupervisorAgent 由一个 Manager Agent 动态决定将任务分派给哪个 Worker Agent。
-// 借鉴 Google ADK 的 Supervisor 模式，结合 Hexagon 的工具系统实现。
+// Supervisor 模式：主 Agent 调度子 Agent 并汇总结果。
 //
 // 执行流程：
 //  1. 将所有 worker 通过 AgentAsTool 注册为 manager 的工具
@@ -26,10 +26,10 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/memory"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/ai-core/tool"
 	"github.com/hexagon-codes/hexagon/core"
 	"github.com/hexagon-codes/hexagon/internal/util"
-	"github.com/hexagon-codes/hexagon/stream"
 )
 
 // SupervisorAgent 监督者 Agent

@@ -30,7 +30,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hexagon-codes/hexagon/store/vector"
+	"github.com/hexagon-codes/ai-core/store/vector"
 )
 
 // 默认配置常量

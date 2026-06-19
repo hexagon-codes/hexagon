@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hexagon-codes/hexagon/stream"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 )
 
 // ============== Pipe2 测试 ==============

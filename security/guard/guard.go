@@ -232,9 +232,20 @@ func (c *GuardChain) Name() string {
 	return "guard_chain"
 }
 
-// Enabled 返回是否启用
+// Enabled 返回守卫链是否启用
+//
+// 链的"启用"语义应与 Check 的 enabledCount 一致：当且仅当存在至少一个
+// 已启用的子守卫时才视为启用。仅判断 len(guards)>0 会把"全部子守卫被禁用"
+// 误报为启用，与 Check 默认放行的行为不一致（回归: B12）。
 func (c *GuardChain) Enabled() bool {
-	return len(c.guards) > 0
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, g := range c.guards {
+		if g.Enabled() {
+			return true
+		}
+	}
+	return false
 }
 
 // 确保实现了 Guard 接口

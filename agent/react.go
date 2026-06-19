@@ -9,12 +9,12 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/memory"
+	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/ai-core/tool"
 	"github.com/hexagon-codes/hexagon/core"
 	"github.com/hexagon-codes/hexagon/hooks"
 	"github.com/hexagon-codes/hexagon/internal/util"
 	agentruntime "github.com/hexagon-codes/hexagon/runtime"
-	"github.com/hexagon-codes/hexagon/stream"
 )
 
 const defaultReActPrompt = `You are a helpful AI assistant with access to tools.
@@ -54,7 +54,10 @@ func NewReAct(opts ...Option) *ReActAgent {
 	return &ReActAgent{BaseAgent: base}
 }
 
-// Run 执行 ReAct Agent
+// Run 执行 ReAct Agent。
+//
+// 若经 WithCheckpointer 开启了持久化，本次执行会在每步边界持久化快照；返回的
+// Output.Metadata["run_id"] 即本次 run 的标识符，可用于后续 Resume。
 func (a *ReActAgent) Run(ctx context.Context, input Input) (Output, error) {
 	if a.config.LLM == nil {
 		return Output{}, fmt.Errorf("LLM provider not configured")
@@ -64,24 +67,60 @@ func (a *ReActAgent) Run(ctx context.Context, input Input) (Output, error) {
 	startTime := time.Now()
 	hookManager := hooks.ManagerFromContext(ctx)
 
-	runner := agentruntime.NewRunner(agentruntime.Config{
+	runner := a.newRunner(runID, hookManager)
+	result, err := runner.RunWithSink(ctx, a.newRequest(ctx, input, runID), a.runtimeHookSink(runID, input, startTime, hookManager))
+	return a.finishRun(ctx, input, runID, result, err, hookManager)
+}
+
+// Resume 从某次执行最近的持久化快照续跑（需经 WithCheckpointer 开启持久化）。
+//
+// runID 取自先前 Run 返回的 Output.Metadata["run_id"]。若该 run 已完成，Resume 直接
+// 返回其最终结果（不重跑）；若中断在中间步，则从该步之后继续。
+func (a *ReActAgent) Resume(ctx context.Context, runID string, input Input) (Output, error) {
+	if a.config.LLM == nil {
+		return Output{}, fmt.Errorf("LLM provider not configured")
+	}
+	if a.config.Durable == nil {
+		return Output{}, fmt.Errorf("agent: 未配置 WithCheckpointer，无法 Resume")
+	}
+
+	startTime := time.Now()
+	hookManager := hooks.ManagerFromContext(ctx)
+
+	runner := a.newRunner(runID, hookManager)
+	result, err := runner.Resume(ctx, runID, a.newRequest(ctx, input, runID), a.runtimeHookSink(runID, input, startTime, hookManager))
+	return a.finishRun(ctx, input, runID, result, err, hookManager)
+}
+
+// newRunner 按 Agent 配置构造底层 runtime runner（Run/Resume 共用）。
+func (a *ReActAgent) newRunner(runID string, hookManager *hooks.Manager) *agentruntime.DefaultRunner {
+	return agentruntime.NewRunner(agentruntime.Config{
 		ProviderSelector: agentruntime.StaticProviderSelector{
 			Provider: a.config.LLM,
 			Name:     a.config.LLM.Name(),
 		},
 		ToolExecutor:    &agentToolExecutor{tools: a.config.Tools, runID: runID, hookManager: hookManager},
 		DefaultMaxTurns: a.config.MaxIterations,
+		Middleware:      a.config.Middleware,
+		Durable:         a.config.Durable,
 	})
+}
 
-	result, err := runner.RunWithSink(ctx, agentruntime.Request{
+// newRequest 按 Agent 配置构造一次 runtime 请求（Run/Resume 共用）。
+func (a *ReActAgent) newRequest(ctx context.Context, input Input, runID string) agentruntime.Request {
+	return agentruntime.Request{
 		ID:       runID,
 		Messages: a.buildInitialMessages(ctx, input),
 		Tools:    a.buildToolDefinitions(),
 		Limits: agentruntime.Limits{
 			MaxTurns: a.config.MaxIterations,
 		},
-	}, a.runtimeHookSink(runID, input, startTime, hookManager))
-	output := outputFromRuntime(result)
+		Strategy: a.config.Strategy,
+	}
+}
+
+// finishRun 统一收尾：转换输出、写入 run_id、错误钩子、记忆保存（Run/Resume 共用）。
+func (a *ReActAgent) finishRun(ctx context.Context, input Input, runID string, result *agentruntime.Result, err error, hookManager *hooks.Manager) (Output, error) {
 	if err != nil {
 		if hookManager != nil {
 			hookManager.TriggerError(ctx, &hooks.ErrorEvent{
@@ -93,6 +132,12 @@ func (a *ReActAgent) Run(ctx context.Context, input Input) (Output, error) {
 		}
 		return Output{}, err
 	}
+
+	output := outputFromRuntime(result)
+	if output.Metadata == nil {
+		output.Metadata = map[string]any{}
+	}
+	output.Metadata["run_id"] = runID
 
 	// 保存到记忆（保存失败不影响主流程，但通过钩子报告错误）
 	if a.config.Memory != nil {

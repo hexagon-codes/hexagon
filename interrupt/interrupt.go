@@ -34,13 +34,12 @@ package interrupt
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/hexagon/checkpoint"
 )
 
 // ============== 错误定义 ==============
@@ -271,7 +270,7 @@ type Command struct {
 
 // Handler 中断处理器
 type Handler struct {
-	checkpointer Checkpointer
+	checkpointer checkpoint.Checkpointer
 	pending      sync.Map // threadID -> *pendingInterrupt
 }
 
@@ -285,9 +284,9 @@ type pendingInterrupt struct {
 }
 
 // NewHandler 创建中断处理器
-func NewHandler(checkpointer Checkpointer) *Handler {
+func NewHandler(checkpointer checkpoint.Checkpointer) *Handler {
 	if checkpointer == nil {
-		checkpointer = NewMemoryCheckpointer()
+		checkpointer = checkpoint.NewMemory()
 	}
 	return &Handler{
 		checkpointer: checkpointer,
@@ -310,15 +309,15 @@ func (h *Handler) interrupt(ctx context.Context, threadID, nodeID string, payloa
 	h.pending.Store(threadID, pending)
 	defer h.pending.Delete(threadID)
 
-	// 保存检查点
-	checkpoint := &Checkpoint{
+	// 保存检查点（领域 Checkpoint 作为 payload，经规范 checkpoint 包持久化）
+	cp := Checkpoint{
 		ThreadID:  threadID,
 		NodeID:    nodeID,
 		Payload:   payload,
 		Status:    StatusInterrupted,
 		Timestamp: pending.timestamp,
 	}
-	if err := h.checkpointer.Save(ctx, checkpoint); err != nil {
+	if err := checkpoint.PutValue(ctx, h.checkpointer, checkpoint.Checkpoint{Namespace: threadID, ID: threadID}, cp); err != nil {
 		return zero, fmt.Errorf("failed to save checkpoint: %w", err)
 	}
 
@@ -342,19 +341,19 @@ func (h *Handler) Resume(ctx context.Context, threadID string, cmd Command) erro
 		return nil
 	}
 
-	// 从检查点恢复
-	checkpoint, err := h.checkpointer.Load(ctx, threadID)
+	// 从检查点恢复（领域 Checkpoint 作为 payload）
+	cp, _, ok, err := checkpoint.GetValue[Checkpoint](ctx, h.checkpointer, threadID, threadID)
 	if err != nil {
 		return fmt.Errorf("failed to load checkpoint: %w", err)
 	}
-	if checkpoint == nil {
+	if !ok {
 		return ErrNoCheckpoint
 	}
 
 	// 更新检查点状态
-	checkpoint.Status = StatusResumed
-	checkpoint.ResumeData = cmd.Resume
-	if err := h.checkpointer.Save(ctx, checkpoint); err != nil {
+	cp.Status = StatusResumed
+	cp.ResumeData = cmd.Resume
+	if err := checkpoint.PutValue(ctx, h.checkpointer, checkpoint.Checkpoint{Namespace: threadID, ID: threadID}, cp); err != nil {
 		return fmt.Errorf("failed to update checkpoint: %w", err)
 	}
 
@@ -433,192 +432,6 @@ type Checkpoint struct {
 	Metadata   map[string]any `json:"metadata,omitempty"`
 	Timestamp  time.Time      `json:"timestamp"`
 	Version    int            `json:"version"`
-}
-
-// ============== Checkpointer 接口 ==============
-
-// Checkpointer 检查点持久化接口
-type Checkpointer interface {
-	// Save 保存检查点
-	Save(ctx context.Context, checkpoint *Checkpoint) error
-
-	// Load 加载检查点
-	Load(ctx context.Context, threadID string) (*Checkpoint, error)
-
-	// List 列出检查点历史
-	List(ctx context.Context, threadID string, limit int) ([]*Checkpoint, error)
-
-	// Delete 删除检查点
-	Delete(ctx context.Context, threadID string) error
-}
-
-// ============== MemoryCheckpointer 内存实现 ==============
-
-// MemoryCheckpointer 内存检查点存储
-type MemoryCheckpointer struct {
-	data sync.Map
-}
-
-// NewMemoryCheckpointer 创建内存检查点存储
-func NewMemoryCheckpointer() *MemoryCheckpointer {
-	return &MemoryCheckpointer{}
-}
-
-func (m *MemoryCheckpointer) Save(ctx context.Context, checkpoint *Checkpoint) error {
-	// 增加版本号
-	if existing, ok := m.data.Load(checkpoint.ThreadID); ok {
-		checkpoint.Version = existing.(*Checkpoint).Version + 1
-	} else {
-		checkpoint.Version = 1
-	}
-	m.data.Store(checkpoint.ThreadID, checkpoint)
-	return nil
-}
-
-func (m *MemoryCheckpointer) Load(ctx context.Context, threadID string) (*Checkpoint, error) {
-	if v, ok := m.data.Load(threadID); ok {
-		return v.(*Checkpoint), nil
-	}
-	return nil, nil
-}
-
-func (m *MemoryCheckpointer) List(ctx context.Context, threadID string, limit int) ([]*Checkpoint, error) {
-	if v, ok := m.data.Load(threadID); ok {
-		return []*Checkpoint{v.(*Checkpoint)}, nil
-	}
-	return nil, nil
-}
-
-func (m *MemoryCheckpointer) Delete(ctx context.Context, threadID string) error {
-	m.data.Delete(threadID)
-	return nil
-}
-
-// ============== JSONCheckpointer 文件实现 ==============
-
-// JSONCheckpointer JSON 文件检查点存储
-type JSONCheckpointer struct {
-	dir string
-	mu  sync.RWMutex
-}
-
-// NewJSONCheckpointer 创建 JSON 文件检查点存储
-func NewJSONCheckpointer(dir string) *JSONCheckpointer {
-	return &JSONCheckpointer{dir: dir}
-}
-
-func (j *JSONCheckpointer) filename(threadID string) string {
-	return filepath.Join(j.dir, threadID+".json")
-}
-
-func (j *JSONCheckpointer) Save(ctx context.Context, checkpoint *Checkpoint) error {
-	if checkpoint == nil {
-		return errors.New("checkpoint is nil")
-	}
-	if checkpoint.ThreadID == "" {
-		return errors.New("checkpoint thread_id is required")
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	j.mu.Lock()
-	defer j.mu.Unlock()
-
-	// 自动创建目录
-	if err := os.MkdirAll(j.dir, 0o755); err != nil {
-		return fmt.Errorf("create checkpoint dir: %w", err)
-	}
-
-	// 自动维护版本号
-	existing, err := j.loadUnlocked(ctx, checkpoint.ThreadID)
-	if err != nil {
-		return err
-	}
-	if existing != nil && checkpoint.Version <= existing.Version {
-		checkpoint.Version = existing.Version + 1
-	}
-	if checkpoint.Version == 0 {
-		checkpoint.Version = 1
-	}
-	if checkpoint.Timestamp.IsZero() {
-		checkpoint.Timestamp = time.Now()
-	}
-
-	data, err := json.MarshalIndent(checkpoint, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal checkpoint: %w", err)
-	}
-
-	// 先写临时文件，再原子替换，避免写入中断导致文件损坏
-	filename := j.filename(checkpoint.ThreadID)
-	tmp := filename + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write checkpoint tmp file: %w", err)
-	}
-	if err := os.Rename(tmp, filename); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename checkpoint file: %w", err)
-	}
-
-	return nil
-}
-
-func (j *JSONCheckpointer) Load(ctx context.Context, threadID string) (*Checkpoint, error) {
-	j.mu.RLock()
-	defer j.mu.RUnlock()
-
-	return j.loadUnlocked(ctx, threadID)
-}
-
-func (j *JSONCheckpointer) List(ctx context.Context, threadID string, limit int) ([]*Checkpoint, error) {
-	checkpoint, err := j.Load(ctx, threadID)
-	if err != nil {
-		return nil, err
-	}
-	if checkpoint == nil {
-		return nil, nil
-	}
-	return []*Checkpoint{checkpoint}, nil
-}
-
-func (j *JSONCheckpointer) Delete(ctx context.Context, threadID string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	j.mu.Lock()
-	defer j.mu.Unlock()
-
-	filename := j.filename(threadID)
-	if err := os.Remove(filename); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("delete checkpoint file: %w", err)
-	}
-
-	return nil
-}
-
-func (j *JSONCheckpointer) loadUnlocked(ctx context.Context, threadID string) (*Checkpoint, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if threadID == "" {
-		return nil, nil
-	}
-
-	data, err := os.ReadFile(j.filename(threadID))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read checkpoint file: %w", err)
-	}
-
-	var checkpoint Checkpoint
-	if err := json.Unmarshal(data, &checkpoint); err != nil {
-		return nil, fmt.Errorf("unmarshal checkpoint: %w", err)
-	}
-	return &checkpoint, nil
 }
 
 // ============== 便捷函数 ==============

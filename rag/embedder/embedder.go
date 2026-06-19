@@ -14,7 +14,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/hexagon-codes/hexagon/store/vector"
+	"github.com/hexagon-codes/ai-core/store/vector"
+	"github.com/hexagon-codes/toolkit/util/hash"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -403,8 +404,7 @@ var _ vector.Embedder = (*FuncEmbedder)(nil)
 
 // ============== 辅助函数 ==============
 
-// hashText 计算文本的 MD5 哈希
+// hashText 计算文本的 MD5 哈希（复用 toolkit 的等价实现）
 func hashText(text string) string {
-	hash := md5.Sum([]byte(text))
-	return hex.EncodeToString(hash[:])
+	return hash.MD5(text)
 }

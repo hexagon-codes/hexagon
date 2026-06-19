@@ -37,7 +37,8 @@ import (
 type OTelHexagonTracer struct {
 	config     *TracerConfig
 	otelTracer *OTelTracer
-	spans      sync.Map // traceID -> []*OTelHexagonSpan
+	spans      sync.Map   // traceID -> []*OTelHexagonSpan
+	spansMu    sync.Mutex // 保护对 spans 中切片值的「读-改-写」追加操作
 	closed     int32
 }
 
@@ -218,28 +219,37 @@ func (t *OTelHexagonTracer) Shutdown(ctx context.Context) error {
 }
 
 // GetSpans 获取指定 Trace ID 的所有 Span
+//
+// 返回内部切片的浅拷贝（copy-on-read），避免调用方与 storeSpan 的并发追加竞争，
+// 也防止调用方修改返回切片污染内部状态。
 func (t *OTelHexagonTracer) GetSpans(traceID string) []*OTelHexagonSpan {
+	t.spansMu.Lock()
+	defer t.spansMu.Unlock()
 	if spans, ok := t.spans.Load(traceID); ok {
-		return spans.([]*OTelHexagonSpan)
+		src := spans.([]*OTelHexagonSpan)
+		out := make([]*OTelHexagonSpan, len(src))
+		copy(out, src)
+		return out
 	}
 	return nil
 }
 
 // storeSpan 存储 Span
+//
+// 实现说明：sync.Map 的 value 是 []*OTelHexagonSpan 切片，而切片不可比较，
+// 因此不能用 CompareAndSwap 做乐观更新（CAS 内部用 == 比较旧值会 panic
+// "comparing uncomparable type"）。这里改用专用互斥锁保护「读-改-写」追加，
+// 既避免 CAS panic，又保证同一 traceID 并发追加 span 的写入安全与计数一致。
 func (t *OTelHexagonTracer) storeSpan(traceID string, span *OTelHexagonSpan) {
-	for {
-		if existing, ok := t.spans.Load(traceID); ok {
-			spans := existing.([]*OTelHexagonSpan)
-			newSpans := append(spans, span)
-			if t.spans.CompareAndSwap(traceID, existing, newSpans) {
-				return
-			}
-		} else {
-			if _, loaded := t.spans.LoadOrStore(traceID, []*OTelHexagonSpan{span}); !loaded {
-				return
-			}
-		}
+	t.spansMu.Lock()
+	defer t.spansMu.Unlock()
+
+	if existing, ok := t.spans.Load(traceID); ok {
+		spans := existing.([]*OTelHexagonSpan)
+		t.spans.Store(traceID, append(spans, span))
+		return
 	}
+	t.spans.Store(traceID, []*OTelHexagonSpan{span})
 }
 
 type traceIDKey struct{}
@@ -496,11 +506,13 @@ func (h *TracingRunHook) Timings() hooks.Timing {
 
 // OnStart 运行开始时创建 Span
 func (h *TracingRunHook) OnStart(ctx context.Context, event *hooks.RunStartEvent) error {
+	// 注意：RunStartEvent 仅携带 AgentID，不含真实 Agent 名称。
+	// 不能把 AgentID 复制进 agent.name —— 那是误导性的「假名称」，会丢失/掩盖真实名称。
+	// 此处只写 agent.id；待事件层补充 AgentName 后再补写 agent.name。
 	_, span := h.tracer.StartSpan(ctx, "agent.run",
 		tracer.WithSpanKind(tracer.SpanKindAgent),
 		tracer.WithAttributes(map[string]any{
-			tracer.AttrAgentID:   event.AgentID,
-			tracer.AttrAgentName: event.AgentID,
+			tracer.AttrAgentID: event.AgentID,
 		}),
 	)
 	span.SetInput(event.Input)

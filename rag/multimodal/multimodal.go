@@ -14,8 +14,6 @@
 //   - 文档: PDF, DOCX (带嵌入图片)
 //
 // 设计参考：
-//   - LlamaIndex MultiModalVectorStoreIndex
-//   - LangChain MultiModal
 //   - GPT-4V, Claude Vision
 package multimodal
 
@@ -31,9 +29,9 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/store/vector"
 	"github.com/hexagon-codes/hexagon/internal/util"
 	"github.com/hexagon-codes/hexagon/rag"
-	"github.com/hexagon-codes/hexagon/store/vector"
 )
 
 // ============== 内容类型定义 ==============
@@ -1057,60 +1055,90 @@ func (l *MultimodalLoader) LoadFromReader(ctx context.Context, r io.Reader, cont
 
 // ============== CLIP 模型支持 ==============
 
-// ErrCLIPNotImplemented CLIP 功能未实现错误
-var ErrCLIPNotImplemented = fmt.Errorf("CLIP embedding not implemented: this feature requires external CLIP API integration")
+// ErrCLIPNotImplemented 表示未注入 CLIP 后端时调用嵌入方法返回的错误。
+var ErrCLIPNotImplemented = fmt.Errorf("CLIP embedding 未配置后端: 请用 WithCLIPBackend 注入真实 CLIP 后端（OpenAI CLIP / HF Inference / clip-as-service / 自建服务）")
 
-// CLIPEmbedder CLIP 模型向量化器
-// 可以同时处理文本和图像，生成可比较的向量
+// CLIPBackend 是 CLIP 向量化的外部后端接口。
 //
-// ⚠️ 警告: 当前为占位实现，功能未完成！
+// 框架不内置 CLIP 模型（需 GPU / 外部推理服务），而是通过本接口让用户注入真实后端：
+//   - OpenAI / Hugging Face Inference API
+//   - clip-as-service 或自建 CLIP gRPC/HTTP 服务
 //
-// 当前状态: NOT_IMPLEMENTED (未实现)
-// - 所有方法会返回 ErrCLIPNotImplemented 错误
-// - 如需使用 CLIP 功能，请自行实现或等待后续版本
+// 注入后 CLIPEmbedder 的方法委托给后端；未注入时返回 ErrCLIPNotImplemented。
+// 这样框架在不内置重依赖、不伪造结果的前提下完整支持 CLIP 能力。
+type CLIPBackend interface {
+	// EmbedText 向量化文本，返回与图像向量同空间、可比较的向量。
+	EmbedText(ctx context.Context, texts []string) ([][]float32, error)
+	// EmbedImage 向量化单张图像。
+	EmbedImage(ctx context.Context, image *Content) ([]float32, error)
+}
+
+// CLIPEmbedder CLIP 模型向量化器：同时处理文本与图像，生成可跨模态比较的向量。
 //
-// 实现建议:
-// - 使用 OpenAI CLIP API
-// - 使用 Hugging Face Inference API
-// - 自建 CLIP 服务（使用 clip-as-service 等）
+// 本身不含模型权重；实际计算由注入的 CLIPBackend 完成（见 WithCLIPBackend）。
+// 未注入后端时所有嵌入方法返回 ErrCLIPNotImplemented（安全默认，不伪造向量）。
 type CLIPEmbedder struct {
 	endpoint string
 	apiKey   string
+	backend  CLIPBackend
 }
 
-// NewCLIPEmbedder 创建 CLIP 向量化器
+// CLIPOption 配置 CLIPEmbedder。
+type CLIPOption func(*CLIPEmbedder)
+
+// WithCLIPBackend 注入真实 CLIP 后端。注入后 IsImplemented() 返回 true。
+func WithCLIPBackend(b CLIPBackend) CLIPOption {
+	return func(e *CLIPEmbedder) { e.backend = b }
+}
+
+// NewCLIPEmbedder 创建 CLIP 向量化器。
 //
-// ⚠️ 警告: 当前为占位实现，功能未完成！
-// 调用任何方法都会返回 ErrCLIPNotImplemented 错误。
-func NewCLIPEmbedder(endpoint, apiKey string) *CLIPEmbedder {
-	return &CLIPEmbedder{
+// endpoint/apiKey 供基于 HTTP 的后端实现按需取用；未通过 WithCLIPBackend 注入后端时，
+// 嵌入方法返回 ErrCLIPNotImplemented。
+func NewCLIPEmbedder(endpoint, apiKey string, opts ...CLIPOption) *CLIPEmbedder {
+	e := &CLIPEmbedder{
 		endpoint: endpoint,
 		apiKey:   apiKey,
 	}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
 
-// IsImplemented 返回 CLIP 嵌入器是否已实现
+// IsImplemented 返回是否已注入可用的 CLIP 后端。
 func (e *CLIPEmbedder) IsImplemented() bool {
-	return false // 当前未实现
+	return e.backend != nil
 }
 
-// EmbedText 向量化文本
-//
-// ⚠️ 当前未实现，会返回 ErrCLIPNotImplemented 错误
+// EmbedText 向量化文本（委托后端；未注入后端返回 ErrCLIPNotImplemented）。
 func (e *CLIPEmbedder) EmbedText(ctx context.Context, texts []string) ([][]float32, error) {
-	return nil, ErrCLIPNotImplemented
+	if e.backend == nil {
+		return nil, ErrCLIPNotImplemented
+	}
+	return e.backend.EmbedText(ctx, texts)
 }
 
-// EmbedImage 向量化图像
-//
-// ⚠️ 当前未实现，会返回 ErrCLIPNotImplemented 错误
+// EmbedImage 向量化图像（委托后端；未注入后端返回 ErrCLIPNotImplemented）。
 func (e *CLIPEmbedder) EmbedImage(ctx context.Context, image *Content) ([]float32, error) {
-	return nil, ErrCLIPNotImplemented
+	if e.backend == nil {
+		return nil, ErrCLIPNotImplemented
+	}
+	return e.backend.EmbedImage(ctx, image)
 }
 
-// EmbedImages 批量向量化图像
-//
-// ⚠️ 当前未实现，会返回 ErrCLIPNotImplemented 错误
+// EmbedImages 批量向量化图像（逐张委托后端；未注入后端返回 ErrCLIPNotImplemented）。
 func (e *CLIPEmbedder) EmbedImages(ctx context.Context, images []*Content) ([][]float32, error) {
-	return nil, ErrCLIPNotImplemented
+	if e.backend == nil {
+		return nil, ErrCLIPNotImplemented
+	}
+	out := make([][]float32, len(images))
+	for i, img := range images {
+		vec, err := e.backend.EmbedImage(ctx, img)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = vec
+	}
+	return out, nil
 }

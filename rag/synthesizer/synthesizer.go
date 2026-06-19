@@ -15,9 +15,11 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon/rag"
+	"github.com/hexagon-codes/toolkit/lang/stringx"
 )
 
 // Synthesizer 响应合成器接口
@@ -121,7 +123,8 @@ func NewRefineSynthesizer(opts ...RefineSynthesizerOption) *RefineSynthesizer {
 上下文: {context}
 问题: {query}
 回答:`,
-		refinePrompt: `已有回答: {existing_answer}
+		refinePrompt: `原始问题: {query}
+已有回答: {existing_answer}
 以下是新的上下文信息: {context}
 如果新上下文有助于改进回答，请优化它；否则返回原回答。
 优化后的回答:`,
@@ -205,9 +208,10 @@ func (s *RefineSynthesizer) Synthesize(ctx context.Context, query string, docs [
 			prompt = strings.ReplaceAll(s.initialPrompt, "{context}", doc.Content)
 			prompt = strings.ReplaceAll(prompt, "{query}", query)
 		} else {
-			// 精炼提示
+			// 精炼提示：同时注入原始问题，避免后续轮次丢失用户问题上下文
 			prompt = strings.ReplaceAll(s.refinePrompt, "{existing_answer}", currentAnswer)
 			prompt = strings.ReplaceAll(prompt, "{context}", doc.Content)
+			prompt = strings.ReplaceAll(prompt, "{query}", query)
 		}
 
 		resp, err := s.llm.Complete(ctx, llm.CompletionRequest{
@@ -321,12 +325,11 @@ func (s *CompactSynthesizer) Synthesize(ctx context.Context, query string, docs 
 	}
 	compactedContext := strings.Join(contents, s.separator)
 
-	// 截断到最大长度（按 rune 截断，避免中文等多字节字符被切断产生无效 UTF-8）
-	if len(compactedContext) > s.maxContextLength {
-		runes := []rune(compactedContext)
-		if len(runes) > s.maxContextLength {
-			compactedContext = string(runes[:s.maxContextLength])
-		}
+	// 截断到最大长度：判定与截断动作统一用 rune（字符）度量，
+	// 避免"字节判定 / rune 截断"混用导致中文等多字节内容实际超限。
+	// 复用 toolkit/lang/stringx.SubString 做 UTF-8 安全截断。
+	if utf8.RuneCountInString(compactedContext) > s.maxContextLength {
+		compactedContext = stringx.SubString(compactedContext, 0, s.maxContextLength)
 	}
 
 	// 如果没有 LLM 提供者，返回占位响应
@@ -361,7 +364,7 @@ func (s *CompactSynthesizer) Synthesize(ctx context.Context, query string, docs 
 		Metadata: map[string]any{
 			"strategy":       "compact",
 			"doc_count":      len(docs),
-			"context_length": len(compactedContext),
+			"context_length": utf8.RuneCountInString(compactedContext),
 			"total_tokens":   resp.Usage.TotalTokens,
 		},
 	}
