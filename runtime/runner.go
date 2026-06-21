@@ -193,8 +193,8 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 		for _, p := range resumePending {
 			remaining = append(remaining, p.Call)
 		}
-		// executeToolCalls 内部按 ID 跳过已完成的，故可传全部 pending 调用。
-		if err := r.executeToolCalls(ctx, state, remaining, emitter, runID, resumePending); err != nil {
+		// 续跑补跑：executeToolCalls 内部按 ID 跳过已完成的，故可传全部 pending 调用。
+		if err := r.executeToolCalls(ctx, state, remaining, emitter, runID, resumePending, true); err != nil {
 			_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("resume_tool_execution", err)})
 			return nil, err
 		}
@@ -313,7 +313,7 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 			return nil, err
 		}
 
-		if err := r.executeToolCalls(ctx, state, resp.ToolCalls, emitter, runID, pending); err != nil {
+		if err := r.executeToolCalls(ctx, state, resp.ToolCalls, emitter, runID, pending, false); err != nil {
 			_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("tool_execution", err)})
 			return nil, err
 		}
@@ -333,7 +333,9 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 	if !state.Final {
 		err := ErrMaxTurns
 		_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("max_turns", err)})
-		return nil, err
+		// 返回携带已累积用量/推理/工具记录的部分结果：MaxTurns 耗尽时这些工作（含已
+		// 计费的 token）确实发生了，调用方应能据此恢复部分结果，而不是被丢弃为 nil。
+		return stateResult(state), err
 	}
 	if err := strategy.Finalize(ctx, state); err != nil {
 		_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("strategy_finalize", err)})
@@ -415,18 +417,25 @@ func streamError(stream *llm.Stream) error {
 	}
 }
 
-func (r *DefaultRunner) executeToolCalls(ctx context.Context, state *State, calls []llm.ToolCall, emitter *runEmitter, runID string, pending []PendingTool) error {
-	// 已完成工具（结果已在 state.ToolCalls）按 ID 跳过 —— 续跑时实现 per-tool 幂等：
-	// 已执行过的工具不再重复执行（含其副作用）。
-	done := make(map[string]bool, len(state.ToolCalls))
-	for _, rec := range state.ToolCalls {
-		if rec.ID != "" {
-			done[rec.ID] = true
+func (r *DefaultRunner) executeToolCalls(ctx context.Context, state *State, calls []llm.ToolCall, emitter *runEmitter, runID string, pending []PendingTool, resuming bool) error {
+	// per-tool 幂等去重只在「续跑补跑某个被中断步」时生效：该步崩溃前已完成的工具其
+	// 结果已记录在快照的 state.ToolCalls 里，按 ID 跳过、不重复执行（含副作用）。
+	//
+	// 正常热路径（resuming=false）一律不跨 turn 去重：provider 可能在后续 turn 复用
+	// 同一个 tool-call ID（廉价/有 bug 的模型确实会），那是新 turn 的全新 tool_call，
+	// 必须执行并补上配对的 tool result —— 否则该 turn 的 assistant tool_call 没有
+	// 配对结果，破坏下一次请求的 tool_call/result 配对契约。
+	done := make(map[string]bool)
+	if resuming {
+		for _, rec := range state.ToolCalls {
+			if rec.ID != "" {
+				done[rec.ID] = true
+			}
 		}
 	}
 	for _, call := range calls {
 		if call.ID != "" && done[call.ID] {
-			continue // 已完成，跳过（per-tool exactly-once）
+			continue // 续跑：该工具已在中断步完成，跳过（per-tool exactly-once）
 		}
 		if err := runBeforeTool(ctx, r.middleware, state, call); err != nil {
 			return err
@@ -459,6 +468,11 @@ func (r *DefaultRunner) executeToolCalls(ctx context.Context, state *State, call
 			Content:    result.Content,
 			ToolCallID: call.ID,
 		})
+		// 记录本次已产出结果的 ID，使同一批内重复出现的同 ID 调用不再重复执行
+		// （同一 tool_call ID 只需一个配对结果）。
+		if call.ID != "" {
+			done[call.ID] = true
+		}
 		if err := runAfterTool(ctx, r.middleware, state, call, result); err != nil {
 			return err
 		}

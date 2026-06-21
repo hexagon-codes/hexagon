@@ -195,7 +195,14 @@ func InterruptWithOptions[T any](ctx context.Context, payload any, opts ...Inter
 	result, err := handler.interrupt(ctx, threadID, nodeID, payload, zero)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && config.hasDefault {
-			return config.defaultValue.(T), nil
+			// 选项是类型擦除的，WithDefault[U] 的 U 可能与本调用的 T 不一致；
+			// 用受检断言把类型不匹配转成可处理的错误，而不是裸断言 panic。
+			def, ok := config.defaultValue.(T)
+			if !ok {
+				return zero, fmt.Errorf("%w: default value type %T does not match expected %T",
+					ErrInvalidResume, config.defaultValue, zero)
+			}
+			return def, nil
 		}
 		return zero, err
 	}
@@ -247,7 +254,14 @@ func WithDefault[T any](v T) InterruptOption {
 func WithValidator[T any](fn func(T) error) InterruptOption {
 	return func(c *interruptConfig) {
 		c.validator = func(v any) error {
-			return fn(v.(T))
+			// 选项是类型擦除的，恢复值的运行时类型可能与 WithValidator[T] 的 T 不一致；
+			// 用受检断言把类型不匹配转成错误，而不是裸断言 panic。
+			typed, ok := v.(T)
+			if !ok {
+				return fmt.Errorf("%w: resume value type %T does not match validator type %T",
+					ErrInvalidResume, v, *new(T))
+			}
+			return fn(typed)
 		}
 	}
 }

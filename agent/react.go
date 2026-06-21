@@ -130,7 +130,18 @@ func (a *ReActAgent) finishRun(ctx context.Context, input Input, runID string, r
 				Phase:   "run",
 			})
 		}
-		return Output{}, err
+		// 运行时在部分错误（如 MaxTurns 耗尽）下会回传携带已累积用量/推理/工具记录的
+		// 部分结果。此时把它转成 Output 一并返回，便于调用方恢复部分工作与已计费用量；
+		// 调用方仍应优先判断 err。无部分结果（result==nil）时保持返回空 Output 的旧契约。
+		if result == nil {
+			return Output{}, err
+		}
+		output := outputFromRuntime(result)
+		if output.Metadata == nil {
+			output.Metadata = map[string]any{}
+		}
+		output.Metadata["run_id"] = runID
+		return output, err
 	}
 
 	output := outputFromRuntime(result)
