@@ -102,7 +102,7 @@ searchTool := tool.NewFunc("web_search",
 )
 
 // Create an Agent with tools
-myAgent := agent.NewReActAgent(
+myAgent := agent.NewReAct(
     agent.WithLLM(llm),
     agent.WithTools(searchTool),
 )
@@ -132,20 +132,29 @@ Integrate a knowledge base to enhance Agent capabilities:
 ```go
 import (
     "github.com/hexagon-codes/hexagon/rag"
-    "github.com/hexagon-codes/hexagon/store/vector/qdrant"
+    "github.com/hexagon-codes/hexagon/rag/embedder"
+    "github.com/hexagon-codes/ai-core/store/vector/qdrant"
 )
 
-// Create a vector store
-store, _ := qdrant.New(ctx, qdrant.WithCollection("docs"))
-
-// Create a retriever
-retriever := rag.NewVectorRetriever(store, embedder)
-
-// Create a RAG Agent
-ragAgent := agent.NewRAGAgent(
-    agent.WithLLM(llm),
-    agent.WithRetriever(retriever),
+// Create a vector store (the Qdrant implementation lives in ai-core)
+store, _ := qdrant.NewWithOptions(
+    qdrant.WithCollection("docs"),
+    qdrant.WithDimension(1536),
 )
+
+// Create an embedder
+emb := embedder.NewOpenAIEmbedder(provider)
+
+// Create the RAG engine
+engine := rag.NewEngine(
+    rag.WithStore(store),
+    rag.WithEngineEmbedder(emb),
+    rag.WithEngineTopK(3),
+)
+
+// Index documents and query
+_ = engine.Index(ctx, docs)
+answer, _ := engine.Query(ctx, "What is Hexagon?")
 ```
 
 ## Observability

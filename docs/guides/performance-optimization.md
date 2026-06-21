@@ -10,8 +10,16 @@
 
 ```go
 // 使用流式输出减少首字节时间
-stream, _ := agent.Stream(ctx, input)
-for chunk := range stream.C {
+reader, _ := myAgent.Stream(ctx, input)
+defer reader.Close()
+for {
+    chunk, err := reader.Recv()
+    if errors.Is(err, io.EOF) {
+        break
+    }
+    if err != nil {
+        break
+    }
     fmt.Print(chunk.Content)
 }
 ```
@@ -37,7 +45,7 @@ memory := memory.NewBufferMemory(
 
 ```go
 // 限制工具调用次数，防止死循环
-agent := agent.NewReActAgent(
+myAgent := agent.NewReAct(
     agent.WithMaxIterations(5),
 )
 ```

@@ -616,15 +616,29 @@ hexagon/
 │   ├── agent.go                  # Agent interface definition
 │   ├── react.go                  # ReAct Agent implementation
 │   ├── primitives.go             # Agent primitives (Parallel/Sequential/Route)
+│   ├── agent_tool.go             # AgentTool (Agent as a tool)
+│   ├── supervisor.go             # Supervisor scheduling
 │   ├── role.go                   # Role system
 │   ├── team.go                   # Team collaboration (4 work modes)
 │   ├── handoff.go                # Agent handoff
 │   ├── state.go                  # Four-layer state management
 │   ├── network.go                # Agent network communication
-│   └── consensus.go              # Consensus mechanism
+│   ├── consensus.go              # Consensus mechanism
+│   ├── a2a/                      # A2A protocol (Client/Server/Handler/Discovery)
+│   ├── artifact/                 # Artifact system
+│   ├── semantic/                 # Semantic capabilities
+│   └── skill/                    # Skill registry & signing
 │
 ├── core/                         # Core interfaces
-│   └── component.go              # Component[I,O] unified interface + Stream[T]
+│   ├── runnable.go               # Component/Runnable unified interface + Stream[T] + Schema alias
+│   ├── compose.go                # Declarative composition
+│   └── fallback.go               # Resilient fallback
+│
+├── runtime/                      # Unified execution runtime
+│   ├── runner.go                 # Unified Runner
+│   ├── durable.go                # DurableExecution (per-tool exactly-once + Resume)
+│   ├── middleware/               # Budget/CostControl/Compaction/PermissionMode
+│   └── strategy/                 # Execution strategies (ReAct/PlanExecute/Reflection)
 │
 ├── orchestration/                # Orchestration layer
 │   ├── graph/                    # Graph orchestration engine
@@ -641,24 +655,37 @@ hexagon/
 │   │   ├── functional.go         # Functional API
 │   │   ├── stream_mode.go        # Stream mode
 │   │   └── visualize.go          # Graph visualization
-│   ├── flow/                     # Flow orchestration (configurable timeouts)
-│   ├── chain/                    # Chain orchestration
+│   ├── chain/                    # Chain orchestration (compile-time I/O type checks)
 │   ├── workflow/                 # Workflow engine
 │   └── planner/                  # Planner
 │
+├── checkpoint/                   # Unified Checkpointer persistence
+├── interrupt/                    # Interrupt & resume
+│
 ├── rag/                          # RAG system
 │   ├── rag.go                    # RAG core interfaces
-│   ├── loader/                   # Document loaders (Text/MD/CSV/XLSX/PPTX/DOCX/PDF/OCR)
+│   ├── loader/                   # Document loaders + Parser layer (Text/MD/CSV/XLSX/PPTX/DOCX/PDF/OCR)
 │   ├── splitter/                 # Document splitters (Character/Recursive/MD/Sentence/Token/Code)
 │   ├── embedder/                 # Embedders
 │   ├── indexer/                  # Indexers
 │   ├── retriever/                # Retrievers (Vector/Keyword/Hybrid/HyDE/Adaptive/ParentDoc)
 │   ├── reranker/                 # Rerankers
-│   └── synthesizer/              # Response synthesizers (Refine/Compact/Tree)
+│   ├── synthesizer/              # Response synthesizers (Refine/Compact/Tree)
+│   ├── adw/                      # Agentic Document Workflows (extractor/validator)
+│   ├── agentic/                  # Agentic RAG
+│   ├── corrective/               # Corrective RAG
+│   ├── selfrag/                  # Self-RAG
+│   └── multimodal/               # Multimodal
 │
-├── memory/                       # Multi-Agent shared memory
-├── artifact/                     # Artifact system
-├── mcp/                          # MCP protocol support
+├── llm/                          # LLM orchestration layer
+│   ├── structured/               # Native json_schema structured output
+│   ├── batch/                    # Batch calls
+│   ├── conversation/             # Conversation management
+│   ├── parser/                   # Output parsing
+│   └── template/                 # Prompt templates
+│
+├── memory/store/                 # Multi-Agent memory stores (InMemory/File/Redis/Persistent)
+├── mcp/                          # MCP protocol (discovery/auto-reconnect/multi-transport)
 │
 ├── hooks/                        # Hook system
 │
@@ -667,25 +694,35 @@ hexagon/
 │   ├── metrics/                  # Metrics
 │   ├── logger/                   # Logging
 │   ├── devui/                    # Dev UI backend
-│   ├── otel/                     # OpenTelemetry integration
-│   └── prometheus/               # Prometheus integration
+│   ├── otel/                     # OpenTelemetry + Langfuse export
+│   ├── prometheus/               # Prometheus integration
+│   └── replay/                   # Record and replay
 │
 ├── security/                     # Security
-│   ├── guard/                    # Security guards (injection detection/PII)
+│   ├── guard/                    # Security guards (injection detection)
+│   ├── guardrails/               # Guardrails
+│   ├── pii/                      # PII detection
 │   ├── rbac/                     # Role-based access control
 │   ├── cost/                     # Cost control
 │   ├── audit/                    # Audit logging
-│   └── filter/                   # Content filtering
+│   ├── filter/                   # Content filtering
+│   ├── tenant/                   # Multi-tenant isolation
+│   └── credential/               # Credential management
 │
 ├── tool/                         # Tool system
 │   ├── file/                     # File operations
 │   ├── python/                   # Python execution
 │   ├── shell/                    # Shell execution
-│   └── sandbox/                  # Sandbox execution
+│   ├── sandbox/                  # Sandbox execution
+│   ├── http/                     # HTTP requests
+│   ├── search/                   # Search
+│   ├── database/                 # Database
+│   └── browser/                  # Browser
+│
+├── client/                       # Client
 │
 ├── store/                        # Storage
 │   └── vector/                   # Vector stores
-│       ├── qdrant/               # Qdrant
 │       ├── faiss/                # FAISS
 │       ├── pgvector/             # PgVector
 │       ├── redis/                # Redis
@@ -694,22 +731,26 @@ hexagon/
 │       ├── pinecone/             # Pinecone
 │       └── weaviate/             # Weaviate
 │
+│   # Note: the Qdrant implementation lives in ai-core (ai-core/store/vector/qdrant)
+│
 ├── plugin/                       # Plugin system
 ├── config/                       # Configuration management
-├── evaluate/                     # Evaluation system
+├── evaluate/                     # Evaluation system (agenteval/rag/metrics)
 │
 ├── testing/                      # Testing
 │   ├── mock/                     # Mock utilities
 │   ├── record/                   # Record and replay
+│   ├── e2e/                      # End-to-end tests
 │   └── integration/              # Integration tests
 │
 ├── bench/                        # Benchmarks
-├── examples/                     # Example code
+├── examples/                     # Example code (standalone module)
 ├── deploy/                       # Deployment configs (Docker Compose/Helm/CI)
 ├── docs/                         # Public documentation
 ├── internal/                     # Internal implementation
 │
-├── hexagon.go                    # Main package entry (version: v0.3.2-beta)
+├── hexagon.go                    # Main package entry (version: v0.5.0)
+├── deprecated.go                 # Transitional re-exports (removed in next major)
 ├── go.mod
 ├── Makefile
 └── README.md

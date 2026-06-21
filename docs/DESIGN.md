@@ -616,15 +616,29 @@ hexagon/
 │   ├── agent.go                  # Agent 接口定义
 │   ├── react.go                  # ReAct Agent 实现
 │   ├── primitives.go             # Agent 原语 (Parallel/Sequential/Route)
+│   ├── agent_tool.go             # AgentTool (Agent 即工具)
+│   ├── supervisor.go             # Supervisor 调度
 │   ├── role.go                   # 角色系统
 │   ├── team.go                   # 团队协作 (4 种工作模式)
 │   ├── handoff.go                # Agent 交接
 │   ├── state.go                  # 四层状态管理
 │   ├── network.go                # Agent 网络通信
-│   └── consensus.go              # 共识机制
+│   ├── consensus.go              # 共识机制
+│   ├── a2a/                      # A2A 协议 (Client/Server/Handler/Discovery)
+│   ├── artifact/                 # 工件系统
+│   ├── semantic/                 # 语义能力
+│   └── skill/                    # 技能注册与签名
 │
 ├── core/                         # 核心接口
-│   └── component.go              # Component[I,O] 统一接口 + Stream[T]
+│   ├── runnable.go               # Component/Runnable 统一接口 + Stream[T] + Schema 别名
+│   ├── compose.go                # 声明式组合
+│   └── fallback.go               # 弹性回退
+│
+├── runtime/                      # 统一执行运行时
+│   ├── runner.go                 # 统一 Runner
+│   ├── durable.go                # DurableExecution (per-tool exactly-once + Resume)
+│   ├── middleware/               # Budget/CostControl/Compaction/PermissionMode
+│   └── strategy/                 # 执行策略 (ReAct/PlanExecute/Reflection)
 │
 ├── orchestration/                # 编排层
 │   ├── graph/                    # 图编排引擎
@@ -641,24 +655,37 @@ hexagon/
 │   │   ├── functional.go         # 函数式 API
 │   │   ├── stream_mode.go        # 流模式
 │   │   └── visualize.go          # 图可视化
-│   ├── flow/                     # Flow 流程编排 (可配置超时)
-│   ├── chain/                    # 链式编排
+│   ├── chain/                    # 链式编排 (Compile 期 I/O 类型校验)
 │   ├── workflow/                 # 工作流引擎
 │   └── planner/                  # 规划器
 │
+├── checkpoint/                   # 统一 Checkpointer 持久化
+├── interrupt/                    # 中断恢复
+│
 ├── rag/                          # RAG 系统
 │   ├── rag.go                    # RAG 核心接口
-│   ├── loader/                   # 文档加载器 (Text/MD/CSV/XLSX/PPTX/DOCX/PDF/OCR)
+│   ├── loader/                   # 文档加载器 + Parser 层 (Text/MD/CSV/XLSX/PPTX/DOCX/PDF/OCR)
 │   ├── splitter/                 # 文档分割器 (Character/Recursive/MD/Sentence/Token/Code)
 │   ├── embedder/                 # 向量生成器
 │   ├── indexer/                  # 索引器
 │   ├── retriever/                # 检索器 (Vector/Keyword/Hybrid/HyDE/Adaptive/ParentDoc)
 │   ├── reranker/                 # 重排序器
-│   └── synthesizer/              # 响应合成器 (Refine/Compact/Tree)
+│   ├── synthesizer/              # 响应合成器 (Refine/Compact/Tree)
+│   ├── adw/                      # 智能文档工作流 (extractor/validator)
+│   ├── agentic/                  # Agentic RAG
+│   ├── corrective/               # 纠错式 RAG
+│   ├── selfrag/                  # Self-RAG
+│   └── multimodal/               # 多模态
 │
-├── memory/                       # 多 Agent 记忆共享
-├── artifact/                     # 工件系统
-├── mcp/                          # MCP 协议支持
+├── llm/                          # LLM 编排层
+│   ├── structured/               # 原生 json_schema 结构化输出
+│   ├── batch/                    # 批量调用
+│   ├── conversation/             # 会话管理
+│   ├── parser/                   # 输出解析
+│   └── template/                 # Prompt 模板
+│
+├── memory/store/                 # 多 Agent 记忆存储 (InMemory/File/Redis/Persistent)
+├── mcp/                          # MCP 协议 (动态发现/自动重连/多传输)
 │
 ├── hooks/                        # 钩子系统
 │
@@ -667,25 +694,35 @@ hexagon/
 │   ├── metrics/                  # 指标
 │   ├── logger/                   # 日志
 │   ├── devui/                    # Dev UI 后端
-│   ├── otel/                     # OpenTelemetry 集成
-│   └── prometheus/               # Prometheus 集成
+│   ├── otel/                     # OpenTelemetry + Langfuse 导出
+│   ├── prometheus/               # Prometheus 集成
+│   └── replay/                   # 录制回放
 │
 ├── security/                     # 安全
-│   ├── guard/                    # 安全守卫 (注入检测/PII)
+│   ├── guard/                    # 安全守卫 (注入检测)
+│   ├── guardrails/               # 防护栏
+│   ├── pii/                      # PII 检测
 │   ├── rbac/                     # 角色权限控制
 │   ├── cost/                     # 成本控制
 │   ├── audit/                    # 审计日志
-│   └── filter/                   # 内容过滤
+│   ├── filter/                   # 内容过滤
+│   ├── tenant/                   # 多租户隔离
+│   └── credential/               # 凭证管理
 │
 ├── tool/                         # 工具系统
 │   ├── file/                     # 文件操作
 │   ├── python/                   # Python 执行
 │   ├── shell/                    # Shell 执行
-│   └── sandbox/                  # 沙箱执行
+│   ├── sandbox/                  # 沙箱执行
+│   ├── http/                     # HTTP 请求
+│   ├── search/                   # 搜索
+│   ├── database/                 # 数据库
+│   └── browser/                  # 浏览器
+│
+├── client/                       # 客户端
 │
 ├── store/                        # 存储
 │   └── vector/                   # 向量存储
-│       ├── qdrant/               # Qdrant
 │       ├── faiss/                # FAISS
 │       ├── pgvector/             # PgVector
 │       ├── redis/                # Redis
@@ -694,22 +731,26 @@ hexagon/
 │       ├── pinecone/             # Pinecone
 │       └── weaviate/             # Weaviate
 │
+│   # 注：Qdrant 实现位于 ai-core (ai-core/store/vector/qdrant)
+│
 ├── plugin/                       # 插件系统
 ├── config/                       # 配置管理
-├── evaluate/                     # 评估系统
+├── evaluate/                     # 评估系统 (agenteval/rag/metrics)
 │
 ├── testing/                      # 测试
 │   ├── mock/                     # Mock 工具
 │   ├── record/                   # 录制回放
+│   ├── e2e/                      # 端到端测试
 │   └── integration/              # 集成测试
 │
 ├── bench/                        # 基准测试
-├── examples/                     # 示例代码
+├── examples/                     # 示例代码 (独立 module)
 ├── deploy/                       # 部署配置 (Docker Compose/Helm/CI)
 ├── docs/                         # 公开文档
 ├── internal/                     # 内部实现
 │
-├── hexagon.go                    # 主入口包 (版本: v0.3.2-beta)
+├── hexagon.go                    # 主入口包 (版本: v0.5.0)
+├── deprecated.go                 # 过渡性重导出 (下一大版本移除)
 ├── go.mod
 ├── Makefile
 └── README.md

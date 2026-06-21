@@ -508,7 +508,7 @@ A2A is an open protocol that defines a standard way for AI agents to communicate
 ```go
 import (
     "github.com/hexagon-codes/hexagon/agent"
-    "github.com/hexagon-codes/hexagon/a2a"
+    "github.com/hexagon-codes/hexagon/agent/a2a"
 )
 
 // Create a Hexagon Agent

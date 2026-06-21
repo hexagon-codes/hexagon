@@ -18,8 +18,8 @@ A2A (Agent-to-Agent) is an open protocol that defines a standardized communicati
 
 ```go
 import (
-    "github.com/hexagon-codes/hexagon/a2a"
     "github.com/hexagon-codes/hexagon/agent"
+    "github.com/hexagon-codes/hexagon/agent/a2a"
 )
 
 // Create a Hexagon Agent
@@ -425,7 +425,7 @@ cards, _ := discovery.Discover(ctx, nil)
 
 ```go
 // Wrap a Hexagon Agent as an A2A Handler
-myAgent := agent.NewReActAgent(...)
+myAgent := agent.NewReAct(...)
 handler := a2a.WrapAgent(myAgent)
 
 // Or use a streaming wrapper

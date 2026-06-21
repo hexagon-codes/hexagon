@@ -102,7 +102,7 @@ searchTool := tool.NewFunc("web_search",
 )
 
 // 创建带工具的 Agent
-myAgent := agent.NewReActAgent(
+myAgent := agent.NewReAct(
     agent.WithLLM(llm),
     agent.WithTools(searchTool),
 )
@@ -132,20 +132,29 @@ myAgent := agent.NewBaseAgent(
 ```go
 import (
     "github.com/hexagon-codes/hexagon/rag"
-    "github.com/hexagon-codes/hexagon/store/vector/qdrant"
+    "github.com/hexagon-codes/hexagon/rag/embedder"
+    "github.com/hexagon-codes/ai-core/store/vector/qdrant"
 )
 
-// 创建向量存储
-store, _ := qdrant.New(ctx, qdrant.WithCollection("docs"))
-
-// 创建检索器
-retriever := rag.NewVectorRetriever(store, embedder)
-
-// 创建 RAG Agent
-ragAgent := agent.NewRAGAgent(
-    agent.WithLLM(llm),
-    agent.WithRetriever(retriever),
+// 创建向量存储（Qdrant 实现位于 ai-core）
+store, _ := qdrant.NewWithOptions(
+    qdrant.WithCollection("docs"),
+    qdrant.WithDimension(1536),
 )
+
+// 创建嵌入器
+emb := embedder.NewOpenAIEmbedder(provider)
+
+// 创建 RAG 引擎
+engine := rag.NewEngine(
+    rag.WithStore(store),
+    rag.WithEngineEmbedder(emb),
+    rag.WithEngineTopK(3),
+)
+
+// 索引文档并查询
+_ = engine.Index(ctx, docs)
+answer, _ := engine.Query(ctx, "什么是 Hexagon？")
 ```
 
 ## 可观测性

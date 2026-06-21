@@ -21,8 +21,8 @@ import (
     "github.com/hexagon-codes/hexagon/rag/indexer"
     "github.com/hexagon-codes/hexagon/rag/retriever"
     "github.com/hexagon-codes/hexagon/rag/synthesizer"
-    "github.com/hexagon-codes/hexagon/store/vector"
     "github.com/hexagon-codes/ai-core/llm/openai"
+    "github.com/hexagon-codes/ai-core/store/vector"
 )
 
 func main() {
@@ -208,7 +208,7 @@ store := vector.NewMemoryStore(1536) // vector dimensions
 Recommended for production — excellent performance.
 
 ```go
-import "github.com/hexagon-codes/hexagon/store/vector/qdrant"
+import "github.com/hexagon-codes/ai-core/store/vector/qdrant"
 
 store, err := qdrant.New(qdrant.Config{
     Host:       "localhost",

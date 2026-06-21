@@ -17,63 +17,82 @@ A RAG system enhances LLM responses by retrieving relevant documents. The main s
 
 ## Quick Start
 
+The recommended entry point is `rag.Engine`, which wires the vector store, embedder, and retrieval into a single facade:
+
 ```go
 import (
     "github.com/hexagon-codes/hexagon/rag"
-    "github.com/hexagon-codes/hexagon/store/vector/qdrant"
+    "github.com/hexagon-codes/hexagon/rag/embedder"
+    "github.com/hexagon-codes/ai-core/store/vector/qdrant"
 )
 
 // 1. Create vector store
-store, err := qdrant.New(ctx,
+store, err := qdrant.NewWithOptions(
     qdrant.WithCollection("knowledge"),
     qdrant.WithDimension(1536),
+    qdrant.WithCreateCollection(true),
 )
 
-// 2. Create embedder
-embedder := rag.NewOpenAIEmbedder(openaiClient)
+// 2. Create embedder (provider is any LLM Provider implementing Embed)
+emb := embedder.NewOpenAIEmbedder(provider)
 
-// 3. Create retriever
-retriever := rag.NewVectorRetriever(store, embedder,
-    rag.WithTopK(5),
+// 3. Create the RAG engine
+engine := rag.NewEngine(
+    rag.WithStore(store),
+    rag.WithEngineEmbedder(emb),
+    rag.WithEngineTopK(5),
 )
 
-// 4. Create RAG pipeline
-pipeline := rag.NewPipeline(
-    rag.WithRetriever(retriever),
-    rag.WithLLM(llm),
-)
+// 4. Index documents
+_ = engine.Index(ctx, docs)
 
-// 5. Query
-response, err := pipeline.Query(ctx, "What is Hexagon?")
+// 5. Retrieve and assemble context (returns a string ready to feed an LLM)
+context, err := engine.Query(ctx, "What is Hexagon?")
 ```
 
+> To assemble a pipeline manually, use the positional constructor
+> `rag.NewPipeline(loader, splitter, indexer, retriever)`; its `Query` method returns `[]rag.Document`.
+
 ## Document Loading
+
+Loaders live in the `rag/loader` subpackage.
 
 ### Text Files
 
 ```go
-loader := rag.NewTextLoader("./docs")
-docs, err := loader.Load(ctx)
+import "github.com/hexagon-codes/hexagon/rag/loader"
+
+l := loader.NewTextLoader("./docs/intro.txt")
+docs, err := l.Load(ctx)
 ```
 
 ### PDF Files
 
 ```go
-loader := rag.NewPDFLoader("./documents/manual.pdf")
-docs, err := loader.Load(ctx)
+l := loader.NewPDFLoader("./documents/manual.pdf")
+docs, err := l.Load(ctx)
 ```
 
 ### Web Pages
 
 ```go
-loader := rag.NewWebLoader([]string{
-    "https://example.com/page1",
-    "https://example.com/page2",
-})
-docs, err := loader.Load(ctx)
+l := loader.NewURLLoader("https://example.com/page1")
+docs, err := l.Load(ctx)
+```
+
+### Directory
+
+```go
+l := loader.NewDirectoryLoader("./docs",
+    loader.WithPattern("*.md"),
+    loader.WithRecursive(true),
+)
+docs, err := l.Load(ctx)
 ```
 
 ### Custom Loader
+
+Implement the `rag.Loader` interface (`Load` + `Name`):
 
 ```go
 type MyLoader struct{}
@@ -82,105 +101,103 @@ func (l *MyLoader) Load(ctx context.Context) ([]rag.Document, error) {
     // Custom loading logic
     return docs, nil
 }
+
+func (l *MyLoader) Name() string { return "my-loader" }
 ```
 
 ## Document Splitting
 
+Splitters live in the `rag/splitter` subpackage; the `Split` method signature is `Split(ctx, docs)`.
+
 ### Character Splitting
 
 ```go
-splitter := rag.NewCharacterSplitter(
-    rag.WithChunkSize(1000),
-    rag.WithChunkOverlap(200),
+import "github.com/hexagon-codes/hexagon/rag/splitter"
+
+s := splitter.NewCharacterSplitter(
+    splitter.WithChunkSize(1000),
+    splitter.WithChunkOverlap(200),
 )
-chunks, err := splitter.Split(docs)
+chunks, err := s.Split(ctx, docs)
 ```
 
 ### Recursive Splitting
 
 ```go
-splitter := rag.NewRecursiveSplitter(
-    rag.WithSeparators([]string{"\n\n", "\n", " "}),
-    rag.WithChunkSize(1000),
+s := splitter.NewRecursiveSplitter(
+    splitter.WithSeparators([]string{"\n\n", "\n", " "}),
+    splitter.WithRecursiveChunkSize(1000),
 )
-chunks, err := splitter.Split(docs)
+chunks, err := s.Split(ctx, docs)
 ```
 
-### Semantic Splitting
+### Sentence Splitting
 
 ```go
-splitter := rag.NewSemanticSplitter(embedder,
-    rag.WithBreakpointThreshold(0.3),
+s := splitter.NewSentenceSplitter(
+    splitter.WithSentenceChunkSize(1000),
+    splitter.WithSentenceChunkOverlap(100),
 )
-chunks, err := splitter.Split(docs)
+chunks, err := s.Split(ctx, docs)
 ```
 
 ## Vector Storage
 
+Vector store implementations live in ai-core's `store/vector` package.
+
 ### Qdrant
 
 ```go
-store, err := qdrant.New(ctx,
+import "github.com/hexagon-codes/ai-core/store/vector/qdrant"
+
+store, err := qdrant.NewWithOptions(
     qdrant.WithHost("localhost"),
     qdrant.WithPort(6333),
     qdrant.WithCollection("documents"),
     qdrant.WithDimension(1536),
-)
-```
-
-### Chroma
-
-```go
-store, err := chroma.NewStore(ctx,
-    chroma.WithHost("localhost"),
-    chroma.WithPort(8000),
-    chroma.WithCollection("documents"),
-)
-```
-
-### Milvus
-
-```go
-store, err := milvus.NewStore(ctx,
-    milvus.WithAddress("localhost:19530"),
-    milvus.WithCollection("documents"),
-    milvus.WithDimension(1536),
+    qdrant.WithCreateCollection(true),
 )
 ```
 
 ### In-Memory Store (Development & Testing)
 
 ```go
+import "github.com/hexagon-codes/ai-core/store/vector"
+
 store := vector.NewMemoryStore(1536)
 ```
 
 ## Retrieval Strategies
 
+Retrievers live in the `rag/retriever` subpackage.
+
 ### Vector Retrieval
 
 ```go
-retriever := rag.NewVectorRetriever(store, embedder,
-    rag.WithTopK(5),
-    rag.WithMinScore(0.7),
+import "github.com/hexagon-codes/hexagon/rag/retriever"
+
+vectorRetriever := retriever.NewVectorRetriever(store, embedder,
+    retriever.WithTopK(5),
+    retriever.WithMinScore(0.7),
 )
 ```
 
 ### Keyword Retrieval
 
 ```go
-retriever := rag.NewKeywordRetriever(index,
-    rag.WithTopK(10),
+keywordRetriever := retriever.NewKeywordRetriever(docs,
+    retriever.WithKeywordTopK(10),
 )
 ```
 
 ### Hybrid Retrieval
 
 ```go
-retriever := rag.NewHybridRetriever(
+hybridRetriever := retriever.NewHybridRetriever(
     vectorRetriever,
     keywordRetriever,
-    rag.WithVectorWeight(0.7),
-    rag.WithKeywordWeight(0.3),
+    retriever.WithVectorWeight(0.7),
+    retriever.WithKeywordWeight(0.3),
 )
 ```
 
@@ -248,11 +265,17 @@ chain := reranker.NewChainReranker(
 
 ## Response Synthesis
 
+Synthesizers live in the `rag/synthesizer` subpackage; the LLM is passed via an option, and `Synthesize(ctx, query, docs)` returns a `*synthesizer.Response`.
+
 ### Simple Synthesis
 
 ```go
-synthesizer := rag.NewSimpleSynthesizer(llm)
-response, err := synthesizer.Synthesize(ctx, query, docs)
+import "github.com/hexagon-codes/hexagon/rag/synthesizer"
+
+s := synthesizer.NewSimpleSummarizeSynthesizer(
+    synthesizer.WithSimpleSynthesizerLLM(llm),
+)
+response, err := s.Synthesize(ctx, query, docs)
 ```
 
 ### Refine Synthesis
@@ -260,8 +283,9 @@ response, err := synthesizer.Synthesize(ctx, query, docs)
 Iteratively refine the answer:
 
 ```go
-synthesizer := rag.NewRefineSynthesizer(llm,
-    rag.WithRefinePrompt("Improve the answer based on the following new information..."),
+s := synthesizer.NewRefineSynthesizer(
+    synthesizer.WithRefineSynthesizerLLM(llm),
+    synthesizer.WithRefinePrompt("Improve the answer based on the following new information..."),
 )
 ```
 
@@ -270,52 +294,42 @@ synthesizer := rag.NewRefineSynthesizer(llm,
 Compress multiple documents:
 
 ```go
-synthesizer := rag.NewCompactSynthesizer(llm,
-    rag.WithMaxTokens(4000),
+s := synthesizer.NewCompactSynthesizer(
+    synthesizer.WithCompactSynthesizerLLM(llm),
+    synthesizer.WithCompactSynthesizerMaxContext(4000),
 )
 ```
 
 ## Full Pipeline
 
+`rag.NewPipeline` takes positional arguments `(loader, splitter, indexer, retriever)`; `Ingest` runs load-split-index, and `Query` returns `[]rag.Document`:
+
 ```go
-// Configure the pipeline
-pipeline := rag.NewPipeline(
-    // Retrieval configuration
-    rag.WithRetriever(hybridRetriever),
+pipeline := rag.NewPipeline(textLoader, charSplitter, vectorIndexer, vectorRetriever)
 
-    // Reranking configuration
-    rag.WithReranker(crossEncoderReranker),
+// Run load, split, and index in one pass
+_ = pipeline.Ingest(ctx)
 
-    // Synthesis configuration
-    rag.WithSynthesizer(refineSynthesizer),
-
-    // LLM configuration
-    rag.WithLLM(llm),
-
-    // Other options
+// Retrieve (returns a document list you can hand to a reranker / synthesizer)
+docs, err := pipeline.Query(ctx, "Your question",
     rag.WithTopK(10),
-    rag.WithMaxContextLength(4000),
+    rag.WithMinScore(0.5),
 )
-
-// Execute query
-response, err := pipeline.Query(ctx, "Your question")
 ```
 
-## Indexing Pipeline
+## Indexer
 
-Index documents in one pass:
+Indexers live in the `rag/indexer` subpackage; `Index(ctx, docs)` writes to the vector store:
 
 ```go
-indexer := rag.NewIndexer(
-    rag.WithLoader(loader),
-    rag.WithSplitter(splitter),
-    rag.WithEmbedder(embedder),
-    rag.WithStore(store),
-    rag.WithBatchSize(100),
+import "github.com/hexagon-codes/hexagon/rag/indexer"
+
+idx := indexer.NewVectorIndexer(store, embedder,
+    indexer.WithBatchSize(100),
 )
 
 // Index documents
-err := indexer.Index(ctx)
+err := idx.Index(ctx, docs)
 ```
 
 ## Monitoring Metrics

@@ -508,7 +508,7 @@ A2A 是一个开放协议，定义了 AI Agent 之间通信的标准方式：
 ```go
 import (
     "github.com/hexagon-codes/hexagon/agent"
-    "github.com/hexagon-codes/hexagon/a2a"
+    "github.com/hexagon-codes/hexagon/agent/a2a"
 )
 
 // 创建 Hexagon Agent

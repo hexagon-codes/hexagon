@@ -364,13 +364,13 @@ store, err := hexagon.NewQdrantStoreWithOptions(
 
 | 函数 | 说明 |
 |-----|------|
-| `faiss.New(config)` | FAISS 向量存储 (高性能本地检索) |
-| `pgvector.New(config)` | PgVector 向量存储 (PostgreSQL 扩展) |
-| `redis.New(config)` | Redis 向量存储 (Redis Stack) |
-| `milvus.New(config)` | Milvus 向量存储 |
-| `chroma.New(config)` | Chroma 向量存储 |
-| `pinecone.New(config)` | Pinecone 向量存储 |
-| `weaviate.New(config)` | Weaviate 向量存储 |
+| `faiss.NewStore(config)` | FAISS 向量存储 (高性能本地检索) |
+| `pgvector.NewStore(config)` | PgVector 向量存储 (PostgreSQL 扩展) |
+| `redis.NewStore(config)` | Redis 向量存储 (Redis Stack) |
+| `milvus.NewStore(config)` | Milvus 向量存储 |
+| `chroma.NewStore(config)` | Chroma 向量存储 |
+| `pinecone.NewStore(config)` | Pinecone 向量存储 |
+| `weaviate.NewStore(config)` | Weaviate 向量存储 |
 
 ---
 

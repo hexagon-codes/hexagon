@@ -72,16 +72,16 @@ helm install hexagon helm/hexagon/ \
 
 ```
 deploy/
-├── Dockerfile                  # Multi-stage build (app + devui)
-├── docker-compose.yml          # Full mode: self-contained all-in-one services
-├── docker-compose.dev.yml      # Development mode: connects to docker-dev-env
+├── docker-compose.yml          # Infrastructure services (Qdrant / Redis / PostgreSQL)
 ├── .env.example                # Environment variable template for full mode
 ├── .env.dev.example            # Environment variable template for development mode
 ├── Makefile                    # Shortcut commands
 └── helm/hexagon/               # Helm Chart
     ├── Chart.yaml
     ├── values.yaml             # Switchable between bundled/external
+    ├── .helmignore
     └── templates/
+        ├── _helpers.tpl
         ├── deployment.yaml     # App + DevUI
         ├── statefulset.yaml    # Qdrant / Redis / PostgreSQL
         ├── service.yaml

@@ -10,8 +10,16 @@ This guide provides best practices for optimizing Hexagon applications.
 
 ```go
 // Use streaming output to reduce time-to-first-byte
-stream, _ := agent.Stream(ctx, input)
-for chunk := range stream.C {
+reader, _ := myAgent.Stream(ctx, input)
+defer reader.Close()
+for {
+    chunk, err := reader.Recv()
+    if errors.Is(err, io.EOF) {
+        break
+    }
+    if err != nil {
+        break
+    }
     fmt.Print(chunk.Content)
 }
 ```
@@ -37,7 +45,7 @@ memory := memory.NewBufferMemory(
 
 ```go
 // Limit tool call count to prevent infinite loops
-agent := agent.NewReActAgent(
+myAgent := agent.NewReAct(
     agent.WithMaxIterations(5),
 )
 ```

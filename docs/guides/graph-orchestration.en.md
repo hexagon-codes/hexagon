@@ -107,10 +107,10 @@ if result.Value == "approve" {
 ## Checkpoints
 
 ```go
-import "github.com/hexagon-codes/hexagon/orchestration/graph/checkpoint"
+// The checkpoint saver lives in the orchestration/graph package (imported above)
 
 // Use checkpoints
-saver := checkpoint.NewMemorySaver()
+saver := graph.NewMemoryCheckpointSaver()
 
 compiled, _ := g.Compile(
     graph.WithCheckpointSaver(saver),

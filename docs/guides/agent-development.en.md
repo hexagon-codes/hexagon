@@ -33,16 +33,14 @@ func main() {
     // Run the Agent
     ctx := context.Background()
     result, err := myAgent.Run(ctx, agent.Input{
-        Messages: []llm.Message{
-            {Role: "user", Content: "Hello!"},
-        },
+        Query: "Hello!",
     })
 
     if err != nil {
         panic(err)
     }
 
-    fmt.Println(result.Messages[len(result.Messages)-1].Content)
+    fmt.Println(result.Content)
 }
 ```
 
@@ -77,7 +75,7 @@ An Agent that implements the ReAct (Reasoning + Acting) reasoning pattern.
 - Tool-intensive tasks
 
 ```go
-reactAgent := agent.NewReActAgent(
+reactAgent := agent.NewReAct(
     agent.WithName("react-agent"),
     agent.WithSystemPrompt("You are an AI assistant capable of reasoning and acting"),
     agent.WithLLM(provider),
@@ -146,22 +144,20 @@ weatherTool := tool.NewFunc(
 ```go
 import "github.com/hexagon-codes/ai-core/memory"
 
-// Create a memory instance
-mem := memory.NewBufferMemory(
-    memory.WithMaxMessages(10), // retain the last 10 messages
-)
+// Create a memory instance (capacity is the number of recent messages to keep)
+mem := memory.NewBuffer(10)
 
-agent := agent.NewBaseAgent(
+myAgent := agent.NewBaseAgent(
     agent.WithMemory(mem),
 )
 ```
 
 ### Memory Types
 
-- **BufferMemory**: simple buffer memory that retains the most recent N messages
-- **WindowMemory**: sliding window memory
-- **SummaryMemory**: summary memory that periodically summarizes conversation history
-- **VectorMemory**: vector memory that retrieves based on semantic similarity
+- **BufferMemory** (`memory.NewBuffer`): simple buffer memory that retains the most recent N messages
+- **SummaryMemory** (`memory.NewSummaryMemory`): summary memory that periodically summarizes conversation history
+- **VectorMemory** (`memory.NewVectorMemory`): vector memory that retrieves based on semantic similarity
+- **MultiLayerMemory** (`memory.NewMultiLayerMemory`): multi-layer memory combining a buffer with long-term storage
 
 ## Configuring an Agent
 
@@ -234,16 +230,16 @@ You are an assistant, answer questions.
 ### 3. Error Handling
 
 ```go
-result, err := agent.Run(ctx, input)
+result, err := myAgent.Run(ctx, input)
 if err != nil {
-    // Check if it is a tool execution error
-    if toolErr, ok := err.(*agent.ToolError); ok {
-        fmt.Printf("Tool %s failed: %v\n", toolErr.ToolName, toolErr.Err)
-    }
-
-    // Check if it is an LLM error
-    if llmErr, ok := err.(*llm.Error); ok {
-        fmt.Printf("LLM call failed: %v\n", llmErr)
+    switch {
+    case errors.Is(err, context.DeadlineExceeded):
+        // Handle timeout
+        fmt.Println("execution timed out")
+    default:
+        // Errors are wrapped layer by layer with fmt.Errorf("...: %w", err);
+        // use errors.Is / errors.As to unwrap and inspect the root cause
+        fmt.Printf("execution failed: %v\n", err)
     }
 
     return err
@@ -258,13 +254,26 @@ if err != nil {
 - Use caching to reduce repeated computation
 
 ```go
-// Streaming output
-stream, err := agent.Stream(ctx, input)
+import (
+    "errors"
+    "io"
+)
+
+// Streaming output: Stream returns *stream.StreamReader[agent.Output]
+reader, err := myAgent.Stream(ctx, input)
 if err != nil {
     panic(err)
 }
+defer reader.Close()
 
-for chunk := range stream.C {
+for {
+    chunk, err := reader.Recv()
+    if errors.Is(err, io.EOF) {
+        break
+    }
+    if err != nil {
+        panic(err)
+    }
     fmt.Print(chunk.Content)
 }
 ```
@@ -276,11 +285,14 @@ for chunk := range stream.C {
 ```go
 import "github.com/hexagon-codes/hexagon/observe/logger"
 
-// Set the log level
-logger.SetLevel(logger.LevelDebug)
+// Set the global log level (a string: "debug" / "info" / "warn" / "error")
+logger.SetLevel("debug")
 
-// View the Agent's internal state
-agent.SetDebug(true)
+// Or enable verbose logging when constructing the Agent
+myAgent := agent.NewReAct(
+    agent.WithLLM(provider),
+    agent.WithVerbose(true),
+)
 ```
 
 ### Using Dev UI
@@ -288,11 +300,11 @@ agent.SetDebug(true)
 ```go
 import "github.com/hexagon-codes/hexagon/observe/devui"
 
-// Start the Dev UI
-ui := devui.New()
-go ui.Start(":8080")
+// Start the Dev UI (the listen address is set via WithAddr; Start() takes no args)
+ui := devui.New(devui.WithAddr(":8080"))
+go ui.Start()
 
-// The Agent will automatically push events to the Dev UI
+// Register ui.HookManager() with the Agent's hooks to push events to the Dev UI
 ```
 
 ## Next Steps

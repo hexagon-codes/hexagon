@@ -364,13 +364,13 @@ store, err := hexagon.NewQdrantStoreWithOptions(
 
 | Function | Description |
 |----------|-------------|
-| `faiss.New(config)` | FAISS vector store (high-performance local retrieval) |
-| `pgvector.New(config)` | PgVector store (PostgreSQL extension) |
-| `redis.New(config)` | Redis vector store (Redis Stack) |
-| `milvus.New(config)` | Milvus vector store |
-| `chroma.New(config)` | Chroma vector store |
-| `pinecone.New(config)` | Pinecone vector store |
-| `weaviate.New(config)` | Weaviate vector store |
+| `faiss.NewStore(config)` | FAISS vector store (high-performance local retrieval) |
+| `pgvector.NewStore(config)` | PgVector store (PostgreSQL extension) |
+| `redis.NewStore(config)` | Redis vector store (Redis Stack) |
+| `milvus.NewStore(config)` | Milvus vector store |
+| `chroma.NewStore(config)` | Chroma vector store |
+| `pinecone.NewStore(config)` | Pinecone vector store |
+| `weaviate.NewStore(config)` | Weaviate vector store |
 
 ---
 

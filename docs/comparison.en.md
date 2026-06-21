@@ -29,7 +29,7 @@ Hexagon focuses on six core dimensions: **ease of use, performance, extensibilit
 
 > **Design Goal**: Hexagon strives for balanced excellence across all capability dimensions, providing Go developers with a production-ready AI Agent development foundation.
 >
-> **Current Status**: v0.3.2-beta; some features are still being refined. Ecosystem and community maturity are still behind established frameworks like LangChain and LlamaIndex.
+> **Current Status**: v0.5.0; some features are still being refined. Ecosystem and community maturity are still behind established frameworks like LangChain and LlamaIndex.
 
 ## Core Feature Comparison
 

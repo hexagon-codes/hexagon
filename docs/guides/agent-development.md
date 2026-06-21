@@ -33,16 +33,14 @@ func main() {
     // 运行 Agent
     ctx := context.Background()
     result, err := myAgent.Run(ctx, agent.Input{
-        Messages: []llm.Message{
-            {Role: "user", Content: "你好！"},
-        },
+        Query: "你好！",
     })
 
     if err != nil {
         panic(err)
     }
 
-    fmt.Println(result.Messages[len(result.Messages)-1].Content)
+    fmt.Println(result.Content)
 }
 ```
 
@@ -77,7 +75,7 @@ func main() {
 - 工具密集型任务
 
 ```go
-reactAgent := agent.NewReActAgent(
+reactAgent := agent.NewReAct(
     agent.WithName("react-agent"),
     agent.WithSystemPrompt("你是一个能够推理和行动的 AI 助手"),
     agent.WithLLM(provider),
@@ -146,22 +144,20 @@ weatherTool := tool.NewFunc(
 ```go
 import "github.com/hexagon-codes/ai-core/memory"
 
-// 创建记忆实例
-mem := memory.NewBufferMemory(
-    memory.WithMaxMessages(10), // 保留最近10条消息
-)
+// 创建记忆实例（capacity 为保留的最近消息条数）
+mem := memory.NewBuffer(10)
 
-agent := agent.NewBaseAgent(
+myAgent := agent.NewBaseAgent(
     agent.WithMemory(mem),
 )
 ```
 
 ### 记忆类型
 
-- **BufferMemory**: 简单缓冲记忆，保留最近 N 条消息
-- **WindowMemory**: 滑动窗口记忆
-- **SummaryMemory**: 摘要记忆，定期总结历史对话
-- **VectorMemory**: 向量记忆，基于语义相似度检索
+- **BufferMemory** (`memory.NewBuffer`): 简单缓冲记忆，保留最近 N 条消息
+- **SummaryMemory** (`memory.NewSummaryMemory`): 摘要记忆，定期总结历史对话
+- **VectorMemory** (`memory.NewVectorMemory`): 向量记忆，基于语义相似度检索
+- **MultiLayerMemory** (`memory.NewMultiLayerMemory`): 多层记忆，组合缓冲与长期存储
 
 ## 配置 Agent
 
@@ -234,16 +230,16 @@ agent, err := cfg.Build()
 ### 3. 错误处理
 
 ```go
-result, err := agent.Run(ctx, input)
+result, err := myAgent.Run(ctx, input)
 if err != nil {
-    // 检查是否是工具执行错误
-    if toolErr, ok := err.(*agent.ToolError); ok {
-        fmt.Printf("工具 %s 执行失败: %v\n", toolErr.ToolName, toolErr.Err)
-    }
-
-    // 检查是否是 LLM 错误
-    if llmErr, ok := err.(*llm.Error); ok {
-        fmt.Printf("LLM 调用失败: %v\n", llmErr)
+    switch {
+    case errors.Is(err, context.DeadlineExceeded):
+        // 处理超时
+        fmt.Println("执行超时")
+    default:
+        // 错误使用 fmt.Errorf("...: %w", err) 逐层包装，
+        // 可用 errors.Is / errors.As 解包判断具体原因
+        fmt.Printf("执行失败: %v\n", err)
     }
 
     return err
@@ -258,13 +254,26 @@ if err != nil {
 - 使用缓存减少重复计算
 
 ```go
-// 流式输出
-stream, err := agent.Stream(ctx, input)
+import (
+    "errors"
+    "io"
+)
+
+// 流式输出：Stream 返回 *stream.StreamReader[agent.Output]
+reader, err := myAgent.Stream(ctx, input)
 if err != nil {
     panic(err)
 }
+defer reader.Close()
 
-for chunk := range stream.C {
+for {
+    chunk, err := reader.Recv()
+    if errors.Is(err, io.EOF) {
+        break
+    }
+    if err != nil {
+        panic(err)
+    }
     fmt.Print(chunk.Content)
 }
 ```
@@ -276,11 +285,14 @@ for chunk := range stream.C {
 ```go
 import "github.com/hexagon-codes/hexagon/observe/logger"
 
-// 设置日志级别
-logger.SetLevel(logger.LevelDebug)
+// 设置全局日志级别（取值为字符串 "debug" / "info" / "warn" / "error"）
+logger.SetLevel("debug")
 
-// 查看 Agent 内部状态
-agent.SetDebug(true)
+// 或在构造 Agent 时开启详细日志
+myAgent := agent.NewReAct(
+    agent.WithLLM(provider),
+    agent.WithVerbose(true),
+)
 ```
 
 ### 使用 Dev UI
@@ -288,11 +300,11 @@ agent.SetDebug(true)
 ```go
 import "github.com/hexagon-codes/hexagon/observe/devui"
 
-// 启动 Dev UI
-ui := devui.New()
-go ui.Start(":8080")
+// 启动 Dev UI（监听地址通过 WithAddr 配置，Start() 不接收参数）
+ui := devui.New(devui.WithAddr(":8080"))
+go ui.Start()
 
-// Agent 会自动推送事件到 Dev UI
+// 将 ui.HookManager() 注册到 Agent 的 Hook 即可推送事件到 Dev UI
 ```
 
 ## 下一步

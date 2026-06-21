@@ -90,9 +90,13 @@ The following APIs are experimental and subject to significant changes:
 - `Workflow`, `Step` types
 - Persistence interfaces
 
-**Flow orchestration** (`github.com/hexagon-codes/hexagon/orchestration/flow`)
-- `Flow`, `FlowBuilder` types
-- `WithTimeout()` configurable timeout
+**Unified runtime** (`github.com/hexagon-codes/hexagon/runtime`)
+- `Runner`, `DurableExecution` (per-tool exactly-once + Resume)
+- `runtime/middleware`: Budget/CostControl/Compaction/PermissionMode
+- `runtime/strategy`: ReAct/PlanExecute/Reflection execution strategies
+
+**Durable checkpoints** (`github.com/hexagon-codes/hexagon/checkpoint`)
+- Unified `Checkpointer` interface (Memory/File implementations)
 
 **Checkpointing** (`github.com/hexagon-codes/hexagon/orchestration/graph`)
 - `CheckpointSaver` interface
@@ -130,7 +134,11 @@ The following APIs are experimental and subject to significant changes:
 
 **Top-level re-exports** (`github.com/hexagon-codes/hexagon` — `deprecated.go`)
 
-Starting from v0.3.2-beta, the exported symbols in `hexagon.go` have been trimmed from 98 to 18 essential symbols. All convenience aliases previously exposed through the top-level package have been moved to `deprecated.go` and will be removed in the next major version. Affected symbols include but are not limited to:
+Starting from v0.3.2-beta, the exported symbols in `hexagon.go` have been trimmed from 98 to a small set of core entry symbols. All convenience aliases previously exposed through the top-level package have been moved to `deprecated.go` and will be removed in the next major version.
+
+> v0.5.0 further grouped `a2a`/`artifact`/`semantic`/`skill` under `agent/` and `adw` under `rag/`, and removed the `compose`/`process`/`flow` packages. During the transition, `deprecated.go` still re-exports the old entry points for these symbols.
+
+Affected symbols include but are not limited to:
 
 - Orchestration: `NewGraph()`, `NewChain()`, `START`, `END`
 - Multi-Agent: `NewTeam()`, `TransferTo()`, `WithAgents()`, `WithMode()`, `TeamMode*` constants
@@ -209,8 +217,8 @@ Hexagon depends on the following external libraries:
 
 | Dependency | Version | Description |
 |-----|------|------|
-| `github.com/hexagon-codes/ai-core` | v0.0.4 | AI capability library |
-| `github.com/hexagon-codes/toolkit` | v0.0.3 | Go general-purpose toolkit |
+| `github.com/hexagon-codes/ai-core` | v0.1.4 | AI capability library |
+| `github.com/hexagon-codes/toolkit` | v0.1.0 | Go general-purpose toolkit |
 
 Breaking changes to the public APIs of these dependencies will be reflected in Hexagon's own version number.
 

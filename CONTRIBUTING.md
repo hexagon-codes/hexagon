@@ -121,13 +121,22 @@ docs: update README with quick start guide
 
 ```
 hexagon/
-├── cmd/           # 可执行程序
-├── pkg/           # 公开 API（可被外部导入）
+├── agent/         # Agent 核心（含 a2a / artifact / semantic / skill）
+├── core/          # 核心接口（Component / Runnable / Stream）
+├── orchestration/ # 编排层（graph / chain / workflow / planner）
+├── rag/           # RAG 系统（含 adw 等）
+├── runtime/       # 统一执行运行时（middleware / strategy）
+├── observe/       # 可观测性（tracer / metrics / otel / devui）
+├── security/      # 安全防护（guard / rbac / cost / audit 等）
+├── tool/          # 工具系统
+├── store/         # 存储（vector/*）
 ├── internal/      # 内部实现（不对外暴露）
-├── examples/      # 示例代码
-├── docs/          # 文档
-└── test/          # 集成测试
+├── examples/      # 示例代码（独立 module）
+├── testing/       # 测试辅助与集成测试
+└── docs/          # 文档
 ```
+
+> 注：本项目不使用 `pkg/` 目录，符合 Go 社区主流实践。
 
 ## Pull Request 流程
 

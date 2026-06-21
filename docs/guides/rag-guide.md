@@ -17,63 +17,82 @@ RAG 系统通过检索相关文档来增强 LLM 的回答能力，主要包含�
 
 ## 快速开始
 
+推荐使用 `rag.Engine`，它把向量存储、嵌入器与检索串成一站式入口：
+
 ```go
 import (
     "github.com/hexagon-codes/hexagon/rag"
-    "github.com/hexagon-codes/hexagon/store/vector/qdrant"
+    "github.com/hexagon-codes/hexagon/rag/embedder"
+    "github.com/hexagon-codes/ai-core/store/vector/qdrant"
 )
 
 // 1. 创建向量存储
-store, err := qdrant.New(ctx,
+store, err := qdrant.NewWithOptions(
     qdrant.WithCollection("knowledge"),
     qdrant.WithDimension(1536),
+    qdrant.WithCreateCollection(true),
 )
 
-// 2. 创建嵌入器
-embedder := rag.NewOpenAIEmbedder(openaiClient)
+// 2. 创建嵌入器（provider 为实现 Embed 的 LLM Provider）
+emb := embedder.NewOpenAIEmbedder(provider)
 
-// 3. 创建检索器
-retriever := rag.NewVectorRetriever(store, embedder,
-    rag.WithTopK(5),
+// 3. 创建 RAG 引擎
+engine := rag.NewEngine(
+    rag.WithStore(store),
+    rag.WithEngineEmbedder(emb),
+    rag.WithEngineTopK(5),
 )
 
-// 4. 创建 RAG 管道
-pipeline := rag.NewPipeline(
-    rag.WithRetriever(retriever),
-    rag.WithLLM(llm),
-)
+// 4. 索引文档
+_ = engine.Index(ctx, docs)
 
-// 5. 查询
-response, err := pipeline.Query(ctx, "什么是 Hexagon？")
+// 5. 检索并拼接上下文（返回可直接喂给 LLM 的字符串）
+context, err := engine.Query(ctx, "什么是 Hexagon？")
 ```
 
+> 如需手工组装管道，可使用位置参数构造器
+> `rag.NewPipeline(loader, splitter, indexer, retriever)`，其 `Query` 方法返回 `[]rag.Document`。
+
 ## 文档加载
+
+加载器位于 `rag/loader` 子包。
 
 ### 文本文件
 
 ```go
-loader := rag.NewTextLoader("./docs")
-docs, err := loader.Load(ctx)
+import "github.com/hexagon-codes/hexagon/rag/loader"
+
+l := loader.NewTextLoader("./docs/intro.txt")
+docs, err := l.Load(ctx)
 ```
 
 ### PDF 文件
 
 ```go
-loader := rag.NewPDFLoader("./documents/manual.pdf")
-docs, err := loader.Load(ctx)
+l := loader.NewPDFLoader("./documents/manual.pdf")
+docs, err := l.Load(ctx)
 ```
 
 ### 网页
 
 ```go
-loader := rag.NewWebLoader([]string{
-    "https://example.com/page1",
-    "https://example.com/page2",
-})
-docs, err := loader.Load(ctx)
+l := loader.NewURLLoader("https://example.com/page1")
+docs, err := l.Load(ctx)
+```
+
+### 目录
+
+```go
+l := loader.NewDirectoryLoader("./docs",
+    loader.WithPattern("*.md"),
+    loader.WithRecursive(true),
+)
+docs, err := l.Load(ctx)
 ```
 
 ### 自定义加载器
+
+实现 `rag.Loader` 接口（`Load` + `Name`）即可：
 
 ```go
 type MyLoader struct{}
@@ -82,105 +101,103 @@ func (l *MyLoader) Load(ctx context.Context) ([]rag.Document, error) {
     // 自定义加载逻辑
     return docs, nil
 }
+
+func (l *MyLoader) Name() string { return "my-loader" }
 ```
 
 ## 文档分割
 
+分割器位于 `rag/splitter` 子包，`Split` 方法签名为 `Split(ctx, docs)`。
+
 ### 字符分割
 
 ```go
-splitter := rag.NewCharacterSplitter(
-    rag.WithChunkSize(1000),
-    rag.WithChunkOverlap(200),
+import "github.com/hexagon-codes/hexagon/rag/splitter"
+
+s := splitter.NewCharacterSplitter(
+    splitter.WithChunkSize(1000),
+    splitter.WithChunkOverlap(200),
 )
-chunks, err := splitter.Split(docs)
+chunks, err := s.Split(ctx, docs)
 ```
 
 ### 递归分割
 
 ```go
-splitter := rag.NewRecursiveSplitter(
-    rag.WithSeparators([]string{"\n\n", "\n", " "}),
-    rag.WithChunkSize(1000),
+s := splitter.NewRecursiveSplitter(
+    splitter.WithSeparators([]string{"\n\n", "\n", " "}),
+    splitter.WithRecursiveChunkSize(1000),
 )
-chunks, err := splitter.Split(docs)
+chunks, err := s.Split(ctx, docs)
 ```
 
-### 语义分割
+### 句子分割
 
 ```go
-splitter := rag.NewSemanticSplitter(embedder,
-    rag.WithBreakpointThreshold(0.3),
+s := splitter.NewSentenceSplitter(
+    splitter.WithSentenceChunkSize(1000),
+    splitter.WithSentenceChunkOverlap(100),
 )
-chunks, err := splitter.Split(docs)
+chunks, err := s.Split(ctx, docs)
 ```
 
 ## 向量存储
 
+向量存储实现位于 ai-core 的 `store/vector` 包。
+
 ### Qdrant
 
 ```go
-store, err := qdrant.New(ctx,
+import "github.com/hexagon-codes/ai-core/store/vector/qdrant"
+
+store, err := qdrant.NewWithOptions(
     qdrant.WithHost("localhost"),
     qdrant.WithPort(6333),
     qdrant.WithCollection("documents"),
     qdrant.WithDimension(1536),
-)
-```
-
-### Chroma
-
-```go
-store, err := chroma.NewStore(ctx,
-    chroma.WithHost("localhost"),
-    chroma.WithPort(8000),
-    chroma.WithCollection("documents"),
-)
-```
-
-### Milvus
-
-```go
-store, err := milvus.NewStore(ctx,
-    milvus.WithAddress("localhost:19530"),
-    milvus.WithCollection("documents"),
-    milvus.WithDimension(1536),
+    qdrant.WithCreateCollection(true),
 )
 ```
 
 ### 内存存储（开发测试）
 
 ```go
+import "github.com/hexagon-codes/ai-core/store/vector"
+
 store := vector.NewMemoryStore(1536)
 ```
 
 ## 检索策略
 
+检索器位于 `rag/retriever` 子包。
+
 ### 向量检索
 
 ```go
-retriever := rag.NewVectorRetriever(store, embedder,
-    rag.WithTopK(5),
-    rag.WithMinScore(0.7),
+import "github.com/hexagon-codes/hexagon/rag/retriever"
+
+vectorRetriever := retriever.NewVectorRetriever(store, embedder,
+    retriever.WithTopK(5),
+    retriever.WithMinScore(0.7),
 )
 ```
 
 ### 关键词检索
 
 ```go
-retriever := rag.NewKeywordRetriever(index,
-    rag.WithTopK(10),
+keywordRetriever := retriever.NewKeywordRetriever(docs,
+    retriever.WithKeywordTopK(10),
 )
 ```
 
 ### 混合检索
 
 ```go
-retriever := rag.NewHybridRetriever(
+hybridRetriever := retriever.NewHybridRetriever(
     vectorRetriever,
     keywordRetriever,
-    rag.WithVectorWeight(0.7),
-    rag.WithKeywordWeight(0.3),
+    retriever.WithVectorWeight(0.7),
+    retriever.WithKeywordWeight(0.3),
 )
 ```
 
@@ -248,11 +265,17 @@ chain := reranker.NewChainReranker(
 
 ## 响应合成
 
+合成器位于 `rag/synthesizer` 子包，LLM 通过选项传入，`Synthesize(ctx, query, docs)` 返回 `*synthesizer.Response`。
+
 ### 简单合成
 
 ```go
-synthesizer := rag.NewSimpleSynthesizer(llm)
-response, err := synthesizer.Synthesize(ctx, query, docs)
+import "github.com/hexagon-codes/hexagon/rag/synthesizer"
+
+s := synthesizer.NewSimpleSummarizeSynthesizer(
+    synthesizer.WithSimpleSynthesizerLLM(llm),
+)
+response, err := s.Synthesize(ctx, query, docs)
 ```
 
 ### 精炼合成
@@ -260,8 +283,9 @@ response, err := synthesizer.Synthesize(ctx, query, docs)
 迭代优化回答：
 
 ```go
-synthesizer := rag.NewRefineSynthesizer(llm,
-    rag.WithRefinePrompt("基于以下新信息完善回答..."),
+s := synthesizer.NewRefineSynthesizer(
+    synthesizer.WithRefineSynthesizerLLM(llm),
+    synthesizer.WithRefinePrompt("基于以下新信息完善回答..."),
 )
 ```
 
@@ -270,52 +294,42 @@ synthesizer := rag.NewRefineSynthesizer(llm,
 压缩多个文档：
 
 ```go
-synthesizer := rag.NewCompactSynthesizer(llm,
-    rag.WithMaxTokens(4000),
+s := synthesizer.NewCompactSynthesizer(
+    synthesizer.WithCompactSynthesizerLLM(llm),
+    synthesizer.WithCompactSynthesizerMaxContext(4000),
 )
 ```
 
 ## 完整管道
 
+`rag.NewPipeline` 使用位置参数 `(loader, splitter, indexer, retriever)`，`Ingest` 负责加载-分割-索引，`Query` 返回 `[]rag.Document`：
+
 ```go
-// 配置管道
-pipeline := rag.NewPipeline(
-    // 检索配置
-    rag.WithRetriever(hybridRetriever),
+pipeline := rag.NewPipeline(textLoader, charSplitter, vectorIndexer, vectorRetriever)
 
-    // 重排序配置
-    rag.WithReranker(crossEncoderReranker),
+// 一次性完成加载、分割、索引
+_ = pipeline.Ingest(ctx)
 
-    // 合成配置
-    rag.WithSynthesizer(refineSynthesizer),
-
-    // LLM 配置
-    rag.WithLLM(llm),
-
-    // 其他配置
+// 检索（返回文档列表，可再交给 reranker / synthesizer）
+docs, err := pipeline.Query(ctx, "你的问题",
     rag.WithTopK(10),
-    rag.WithMaxContextLength(4000),
+    rag.WithMinScore(0.5),
 )
-
-// 执行查询
-response, err := pipeline.Query(ctx, "你的问题")
 ```
 
-## 索引管道
+## 索引器
 
-一次性完成文档索引：
+索引器位于 `rag/indexer` 子包，`Index(ctx, docs)` 写入向量存储：
 
 ```go
-indexer := rag.NewIndexer(
-    rag.WithLoader(loader),
-    rag.WithSplitter(splitter),
-    rag.WithEmbedder(embedder),
-    rag.WithStore(store),
-    rag.WithBatchSize(100),
+import "github.com/hexagon-codes/hexagon/rag/indexer"
+
+idx := indexer.NewVectorIndexer(store, embedder,
+    indexer.WithBatchSize(100),
 )
 
 // 索引文档
-err := indexer.Index(ctx)
+err := idx.Index(ctx, docs)
 ```
 
 ## 监控指标

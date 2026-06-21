@@ -91,9 +91,13 @@ MAJOR.MINOR.PATCH[-PRERELEASE]
 - `Workflow`, `Step` 类型
 - 持久化接口
 
-**Flow 流程编排** (`github.com/hexagon-codes/hexagon/orchestration/flow`)
-- `Flow`, `FlowBuilder` 类型
-- `WithTimeout()` 可配置超时
+**统一运行时** (`github.com/hexagon-codes/hexagon/runtime`)
+- `Runner`、`DurableExecution`（per-tool exactly-once + Resume）
+- `runtime/middleware`：Budget/CostControl/Compaction/PermissionMode
+- `runtime/strategy`：ReAct/PlanExecute/Reflection 执行策略
+
+**持久化检查点** (`github.com/hexagon-codes/hexagon/checkpoint`)
+- 统一 `Checkpointer` 接口（Memory/File 实现）
 
 **检查点** (`github.com/hexagon-codes/hexagon/orchestration/graph`)
 - `CheckpointSaver` 接口
@@ -131,7 +135,11 @@ MAJOR.MINOR.PATCH[-PRERELEASE]
 
 **顶层重导出** (`github.com/hexagon-codes/hexagon` — `deprecated.go`)
 
-自 v0.3.2-beta 起，`hexagon.go` 的导出符号从 98 个精简至 18 个核心符号。原先通过顶层包暴露的便捷别名已全部移至 `deprecated.go`，将在下一个大版本中移除。涉及的符号包括但不限于：
+自 v0.3.2-beta 起，`hexagon.go` 的导出符号从 98 个精简至核心入口符号。原先通过顶层包暴露的便捷别名已全部移至 `deprecated.go`，将在下一个大版本中移除。
+
+> v0.5.0 进一步将 `a2a`/`artifact`/`semantic`/`skill` 归组到 `agent/` 下，`adw` 归组到 `rag/` 下，并裁剪了 `compose`/`process`/`flow` 包。迁移期 `deprecated.go` 仍重导出这些符号的旧入口。
+
+涉及的符号包括但不限于：
 
 - 编排引擎：`NewGraph()`, `NewChain()`, `START`, `END`
 - 多 Agent：`NewTeam()`, `TransferTo()`, `WithAgents()`, `WithMode()`, `TeamMode*` 常量
@@ -210,8 +218,8 @@ Hexagon 依赖以下外部库：
 
 | 依赖 | 版本 | 说明 |
 |-----|------|------|
-| `github.com/hexagon-codes/ai-core` | v0.0.4 | AI 基础能力库 |
-| `github.com/hexagon-codes/toolkit` | v0.0.3 | Go 通用工具库 |
+| `github.com/hexagon-codes/ai-core` | v0.1.4 | AI 基础能力库 |
+| `github.com/hexagon-codes/toolkit` | v0.1.0 | Go 通用工具库 |
 
 这些依赖的公开 API 变更会同步反映在 Hexagon 的版本号中。
 

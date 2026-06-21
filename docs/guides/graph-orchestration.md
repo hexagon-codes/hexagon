@@ -107,10 +107,10 @@ if result.Value == "approve" {
 ## 检查点
 
 ```go
-import "github.com/hexagon-codes/hexagon/orchestration/graph/checkpoint"
+// 检查点保存器位于 orchestration/graph 包（已在上方导入）
 
 // 使用检查点
-saver := checkpoint.NewMemorySaver()
+saver := graph.NewMemoryCheckpointSaver()
 
 compiled, _ := g.Compile(
     graph.WithCheckpointSaver(saver),

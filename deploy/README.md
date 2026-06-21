@@ -72,16 +72,16 @@ helm install hexagon helm/hexagon/ \
 
 ```
 deploy/
-├── Dockerfile                  # 多阶段构建（app + devui）
-├── docker-compose.yml          # 完整模式：自包含全套服务
-├── docker-compose.dev.yml      # 开发模式：连接 docker-dev-env
+├── docker-compose.yml          # 基础设施服务（Qdrant / Redis / PostgreSQL）
 ├── .env.example                # 完整模式环境变量模板
 ├── .env.dev.example            # 开发模式环境变量模板
 ├── Makefile                    # 快捷命令
 └── helm/hexagon/               # Helm Chart
     ├── Chart.yaml
     ├── values.yaml             # 内置/外部可切换
+    ├── .helmignore
     └── templates/
+        ├── _helpers.tpl
         ├── deployment.yaml     # App + DevUI
         ├── statefulset.yaml    # Qdrant / Redis / PostgreSQL
         ├── service.yaml

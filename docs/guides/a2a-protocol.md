@@ -18,8 +18,8 @@ A2A (Agent-to-Agent) 是一个开放协议，定义了 AI Agent 之间标准化�
 
 ```go
 import (
-    "github.com/hexagon-codes/hexagon/a2a"
     "github.com/hexagon-codes/hexagon/agent"
+    "github.com/hexagon-codes/hexagon/agent/a2a"
 )
 
 // 创建 Hexagon Agent
@@ -425,7 +425,7 @@ cards, _ := discovery.Discover(ctx, nil)
 
 ```go
 // 将 Hexagon Agent 包装为 A2A Handler
-myAgent := agent.NewReActAgent(...)
+myAgent := agent.NewReAct(...)
 handler := a2a.WrapAgent(myAgent)
 
 // 或使用流式包装器

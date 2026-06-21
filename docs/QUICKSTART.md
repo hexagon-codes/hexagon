@@ -37,7 +37,7 @@ Hexagon 是一个完整的 AI Agent 开发生态：
 
 ### 系统要求
 
-- Go 1.23 或更高版本
+- Go 1.25 或更高版本
 - 网络连接（访问 LLM API）
 
 ### 环境变量
@@ -527,8 +527,13 @@ agent := hexagon.QuickStart(
 
 ### Q: 如何调试 Agent？
 
+`WithVerbose` 是 `agent` 包的 Agent 选项，需要直接构造 Agent 时使用：
+
 ```go
-agent := hexagon.QuickStart(
-    hexagon.WithVerbose(true), // 开启详细日志
+import "github.com/hexagon-codes/hexagon/agent"
+
+myAgent := agent.NewReAct(
+    agent.WithLLM(provider),
+    agent.WithVerbose(true), // 开启详细日志
 )
 ```

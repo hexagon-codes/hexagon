@@ -6,7 +6,7 @@
 
 **The All-Around AI Agent Framework for the Go Ecosystem**
 
-[![Go Reference](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
+[![Go Reference](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen)](https://github.com/hexagon-codes/hexagon/actions)
 
@@ -263,55 +263,73 @@ resp, decision, _ := smartRouter.CompleteWithRouting(ctx, req, routingCtx)
 - 20+ predefined model capability profiles
 - Routing history and statistical analysis
 
-### ⚙️ Deterministic Business Processes (Process Framework)
+### ♻️ Durable Runtime
 
-State-machine-driven business process framework:
+A unified Agent execution runtime with per-tool exactly-once snapshots and Resume:
 
 ```go
-import "github.com/hexagon-codes/hexagon/process"
+import (
+    "github.com/hexagon-codes/hexagon/runtime"
+    "github.com/hexagon-codes/hexagon/checkpoint"
+)
 
-// Define an order processing flow
-p, _ := process.NewProcess("order-processing").
-    AddState("pending", process.AsInitial()).
-    AddState("validated").
-    AddState("processing").
-    AddState("completed", process.AsFinal()).
-    AddState("failed", process.AsFinal()).
-
-    // State transitions
-    AddTransition("pending", "validate", "validated",
-        process.WithGuard(func(ctx context.Context, data *process.ProcessData) bool {
-            return data.Get("amount") != nil
-        })).
-    AddTransition("validated", "process", "processing").
-    AddTransition("processing", "complete", "completed").
-    AddTransition("processing", "fail", "failed").
-
-    // Bind Agent to state
-    OnStateEnter("validated", step.NewAgentStep("validator", validatorAgent)).
-    Build()
-
-// Execute the process
-output, _ := p.Invoke(ctx, process.ProcessInput{
-    Data: map[string]any{"order_id": "123", "amount": 100},
-})
+// Checkpointer-backed durable execution: Resume after crash/interrupt without
+// re-running already-completed tools.
+durable := runtime.NewDurableExecution(checkpoint.NewMemory())
 ```
 
 **Features:**
-- State-machine driven, deterministic execution
-- Guard conditions and transition actions
-- Step types: Action/Agent/Condition/Parallel/Sequence/Retry/Timeout
-- Process lifecycle: Start/Pause/Resume/Cancel
-- Full Runnable six-paradigm interface implementation
+- per-tool exactly-once: completed tool calls are snapshotted and not replayed on Resume
+- Unified Runner + execution strategies (ReAct / PlanExecute / Reflection share one runtime)
+- Three-dimensional Budget (token/calls/duration) + unified CostControl abstraction
+- Five-level PermissionMode and Context Compaction middleware (`runtime/middleware`)
+- Long-running progress events + SSE event sink
+
+### 🧬 Agent as Tool (AgentTool)
+
+Wrap an Agent directly as a tool so it can be composed as a sub-capability of another Agent:
+
+```go
+import "github.com/hexagon-codes/hexagon/agent"
+
+// Expose the researcher Agent as a tool callable by the supervisor
+researcherTool := agent.NewAgentTool(researcher,
+    agent.WithAgentToolName("research"),
+    agent.WithAgentToolDescription("Research a topic and return key points"),
+)
+
+supervisor := hexagon.QuickStart(
+    hexagon.WithTools(researcherTool),
+    hexagon.WithSystemPrompt("You are an orchestrator; call sub-agents as needed"),
+)
+```
+
+### 🧾 Native Structured Output
+
+Decode strongly-typed Go structs via the provider's native `json_schema`:
+
+```go
+import "github.com/hexagon-codes/hexagon/llm/structured"
+
+type Invoice struct {
+    Number string  `json:"number"`
+    Amount float64 `json:"amount"`
+}
+
+inv, _ := structured.Generate[Invoice](ctx, provider, "Parse this invoice: ...",
+    structured.WithNativeJSONSchema("invoice"),
+    structured.WithStrictMode(true),
+)
+```
 
 ### 📄 Agentic Document Workflows (ADW)
 
 End-to-end document automation that goes beyond traditional RAG:
 
 ```go
-import "github.com/hexagon-codes/hexagon/adw"
-import "github.com/hexagon-codes/hexagon/adw/extractor"
-import "github.com/hexagon-codes/hexagon/adw/validator"
+import "github.com/hexagon-codes/hexagon/rag/adw"
+import "github.com/hexagon-codes/hexagon/rag/adw/extractor"
+import "github.com/hexagon-codes/hexagon/rag/adw/validator"
 
 // Define an extraction schema
 schema := adw.NewExtractionSchema("invoice").
@@ -355,7 +373,7 @@ for _, doc := range output.Documents {
 Implements the Google A2A protocol for standardized inter-Agent communication:
 
 ```go
-import "github.com/hexagon-codes/hexagon/a2a"
+import "github.com/hexagon-codes/hexagon/agent/a2a"
 
 // Expose a Hexagon Agent as an A2A service
 server := a2a.ExposeAgent(myAgent, "http://localhost:8080")
@@ -426,46 +444,72 @@ for event := range events {
 
 ```
 hexagon/
-├── agent/              # Agent core (ReAct/Role/Team/Handoff/State/Primitives)
-├── a2a/                # A2A protocol (Client/Server/Handler/Discovery)
-├── core/               # Unified interfaces (Component[I,O], Stream[T])
+├── agent/              # Agent core (ReAct/Role/Team/Handoff/State/Primitives/AgentTool/Supervisor)
+│   ├── a2a/            # A2A protocol (Client/Server/Handler/Discovery)
+│   ├── artifact/       # Artifact system
+│   ├── semantic/       # Semantic capabilities
+│   └── skill/          # Skill registry & signing
+├── core/               # Unified interfaces (Component/Runnable, Stream[T], Compose/Fallback)
+├── runtime/            # Unified execution runtime (Runner/DurableExecution/strategy/middleware)
+│   ├── middleware/     # Budget/CostControl/Compaction/PermissionMode
+│   └── strategy/       # Execution strategies (ReAct/PlanExecute/Reflection)
 ├── orchestration/      # Orchestration engine
 │   ├── graph/          # Graph orchestration (state graph/checkpoints/Barrier/distributed/visualization)
-│   ├── flow/           # Flow orchestration (configurable timeouts)
-│   ├── chain/          # Chain orchestration
+│   ├── chain/          # Chain orchestration (compile-time I/O type checks)
 │   ├── workflow/       # Workflow engine
 │   └── planner/        # Planner
-├── process/            # Deterministic business process framework (state-machine driven)
-│   └── step/           # Step types (Action/Agent/Condition/Parallel)
-├── adw/                # Agentic Document Workflows
-│   ├── extractor/      # Structured extractors
-│   └── validator/      # Schema validators
+├── checkpoint/         # Unified Checkpointer persistence
+├── interrupt/          # Interrupt & resume
 ├── rag/                # RAG system
-│   ├── loader/         # Document loaders (Text/Markdown/CSV/XLSX/PPTX/DOCX/PDF/OCR)
+│   ├── loader/         # Document loaders + Parser layer (Text/MD/CSV/XLSX/PPTX/DOCX/PDF/OCR)
 │   ├── splitter/       # Document splitters (Character/Recursive/Markdown/Sentence/Token/Code)
 │   ├── retriever/      # Retrievers (Vector/Keyword/Hybrid/HyDE/Adaptive/ParentDoc)
 │   ├── reranker/       # Rerankers
-│   └── synthesizer/    # Response synthesizers
-├── memory/             # Multi-Agent shared memory
-├── artifact/           # Artifact system
-├── mcp/                # MCP protocol support
+│   ├── synthesizer/    # Response synthesizers
+│   ├── adw/            # Agentic Document Workflows (extractor/validator)
+│   ├── agentic/        # Agentic RAG
+│   ├── corrective/     # Corrective RAG
+│   ├── selfrag/        # Self-RAG
+│   └── multimodal/     # Multimodal
+├── llm/                # LLM orchestration layer
+│   ├── structured/     # Native json_schema structured output
+│   ├── batch/          # Batch calls
+│   ├── conversation/   # Conversation management
+│   ├── parser/         # Output parsing
+│   └── template/       # Prompt templates
+├── memory/store/       # Multi-Agent memory stores (InMemory/File/Redis/Persistent)
+├── mcp/                # MCP protocol (discovery/auto-reconnect/multi-transport)
 ├── hooks/              # Hook system (Run/Tool/LLM/Retriever)
-├── observe/            # Observability (Tracer/Metrics/OTel/DevUI)
-├── security/           # Security (Guard/RBAC/Cost/Audit/Filter)
-├── tool/               # Tool system (File/Python/Shell/Sandbox)
+├── observe/            # Observability (Tracer/Metrics/OTel/Langfuse/DevUI/Replay)
+├── security/           # Security (Guard/Guardrails/RBAC/Cost/Audit/Filter/PII/Tenant/Credential)
+├── tool/               # Tool system (File/Python/Shell/Sandbox/HTTP/Search/DB/Browser...)
 ├── store/              # Storage
-│   └── vector/         # Vector stores (Qdrant/FAISS/PgVector/Redis/Milvus/Chroma/Pinecone/Weaviate)
+│   └── vector/         # Vector stores (FAISS/PgVector/Redis/Milvus/Chroma/Pinecone/Weaviate)
+├── client/             # Client
 ├── plugin/             # Plugin system
 ├── config/             # Configuration management
-├── evaluate/           # Evaluation system
-├── testing/            # Testing utilities (Mock/Record)
+├── evaluate/           # Evaluation system (agenteval/rag/metrics)
+├── testing/            # Testing utilities (Mock/Record/E2E/Integration)
 ├── deploy/             # Deployment configs (Docker Compose/Helm Chart/CI)
-├── examples/           # Example code
-├── hexagon.go          # Top-level API (18 essential symbols)
+├── examples/           # Example code (standalone module)
+├── hexagon.go          # Top-level API (core entry symbols)
 └── deprecated.go       # Transitional re-exports (removed in next major version)
 ```
 
 ## ⚠️ Recent Important Changes
+
+### Architecture Refactor (v0.5.0)
+
+v0.5.0 is a structural consolidation that also upgrades to ai-core v0.1.4 / toolkit v0.1.0 (Go 1.25):
+
+- **Top-level feature packages grouped**: `a2a → agent/a2a`, `artifact → agent/artifact`, `semantic → agent/semantic`, `skill → agent/skill`, `adw → rag/adw`.
+- **Orchestration canonicalized**: `orchestration/graph` is the canonical orchestration axis; the redundant `compose` / `process` / `flow` packages were removed.
+- **Persistence consolidated**: unified into a single `Checkpointer` (`checkpoint/`).
+- **De-duplication pushed down**: stream moved to `ai-core/streamx`, media to `ai-core/media`, security/sandbox/blobstore to `toolkit`; Schema now flows through `ai-core/schema` (`core.Schema` is a type alias).
+- **New capabilities**: unified `runtime` (DurableExecution per-tool exactly-once + Resume, Budget/CostControl, five-level PermissionMode, Context Compaction), `agent.AgentTool`, MCP auto-reconnect, Langfuse exporter in `observe/otel`, compile-time type checks in `orchestration/chain`, a Parser layer in `rag/loader`, and native json_schema in `llm/structured`.
+- **examples is a standalone module**: `go get github.com/hexagon-codes/hexagon` no longer pulls in the examples dependency graph.
+
+> A `deprecated.go` top-level re-export shim is kept during the transition and will be removed in the next major version.
 
 ### Top-Level API Slimmed Down (v0.3.2-beta)
 

@@ -37,7 +37,7 @@ Hexagon is a complete AI Agent development ecosystem:
 
 ### System Requirements
 
-- Go 1.23 or higher
+- Go 1.25 or higher
 - Network access (to reach LLM APIs)
 
 ### Environment Variables
@@ -527,8 +527,13 @@ agent := hexagon.QuickStart(
 
 ### Q: How do I debug an Agent?
 
+`WithVerbose` is an Agent option in the `agent` package; use it when constructing an Agent directly:
+
 ```go
-agent := hexagon.QuickStart(
-    hexagon.WithVerbose(true), // enable verbose logging
+import "github.com/hexagon-codes/hexagon/agent"
+
+myAgent := agent.NewReAct(
+    agent.WithLLM(provider),
+    agent.WithVerbose(true), // enable verbose logging
 )
 ```

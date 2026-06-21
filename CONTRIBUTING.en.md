@@ -121,13 +121,22 @@ docs: update README with quick start guide
 
 ```
 hexagon/
-├── cmd/           # Executable programs
-├── pkg/           # Public API (importable by external packages)
+├── agent/         # Agent core (incl. a2a / artifact / semantic / skill)
+├── core/          # Core interfaces (Component / Runnable / Stream)
+├── orchestration/ # Orchestration (graph / chain / workflow / planner)
+├── rag/           # RAG system (incl. adw, etc.)
+├── runtime/       # Unified execution runtime (middleware / strategy)
+├── observe/       # Observability (tracer / metrics / otel / devui)
+├── security/      # Security (guard / rbac / cost / audit, etc.)
+├── tool/          # Tool system
+├── store/         # Storage (vector/*)
 ├── internal/      # Internal implementation (not exposed externally)
-├── examples/      # Example code
-├── docs/          # Documentation
-└── test/          # Integration tests
+├── examples/      # Example code (separate module)
+├── testing/       # Test helpers and integration tests
+└── docs/          # Documentation
 ```
+
+> Note: this project does not use a `pkg/` directory, following mainstream Go community practice.
 
 ## Pull Request Process
 

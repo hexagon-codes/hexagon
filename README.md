@@ -6,7 +6,7 @@
 
 **Go 生态全能型 AI Agent 框架**
 
-[![Go Reference](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
+[![Go Reference](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen)](https://github.com/hexagon-codes/hexagon/actions)
 
@@ -263,55 +263,72 @@ resp, decision, _ := smartRouter.CompleteWithRouting(ctx, req, routingCtx)
 - 20+ 预定义模型能力档案
 - 路由历史和统计分析
 
-### ⚙️ 确定性业务流程 (Process Framework)
+### ♻️ 持久化运行时 (Durable Runtime)
 
-状态机驱动的业务流程框架：
+统一的 Agent 执行运行时，支持 per-tool exactly-once 快照与中断恢复（Resume）：
 
 ```go
-import "github.com/hexagon-codes/hexagon/process"
+import (
+    "github.com/hexagon-codes/hexagon/runtime"
+    "github.com/hexagon-codes/hexagon/checkpoint"
+)
 
-// 定义订单处理流程
-p, _ := process.NewProcess("order-processing").
-    AddState("pending", process.AsInitial()).
-    AddState("validated").
-    AddState("processing").
-    AddState("completed", process.AsFinal()).
-    AddState("failed", process.AsFinal()).
-
-    // 状态转换
-    AddTransition("pending", "validate", "validated",
-        process.WithGuard(func(ctx context.Context, data *process.ProcessData) bool {
-            return data.Get("amount") != nil
-        })).
-    AddTransition("validated", "process", "processing").
-    AddTransition("processing", "complete", "completed").
-    AddTransition("processing", "fail", "failed").
-
-    // 绑定 Agent 到状态
-    OnStateEnter("validated", step.NewAgentStep("validator", validatorAgent)).
-    Build()
-
-// 执行流程
-output, _ := p.Invoke(ctx, process.ProcessInput{
-    Data: map[string]any{"order_id": "123", "amount": 100},
-})
+// 基于 Checkpointer 的持久化执行：崩溃/中断后 Resume 不重复执行已完成的工具
+durable := runtime.NewDurableExecution(checkpoint.NewMemory())
 ```
 
 **特性：**
-- 状态机驱动，确定性执行
-- 支持守卫条件和转换动作
-- 步骤类型：Action/Agent/Condition/Parallel/Sequence/Retry/Timeout
-- 流程生命周期：Start/Pause/Resume/Cancel
-- 完整实现 Runnable 六范式接口
+- per-tool exactly-once：已完成工具调用入快照，Resume 不重放
+- 统一 Runner + 执行策略（ReAct / PlanExecute / Reflection 共用同一运行时）
+- 三维 Budget（token/调用/时长）+ CostControl 统一抽象
+- 五级 PermissionMode 与 Context Compaction 中间件 (`runtime/middleware`)
+- 长任务进度事件 + SSE 事件 sink
+
+### 🧬 Agent 即工具 (AgentTool)
+
+将一个 Agent 直接包装为工具，作为另一 Agent 的子能力组合：
+
+```go
+import "github.com/hexagon-codes/hexagon/agent"
+
+// 把 researcher Agent 暴露为可被 supervisor 调用的工具
+researcherTool := agent.NewAgentTool(researcher,
+    agent.WithAgentToolName("research"),
+    agent.WithAgentToolDescription("调研指定主题并返回要点"),
+)
+
+supervisor := hexagon.QuickStart(
+    hexagon.WithTools(researcherTool),
+    hexagon.WithSystemPrompt("你是一个调度者，按需调用子 Agent"),
+)
+```
+
+### 🧾 原生结构化输出 (Structured Output)
+
+借助 Provider 原生 `json_schema` 强制解码为强类型 Go 结构体：
+
+```go
+import "github.com/hexagon-codes/hexagon/llm/structured"
+
+type Invoice struct {
+    Number string  `json:"number"`
+    Amount float64 `json:"amount"`
+}
+
+inv, _ := structured.Generate[Invoice](ctx, provider, "解析这张发票：...",
+    structured.WithNativeJSONSchema("invoice"),
+    structured.WithStrictMode(true),
+)
+```
 
 ### 📄 智能文档工作流 (ADW)
 
 超越传统 RAG 的端到端文档自动化：
 
 ```go
-import "github.com/hexagon-codes/hexagon/adw"
-import "github.com/hexagon-codes/hexagon/adw/extractor"
-import "github.com/hexagon-codes/hexagon/adw/validator"
+import "github.com/hexagon-codes/hexagon/rag/adw"
+import "github.com/hexagon-codes/hexagon/rag/adw/extractor"
+import "github.com/hexagon-codes/hexagon/rag/adw/validator"
 
 // 定义提取 Schema
 schema := adw.NewExtractionSchema("invoice").
@@ -355,7 +372,7 @@ for _, doc := range output.Documents {
 实现 Google A2A 协议，支持标准化的 Agent 间通信：
 
 ```go
-import "github.com/hexagon-codes/hexagon/a2a"
+import "github.com/hexagon-codes/hexagon/agent/a2a"
 
 // 将 Hexagon Agent 暴露为 A2A 服务
 server := a2a.ExposeAgent(myAgent, "http://localhost:8080")
@@ -426,46 +443,72 @@ for event := range events {
 
 ```
 hexagon/
-├── agent/              # Agent 核心 (ReAct/Role/Team/Handoff/State/Primitives)
-├── a2a/                # A2A 协议 (Client/Server/Handler/Discovery)
-├── core/               # 统一接口 (Component[I,O], Stream[T])
+├── agent/              # Agent 核心 (ReAct/Role/Team/Handoff/State/Primitives/AgentTool/Supervisor)
+│   ├── a2a/            # A2A 协议 (Client/Server/Handler/Discovery)
+│   ├── artifact/       # 工件系统
+│   ├── semantic/       # 语义能力
+│   └── skill/          # 技能注册与签名
+├── core/               # 统一接口 (Component/Runnable, Stream[T], Compose/Fallback)
+├── runtime/            # 统一执行运行时 (Runner/DurableExecution/策略/中间件)
+│   ├── middleware/     # Budget/CostControl/Compaction/PermissionMode
+│   └── strategy/       # 执行策略 (ReAct/PlanExecute/Reflection)
 ├── orchestration/      # 编排引擎
 │   ├── graph/          # 图编排 (状态图/检查点/Barrier/分布式/可视化)
-│   ├── flow/           # Flow 流程编排 (可配置超时)
-│   ├── chain/          # 链式编排
+│   ├── chain/          # 链式编排 (Compile 期 I/O 类型校验)
 │   ├── workflow/       # 工作流引擎
 │   └── planner/        # 规划器
-├── process/            # 确定性业务流程框架 (状态机驱动)
-│   └── step/           # 步骤类型 (Action/Agent/Condition/Parallel)
-├── adw/                # 智能文档工作流 (Agentic Document Workflows)
-│   ├── extractor/      # 结构化提取器
-│   └── validator/      # Schema 验证器
+├── checkpoint/         # 统一 Checkpointer 持久化
+├── interrupt/          # 中断恢复
 ├── rag/                # RAG 系统
-│   ├── loader/         # 文档加载 (Text/Markdown/CSV/XLSX/PPTX/DOCX/PDF/OCR)
+│   ├── loader/         # 文档加载 + Parser 层 (Text/MD/CSV/XLSX/PPTX/DOCX/PDF/OCR)
 │   ├── splitter/       # 文档分割 (Character/Recursive/Markdown/Sentence/Token/Code)
 │   ├── retriever/      # 检索器 (Vector/Keyword/Hybrid/HyDE/Adaptive/ParentDoc)
 │   ├── reranker/       # 重排序
-│   └── synthesizer/    # 响应合成
-├── memory/             # 多 Agent 记忆共享
-├── artifact/           # 工件系统
-├── mcp/                # MCP 协议支持
+│   ├── synthesizer/    # 响应合成
+│   ├── adw/            # 智能文档工作流 (extractor/validator)
+│   ├── agentic/        # Agentic RAG
+│   ├── corrective/     # 纠错式 RAG
+│   ├── selfrag/        # Self-RAG
+│   └── multimodal/     # 多模态
+├── llm/                # LLM 编排层
+│   ├── structured/     # 原生 json_schema 结构化输出
+│   ├── batch/          # 批量调用
+│   ├── conversation/   # 会话管理
+│   ├── parser/         # 输出解析
+│   └── template/       # Prompt 模板
+├── memory/store/       # 多 Agent 记忆存储 (InMemory/File/Redis/Persistent)
+├── mcp/                # MCP 协议 (动态发现/自动重连/多传输)
 ├── hooks/              # 钩子系统 (Run/Tool/LLM/Retriever)
-├── observe/            # 可观测性 (Tracer/Metrics/OTel/DevUI)
-├── security/           # 安全防护 (Guard/RBAC/Cost/Audit/Filter)
-├── tool/               # 工具系统 (File/Python/Shell/Sandbox)
+├── observe/            # 可观测性 (Tracer/Metrics/OTel/Langfuse/DevUI/Replay)
+├── security/           # 安全防护 (Guard/Guardrails/RBAC/Cost/Audit/Filter/PII/Tenant/Credential)
+├── tool/               # 工具系统 (File/Python/Shell/Sandbox/HTTP/Search/DB/Browser...)
 ├── store/              # 存储
-│   └── vector/         # 向量存储 (Qdrant/FAISS/PgVector/Redis/Milvus/Chroma/Pinecone/Weaviate)
+│   └── vector/         # 向量存储 (FAISS/PgVector/Redis/Milvus/Chroma/Pinecone/Weaviate)
+├── client/             # 客户端
 ├── plugin/             # 插件系统
 ├── config/             # 配置管理
-├── evaluate/           # 评估系统
-├── testing/            # 测试工具 (Mock/Record)
+├── evaluate/           # 评估系统 (agenteval/rag/metrics)
+├── testing/            # 测试工具 (Mock/Record/E2E/Integration)
 ├── deploy/             # 部署配置 (Docker Compose/Helm Chart/CI)
-├── examples/           # 示例代码
-├── hexagon.go          # 顶层 API（18 个核心符号）
+├── examples/           # 示例代码 (独立 module)
+├── hexagon.go          # 顶层 API（核心入口符号）
 └── deprecated.go       # 过渡性重导出（下一大版本移除）
 ```
 
 ## ⚠️ 近期重要变更
+
+### 架构重构（v0.5.0）
+
+v0.5.0 进行了一次结构性收敛，并升级到 ai-core v0.1.4 / toolkit v0.1.0（Go 1.25）：
+
+- **顶层 feature 包归组**：`a2a → agent/a2a`、`artifact → agent/artifact`、`semantic → agent/semantic`、`skill → agent/skill`、`adw → rag/adw`。
+- **编排正统化**：以 `orchestration/graph` 为编排正统轴，裁剪冗余的 `compose` / `process` / `flow` 包。
+- **持久化收敛**：统一为单一 `Checkpointer`（`checkpoint/`）。
+- **下沉去重**：stream 下沉 `ai-core/streamx`、媒体下沉 `ai-core/media`、安全/沙箱/blobstore 下沉 `toolkit`；Schema 统一走 `ai-core/schema`（`core.Schema` 为类型别名）。
+- **新增能力**：统一 `runtime`（DurableExecution per-tool exactly-once + Resume、Budget/CostControl、五级 PermissionMode、Context Compaction）、`agent.AgentTool`、MCP 自动重连、`observe/otel` 的 Langfuse 导出、`orchestration/chain` 的 Compile 期类型校验、`rag/loader` Parser 层、`llm/structured` 原生 json_schema。
+- **examples 独立 module**：`go get github.com/hexagon-codes/hexagon` 不再拉入示例依赖图。
+
+> 迁移期保留 `deprecated.go` 作为顶层重导出 shim，将在下一大版本移除。
 
 ### 顶层 API 瘦身（v0.3.2-beta）
 

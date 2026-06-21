@@ -23,7 +23,7 @@ agent := agent.NewBaseAgent(
 实现 ReAct (Reasoning + Acting) 模式，支持多步推理和工具调用：
 
 ```go
-agent := agent.NewReActAgent(
+agent := agent.NewReAct(
     agent.WithName("researcher"),
     agent.WithLLM(llm),
     agent.WithTools(searchTool, calculatorTool),
@@ -31,17 +31,30 @@ agent := agent.NewReActAgent(
 )
 ```
 
-### RAGAgent
+### RAG（检索增强）
 
-检索增强生成 Agent，结合知识库回答问题：
+框架没有专门的 RAG Agent 构造器，而是用 `rag.Engine` 检索知识库、把上下文拼进查询后交给普通 Agent 回答：
 
 ```go
-agent := agent.NewRAGAgent(
-    agent.WithName("knowledge-bot"),
-    agent.WithLLM(llm),
-    agent.WithRetriever(vectorRetriever),
-    agent.WithTopK(5),
+import (
+    "github.com/hexagon-codes/hexagon/rag"
+    "github.com/hexagon-codes/hexagon/rag/embedder"
 )
+
+// 创建 RAG 引擎
+engine := rag.NewEngine(
+    rag.WithStore(store),
+    rag.WithEngineEmbedder(embedder.NewOpenAIEmbedder(provider)),
+    rag.WithEngineTopK(5),
+)
+_ = engine.Index(ctx, docs)
+
+// 检索上下文并交给 Agent 回答
+context, _ := engine.Query(ctx, "什么是 Hexagon？")
+output, _ := myAgent.Run(ctx, agent.Input{
+    Query:   "什么是 Hexagon？",
+    Context: map[string]any{"knowledge": context},
+})
 ```
 
 ## 配置选项
@@ -52,22 +65,22 @@ agent := agent.NewRAGAgent(
 agent.WithName("my-agent")           // 设置名称
 agent.WithLLM(llm)                   // 设置 LLM
 agent.WithSystemPrompt("...")        // 设置系统提示
-agent.WithTemperature(0.7)           // 设置温度
-agent.WithMaxTokens(2000)            // 设置最大 token
+agent.WithMaxIterations(10)          // 设置最大推理迭代次数
+agent.WithVerbose(true)              // 开启详细日志
 ```
+
+> 注意：温度、最大 token 等采样参数由 LLM Provider 在创建时配置（如 `openai.New(...)` 的选项），而非 Agent 选项。
 
 ### 工具配置
 
 ```go
 agent.WithTools(tool1, tool2)        // 添加工具
-agent.WithToolChoice("auto")         // 工具选择策略
 ```
 
 ### 记忆配置
 
 ```go
-agent.WithMemory(memory)             // 添加记忆
-agent.WithMemoryWindow(10)           // 记忆窗口大小
+agent.WithMemory(mem)                // 添加记忆（记忆容量在构造记忆时设置）
 ```
 
 ## 中间件系统
@@ -182,13 +195,13 @@ agent := agent.NewBaseAgent(
 
 ```go
 // 创建团队成员
-researcher := agent.NewReActAgent(...)
+researcher := agent.NewReAct(...)
 writer := agent.NewBaseAgent(...)
 reviewer := agent.NewBaseAgent(...)
 
-// 创建团队
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.SequentialMode),
+// 创建团队（第一个参数为团队名称）
+team := agent.NewTeam("content-team",
+    agent.WithMode(agent.TeamModeSequential),
     agent.WithAgents(researcher, writer, reviewer),
 )
 
@@ -198,22 +211,35 @@ output, err := team.Run(ctx, input)
 
 ### 团队模式
 
-- `SequentialMode`: 顺序执行
-- `ParallelMode`: 并行执行
-- `HierarchicalMode`: 层级执行
-- `ConsensusMode`: 共识执行
+- `agent.TeamModeSequential`: 顺序执行
+- `agent.TeamModeHierarchical`: 层级执行
+- `agent.TeamModeCollaborative`: 协作执行
+- `agent.TeamModeRoundRobin`: 轮询执行
 
 ## 流式输出
 
 ```go
-// 获取流式响应
-stream, err := agent.Stream(ctx, input)
+import (
+    "errors"
+    "io"
+)
+
+// 获取流式响应：Stream 返回 *stream.StreamReader[agent.Output]
+reader, err := myAgent.Stream(ctx, input)
 if err != nil {
     return err
 }
+defer reader.Close()
 
-// 处理流式数据
-for chunk := range stream.Next() {
+// 循环 Recv 处理流式数据，io.EOF 表示结束
+for {
+    chunk, err := reader.Recv()
+    if errors.Is(err, io.EOF) {
+        break
+    }
+    if err != nil {
+        return err
+    }
     fmt.Print(chunk.Content)
 }
 ```
@@ -221,15 +247,14 @@ for chunk := range stream.Next() {
 ## 错误处理
 
 ```go
-output, err := agent.Run(ctx, input)
+output, err := myAgent.Run(ctx, input)
 if err != nil {
     switch {
     case errors.Is(err, context.DeadlineExceeded):
         // 处理超时
-    case errors.Is(err, agent.ErrToolFailed):
-        // 处理工具失败
     default:
-        // 处理其他错误
+        // 错误使用 fmt.Errorf("...: %w", err) 逐层包装，
+        // 可用 errors.Is / errors.As 解包判断具体原因
     }
 }
 ```
