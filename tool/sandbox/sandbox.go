@@ -166,6 +166,19 @@ func (s *Sandbox) execute(ctx context.Context, input ExecuteInput) (*ExecuteOutp
 
 // executeDocker 在 Docker 中执行
 func (s *Sandbox) executeDocker(ctx context.Context, input ExecuteInput) (*ExecuteOutput, error) {
+	// 先校验附加文件路径再做任何事：拒绝 ".." 穿越与绝对路径，防止恶意输入经
+	// filepath.Join 逃出临时目录写到宿主机文件系统（与 executeProcess 同一约束）。
+	cleanedFiles := make(map[string]string, len(input.Files))
+	for path, content := range input.Files {
+		cleanPath := filepath.Clean(path)
+		// 仅拒绝真实穿越（"." 清理后为 ".." 自身或以 "../" 开头）与绝对路径；
+		// 字面以 ".." 开头的普通文件名（如 "..keep"）是合法的临时目录内文件，应放行。
+		if cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) || filepath.IsAbs(cleanPath) {
+			return nil, fmt.Errorf("不安全的文件路径: %s", path)
+		}
+		cleanedFiles[cleanPath] = content
+	}
+
 	// 检查 Docker 是否可用
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		return nil, fmt.Errorf("docker not available: %w", err)
@@ -193,8 +206,8 @@ func (s *Sandbox) executeDocker(ctx context.Context, input ExecuteInput) (*Execu
 		return nil, fmt.Errorf("failed to write code file: %w", err)
 	}
 
-	// 写入额外文件
-	for path, content := range input.Files {
+	// 写入额外文件（路径已在入口校验，使用清理后的相对路径）
+	for path, content := range cleanedFiles {
 		filePath := filepath.Join(tempDir, path)
 		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 			return nil, fmt.Errorf("failed to create directory: %w", err)
@@ -319,7 +332,9 @@ func (s *Sandbox) executeProcess(ctx context.Context, input ExecuteInput) (*Exec
 	for path, content := range input.Files {
 		// 清理路径，防止 "../" 等路径穿越
 		cleanPath := filepath.Clean(path)
-		if strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
+		// 仅拒绝真实穿越（"." 清理后为 ".." 自身或以 "../" 开头）与绝对路径；
+		// 字面以 ".." 开头的普通文件名（如 "..keep"）是合法的临时目录内文件，应放行。
+		if cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) || filepath.IsAbs(cleanPath) {
 			return nil, fmt.Errorf("不安全的文件路径: %s", path)
 		}
 		filePath := filepath.Join(tempDir, cleanPath)

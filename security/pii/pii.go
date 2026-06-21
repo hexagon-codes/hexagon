@@ -275,42 +275,93 @@ func (d *RegexDetector) Detect(ctx context.Context, text string) ([]*PIIEntity, 
 		}
 	}
 
-	// 去重（保留置信度最高的）
-	entities = d.dedup(entities)
+	// 去重（合并重叠区间）
+	entities = d.dedup(text, entities)
 
 	return entities, nil
 }
 
-// posKey 位置去重键，比 fmt.Sprintf 更高效
-type posKey struct {
-	start, end int
-}
-
-// dedup 去重
-func (d *RegexDetector) dedup(entities []*PIIEntity) []*PIIEntity {
-	if len(entities) == 0 {
+// dedup 合并重叠的检测结果，保证返回的实体区间互不重叠。
+//
+// 仅去重完全相同的区间是不够的：不同模式（如电话与信用卡）常对同一段数字给出
+// 部分重叠的区间，若都保留，脱敏时按各自偏移替换会相互错位、把未脱敏的原始片段
+// 重新拼回输出（PII 泄漏）。因此这里把任意重叠的区间合并为一个：保留覆盖范围更广
+// 的区间端点（确保整段敏感数据都被脱敏），并在覆盖范围相同时保留置信度更高者。
+func (d *RegexDetector) dedup(text string, entities []*PIIEntity) []*PIIEntity {
+	if len(entities) <= 1 {
 		return entities
 	}
 
-	// 按位置分组，保留置信度最高的
-	posMap := make(map[posKey]*PIIEntity)
-	for _, e := range entities {
-		key := posKey{start: e.Start, end: e.End}
-		if existing, ok := posMap[key]; ok {
-			if e.Score > existing.Score {
-				posMap[key] = e
-			}
-		} else {
-			posMap[key] = e
+	merged := mergeOverlapping(entities)
+
+	// 合并后区间端点可能取并集，与原 Value 不一致（部分重叠且互不包含时）。按区间字节
+	// 重新截取 Value，保证返回实体的 Value 与其 [Start,End) 对齐，避免暴露错位子串。
+	for _, e := range merged {
+		if e.Start >= 0 && e.End <= len(text) && e.Start < e.End {
+			e.Value = text[e.Start:e.End]
 		}
 	}
+	return merged
+}
 
-	result := make([]*PIIEntity, 0, len(posMap))
-	for _, e := range posMap {
-		result = append(result, e)
+// mergeOverlapping 将任意顺序的实体区间排序并合并所有重叠区间，返回按起点升序、
+// 互不重叠的区间。dedup 与 normalizeSpans 共用此合并逻辑，避免两处重复实现。
+func mergeOverlapping(entities []*PIIEntity) []*PIIEntity {
+	if len(entities) <= 1 {
+		return entities
 	}
 
+	// 按起点升序、终点降序排序，便于线性合并重叠区间。
+	sorted := make([]*PIIEntity, len(entities))
+	copy(sorted, entities)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Start != sorted[j].Start {
+			return sorted[i].Start < sorted[j].Start
+		}
+		return sorted[i].End > sorted[j].End
+	})
+
+	result := make([]*PIIEntity, 0, len(sorted))
+	cur := sorted[0]
+	for _, e := range sorted[1:] {
+		// 与当前区间重叠（含相邻包含），合并为更优的一个。
+		if e.Start < cur.End {
+			cur = mergeEntities(cur, e)
+			continue
+		}
+		result = append(result, cur)
+		cur = e
+	}
+	result = append(result, cur)
 	return result
+}
+
+// mergeEntities 合并两个重叠区间为单个区间。
+//
+// 选取覆盖范围更广者作为脱敏区间（避免漏掉任何敏感片段）；覆盖范围一致时保留置信度
+// 更高者。合并后的区间端点取两者并集，Value 重新按端点截取以与端点保持一致。
+func mergeEntities(a, b *PIIEntity) *PIIEntity {
+	winner := a
+	spanA := a.End - a.Start
+	spanB := b.End - b.Start
+	if spanB > spanA || (spanB == spanA && b.Score > a.Score) {
+		winner = b
+	}
+
+	merged := *winner
+	if a.Start < merged.Start {
+		merged.Start = a.Start
+	}
+	if b.Start < merged.Start {
+		merged.Start = b.Start
+	}
+	if a.End > merged.End {
+		merged.End = a.End
+	}
+	if b.End > merged.End {
+		merged.End = b.End
+	}
+	return &merged
 }
 
 // SupportedTypes 支持的类型
@@ -495,20 +546,24 @@ func (a *Anonymizer) SetStrategy(piiType PIIType, strategy AnonymizeStrategy) {
 }
 
 // Anonymize 执行脱敏
+//
+// 区间在替换前会被规整为互不重叠：先按起点升序合并任意重叠区间（避免部分重叠的检测
+// 结果在替换时相互错位、把原始片段重新拼回输出），再从后往前替换。每个区间的 Value
+// 按其字节范围从原文重新截取，使脱敏掩码长度与被替换区间一致，杜绝原始 PII 片段残留。
 func (a *Anonymizer) Anonymize(text string, entities []*PIIEntity) string {
 	if len(entities) == 0 {
 		return text
 	}
 
-	// 按位置倒序排序，从后往前替换（避免替换后偏移量变化）
-	sortedEntities := make([]*PIIEntity, len(entities))
-	copy(sortedEntities, entities)
-	sort.Slice(sortedEntities, func(i, j int) bool {
-		return sortedEntities[i].Start > sortedEntities[j].Start
-	})
+	spans := normalizeSpans(text, entities)
+	if len(spans) == 0 {
+		return text
+	}
 
+	// spans 已按起点升序且互不重叠；倒序遍历从后往前替换，前面的偏移不受影响。
 	result := text
-	for _, entity := range sortedEntities {
+	for i := len(spans) - 1; i >= 0; i-- {
+		entity := spans[i]
 		strategy := a.strategies[entity.Type]
 		if strategy == nil {
 			strategy = a.defaultStrategy
@@ -519,6 +574,32 @@ func (a *Anonymizer) Anonymize(text string, entities []*PIIEntity) string {
 	}
 
 	return result
+}
+
+// normalizeSpans 把任意（可能重叠/越界）实体区间规整为按起点升序、互不重叠的区间，
+// 并以原文实际字节内容回填每个区间的 Value，保证脱敏掩码覆盖整段敏感数据。
+func normalizeSpans(text string, entities []*PIIEntity) []*PIIEntity {
+	sorted := make([]*PIIEntity, 0, len(entities))
+	for _, e := range entities {
+		// 丢弃越界/空区间，避免切片越界或无意义替换。
+		if e == nil || e.Start < 0 || e.End > len(text) || e.Start >= e.End {
+			continue
+		}
+		// 复制后操作，避免回填 Value 时修改调用方传入的实体。
+		cp := *e
+		sorted = append(sorted, &cp)
+	}
+	if len(sorted) == 0 {
+		return nil
+	}
+
+	merged := mergeOverlapping(sorted)
+
+	// Value 以区间字节内容回填，保证掩码长度与替换区间一致。
+	for _, e := range merged {
+		e.Value = text[e.Start:e.End]
+	}
+	return merged
 }
 
 // ============== PII 处理器 ==============
