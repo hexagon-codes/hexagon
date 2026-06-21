@@ -1,12 +1,17 @@
 // Package batch 提供 LLM 请求批处理功能
 //
 // 本包实现了 LLM 请求的批量处理和优化：
+//
 //   - 请求合并：将多个相似请求合并处理
+//
 //   - 请求队列：管理并发请求队列
+//
 //   - 速率限制：控制 API 调用频率
+//
 //   - 自动重试：处理临时错误
 //
 //   - OpenAI Batch API: 批量处理
+//
 //   - gRPC: 请求流和批处理
 //
 // 使用示例（Batcher 实例方式，需手动 Start/Stop）：
@@ -196,6 +201,12 @@ type Batcher struct {
 type pendingRequest struct {
 	request  *Request
 	response chan *Response
+
+	// result 由 processRequest 计算后暂存；实际交付推迟到 processBatch 调用
+	// OnBatchComplete 之后，确保 BatchSubmit 返回时整个批次生命周期（含完成回调）
+	// 已结束。单写（对应 processRequest goroutine）单读（processBatch 在 wg.Wait
+	// 之后），由 WaitGroup 建立 happens-before，无需额外同步。
+	result *Response
 }
 
 // Stats 统计信息
@@ -437,6 +448,14 @@ func (b *Batcher) processBatch(batch []*pendingRequest) {
 	if b.config.OnBatchComplete != nil {
 		b.config.OnBatchComplete(batchID, len(batch), time.Since(startTime))
 	}
+
+	// 在批次完成回调之后再交付各请求响应，唤醒等待中的 Submit/BatchSubmit 调用方。
+	// 由此 BatchSubmit 返回时本批次的 OnBatchStart/OnBatchComplete 一定都已触发，
+	// 消除"响应已返回但完成回调尚未执行"的竞态（与 OnRequestComplete/OnError 的
+	// 交付前语义一致）。response 通道容量为 1、每个 pending 仅一次发送，不会阻塞。
+	for _, pending := range batch {
+		pending.response <- pending.result
+	}
 }
 
 // processRequest 处理单个请求
@@ -520,8 +539,8 @@ func (b *Batcher) processRequest(pending *pendingRequest) {
 		b.config.OnRequestComplete(pending.request, resp)
 	}
 
-	// 发送响应
-	pending.response <- resp
+	// 暂存响应；实际交付由 processBatch 在 OnBatchComplete 之后统一进行（见 result 字段说明）。
+	pending.result = resp
 }
 
 // Stats 获取统计信息
