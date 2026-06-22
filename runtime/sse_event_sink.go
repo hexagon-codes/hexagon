@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/net/sse"
 )
 
 // SSEEventSink 把 runtime.Event 串行序列化为 W3C SSE 帧并 flush 到 HTTP response。
@@ -26,6 +28,11 @@ import (
 //
 // host 也可在每个事件前后塞自己的应用层事件（cron compile progress 等）。
 type SSEEventSink struct {
+	// sw 委托 toolkit/net/sse.Writer：负责事件帧（event:/data:）格式 + 线程安全 flush。
+	sw *sse.Writer
+	// w/flusher 仅供 WriteComment 写注释帧：本 sink 既定契约是 `: <text>\n\n`，
+	// 而 toolkit WriteComment 用单 `\n`（SSE 注释规范）—— 为保持 wire 字节不变，
+	// 注释帧仍走手写路径。事件帧（主体）已委托 toolkit。
 	w       http.ResponseWriter
 	flusher http.Flusher
 	mu      sync.Mutex
@@ -42,11 +49,9 @@ func NewSSEEventSink(w http.ResponseWriter) (*SSEEventSink, error) {
 	if !ok {
 		return nil, fmt.Errorf("runtime/sse: ResponseWriter 不支持 http.Flusher")
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	return &SSEEventSink{w: w, flusher: flusher}, nil
+	// sse.NewWriter 设置 SSE 头部（Content-Type / Cache-Control / Connection /
+	// X-Accel-Buffering，与原手写一致）并提供标准事件帧格式 + 线程安全 flush。
+	return &SSEEventSink{sw: sse.NewWriter(w), w: w, flusher: flusher}, nil
 }
 
 // Emit 实现 EventSink。
@@ -74,11 +79,10 @@ func (s *SSEEventSink) Emit(ctx context.Context, event Event) error {
 	if err != nil {
 		return fmt.Errorf("runtime/sse: marshal event: %w", err)
 	}
-	if _, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event.Type, payload); err != nil {
+	if err := s.sw.Write(&sse.Event{Event: string(event.Type), Data: string(payload)}); err != nil {
 		s.closed = true
 		return fmt.Errorf("runtime/sse: write frame: %w", err)
 	}
-	s.flusher.Flush()
 	return nil
 }
 
@@ -116,11 +120,10 @@ func (s *SSEEventSink) EmitRaw(ctx context.Context, eventName string, payload an
 	if err != nil {
 		return fmt.Errorf("runtime/sse: marshal raw payload: %w", err)
 	}
-	if _, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", eventName, b); err != nil {
+	if err := s.sw.Write(&sse.Event{Event: eventName, Data: string(b)}); err != nil {
 		s.closed = true
 		return fmt.Errorf("runtime/sse: write raw frame: %w", err)
 	}
-	s.flusher.Flush()
 	return nil
 }
 
@@ -142,17 +145,17 @@ func (s *SSEEventSink) WriteComment(text string) error {
 
 // ssePayload 是发给客户端的 wire JSON（avoid leaking internal pointers）。
 type ssePayload struct {
-	Type      EventType `json:"type"`
-	RunID     string    `json:"run_id,omitempty"`
-	RequestID string    `json:"request_id,omitempty"`
-	SessionID string    `json:"session_id,omitempty"`
-	Turn      int       `json:"turn,omitempty"`
-	Sequence  int64     `json:"sequence,omitempty"`
-	Timestamp time.Time `json:"ts"`
-	Summary   StateSummary `json:"summary,omitempty"`
+	Type      EventType     `json:"type"`
+	RunID     string        `json:"run_id,omitempty"`
+	RequestID string        `json:"request_id,omitempty"`
+	SessionID string        `json:"session_id,omitempty"`
+	Turn      int           `json:"turn,omitempty"`
+	Sequence  int64         `json:"sequence,omitempty"`
+	Timestamp time.Time     `json:"ts"`
+	Summary   StateSummary  `json:"summary,omitempty"`
 	ToolCall  *toolCallView `json:"tool_call,omitempty"`
-	Error     string `json:"error,omitempty"`
-	Payload   any    `json:"payload,omitempty"`
+	Error     string        `json:"error,omitempty"`
+	Payload   any           `json:"payload,omitempty"`
 }
 
 type toolCallView struct {
