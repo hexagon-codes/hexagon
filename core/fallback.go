@@ -13,10 +13,9 @@ package core
 import (
 	"context"
 	"errors"
-	"sync"
-	"sync/atomic"
 	"time"
 
+	"github.com/hexagon-codes/toolkit/util/circuit"
 	"github.com/hexagon-codes/toolkit/util/retry"
 )
 
@@ -471,14 +470,13 @@ func DefaultCircuitBreakerConfig() *CircuitBreakerConfig {
 }
 
 // CircuitBreaker 熔断器
+//
+// 状态机委托 toolkit/util/circuit，避免与 toolkit 各维护一份私网/状态逻辑产生防护漂移。
+// 用法契约：Allow() 作门控检查（允许返回 true），随后**恰好**配对一次
+// RecordSuccess() 或 RecordFailure()（RunnableWithCircuitBreaker.Invoke/Stream 即如此）。
 type CircuitBreaker struct {
-	config *CircuitBreakerConfig
-
-	state           int32 // atomic
-	failures        int32 // atomic
-	successes       int32 // atomic
-	lastFailureTime time.Time
-	mu              sync.RWMutex
+	config  *CircuitBreakerConfig
+	breaker *circuit.Breaker
 }
 
 // NewCircuitBreaker 创建熔断器
@@ -488,85 +486,45 @@ func NewCircuitBreaker(config ...*CircuitBreakerConfig) *CircuitBreaker {
 		cfg = config[0]
 	}
 
+	// 半开探测数取 SuccessThreshold（累计该数次成功即关闭），至少 1。
+	halfOpenMax := max(cfg.SuccessThreshold, 1)
+	opts := []circuit.Option{
+		circuit.WithThreshold(cfg.FailureThreshold),
+		circuit.WithSuccessThreshold(cfg.SuccessThreshold),
+		circuit.WithTimeout(cfg.Timeout),
+		circuit.WithHalfOpenMaxRequests(halfOpenMax),
+	}
+	if cfg.OnStateChange != nil {
+		onChange := cfg.OnStateChange
+		opts = append(opts, circuit.WithOnStateChange(func(from, to circuit.State) {
+			onChange(CircuitState(from), CircuitState(to))
+		}))
+	}
+
 	return &CircuitBreaker{
-		config: cfg,
-		state:  int32(CircuitClosed),
+		config:  cfg,
+		breaker: circuit.New(opts...),
 	}
 }
 
 // State 获取当前状态
 func (cb *CircuitBreaker) State() CircuitState {
-	return CircuitState(atomic.LoadInt32(&cb.state))
+	return CircuitState(cb.breaker.State())
 }
 
-// Allow 检查是否允许执行
+// Allow 检查是否允许执行（开路返回 false）
 func (cb *CircuitBreaker) Allow() bool {
-	state := cb.State()
-
-	if state == CircuitClosed {
-		return true
-	}
-
-	if state == CircuitOpen {
-		cb.mu.RLock()
-		lastFailure := cb.lastFailureTime
-		cb.mu.RUnlock()
-
-		if time.Since(lastFailure) > cb.config.Timeout {
-			cb.transition(CircuitOpen, CircuitHalfOpen)
-			return true
-		}
-		return false
-	}
-
-	// CircuitHalfOpen
-	return true
+	return cb.breaker.Allow() == nil
 }
 
-// RecordSuccess 记录成功
+// RecordSuccess 记录成功（须与一次 Allow 配对）
 func (cb *CircuitBreaker) RecordSuccess() {
-	atomic.StoreInt32(&cb.failures, 0)
-
-	state := cb.State()
-	if state == CircuitHalfOpen {
-		successes := atomic.AddInt32(&cb.successes, 1)
-		if int(successes) >= cb.config.SuccessThreshold {
-			cb.transition(CircuitHalfOpen, CircuitClosed)
-		}
-	}
+	cb.breaker.Success()
 }
 
-// RecordFailure 记录失败
+// RecordFailure 记录失败（须与一次 Allow 配对）
 func (cb *CircuitBreaker) RecordFailure() {
-	atomic.StoreInt32(&cb.successes, 0)
-
-	cb.mu.Lock()
-	cb.lastFailureTime = time.Now()
-	cb.mu.Unlock()
-
-	state := cb.State()
-	if state == CircuitHalfOpen {
-		cb.transition(CircuitHalfOpen, CircuitOpen)
-		return
-	}
-
-	if state == CircuitClosed {
-		failures := atomic.AddInt32(&cb.failures, 1)
-		if int(failures) >= cb.config.FailureThreshold {
-			cb.transition(CircuitClosed, CircuitOpen)
-		}
-	}
-}
-
-func (cb *CircuitBreaker) transition(from, to CircuitState) {
-	if atomic.CompareAndSwapInt32(&cb.state, int32(from), int32(to)) {
-		atomic.StoreInt32(&cb.failures, 0)
-		atomic.StoreInt32(&cb.successes, 0)
-
-		if cb.config.OnStateChange != nil {
-			cb.config.OnStateChange(from, to)
-		}
-	}
+	cb.breaker.Failure()
 }
 
 // RunnableWithCircuitBreaker 带熔断器的 Runnable

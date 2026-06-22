@@ -891,6 +891,7 @@ func TestCircuitBreaker_HalfOpenToClosed(t *testing.T) {
 	if cb.State() != CircuitHalfOpen {
 		t.Fatalf("1 次成功后应仍为 CircuitHalfOpen")
 	}
+	cb.Allow() // 配对契约：每次成功探测前先经 Allow 门控（与生产 Invoke/Stream 一致）
 	cb.RecordSuccess()
 	if cb.State() != CircuitClosed {
 		t.Fatalf("2 次成功后应为 CircuitClosed")
@@ -942,6 +943,18 @@ func TestCircuitBreaker_OnStateChange(t *testing.T) {
 	cb.Allow() // → HalfOpen
 
 	cb.RecordSuccess() // → Closed
+
+	// toolkit/util/circuit 的状态变更回调为异步投递（经 channel + 后台 goroutine），轮询等待落地。
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(transitions)
+		mu.Unlock()
+		if n >= 3 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
