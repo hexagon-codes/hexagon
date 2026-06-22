@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/retry"
 )
 
 // StepType 步骤类型
@@ -219,15 +221,15 @@ func (s *BaseStep) calculateRetryInterval(attempt int) time.Duration {
 		return time.Second
 	}
 
-	interval := s.retryPolicy.InitialInterval
-	for i := 0; i < attempt; i++ {
-		interval = time.Duration(float64(interval) * s.retryPolicy.Multiplier)
-		if interval > s.retryPolicy.MaxInterval {
-			interval = s.retryPolicy.MaxInterval
-			break
-		}
-	}
-	return interval
+	// 复用 toolkit/util/retry 指数退避，退避序列与原手写实现逐项一致：
+	// InitialInterval, ×Multiplier 递增，封顶 MaxInterval。
+	// ExponentialBackoff 的 multiplier 为 Multiplier^(n-1)，故 attempt 偏移 +1
+	// （calculateRetryInterval(0)=InitialInterval=ExponentialBackoff(1)）。
+	cfg := retry.DefaultConfig()
+	cfg.Delay = s.retryPolicy.InitialInterval
+	cfg.MaxDelay = s.retryPolicy.MaxInterval
+	cfg.Multiplier = s.retryPolicy.Multiplier
+	return retry.ExponentialBackoff(attempt+1, cfg)
 }
 
 // Dependencies 返回依赖的步骤 ID
