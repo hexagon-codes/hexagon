@@ -121,6 +121,9 @@ func NewEnvironmentManager(opts ...EnvironmentManagerOption) *EnvironmentManager
 //   - *AgentConfig: Agent 配置
 //   - error: 错误（如果有）
 func (m *EnvironmentManager) LoadAgentConfig(name string) (*AgentConfig, error) {
+	if err := validateConfigName(name); err != nil {
+		return nil, err
+	}
 	// 加载 base 配置
 	basePath := filepath.Join(m.baseDir, "base", fmt.Sprintf("%s.yaml", name))
 	var baseConfig *AgentConfig
@@ -153,6 +156,9 @@ func (m *EnvironmentManager) LoadAgentConfig(name string) (*AgentConfig, error) 
 
 // LoadTeamConfig 加载 Team 配置（带环境支持）
 func (m *EnvironmentManager) LoadTeamConfig(name string) (*TeamConfig, error) {
+	if err := validateConfigName(name); err != nil {
+		return nil, err
+	}
 	// 加载 base 配置
 	basePath := filepath.Join(m.baseDir, "base", fmt.Sprintf("%s.yaml", name))
 	var baseConfig *TeamConfig
@@ -185,6 +191,9 @@ func (m *EnvironmentManager) LoadTeamConfig(name string) (*TeamConfig, error) {
 
 // LoadWorkflowConfig 加载 Workflow 配置（带环境支持）
 func (m *EnvironmentManager) LoadWorkflowConfig(name string) (*WorkflowConfig, error) {
+	if err := validateConfigName(name); err != nil {
+		return nil, err
+	}
 	// 加载 base 配置
 	basePath := filepath.Join(m.baseDir, "base", fmt.Sprintf("%s.yaml", name))
 	var baseConfig *WorkflowConfig
@@ -297,6 +306,9 @@ func (m *EnvironmentManager) InitializeEnvironments() error {
 //   - map[string]any: 原始配置数据
 //   - error: 错误（如果有）
 func (m *EnvironmentManager) LoadRawConfig(env Environment, name string) (map[string]any, error) {
+	if err := validateConfigName(name); err != nil {
+		return nil, err
+	}
 	path := filepath.Join(m.baseDir, string(env), fmt.Sprintf("%s.yaml", name))
 
 	data, err := os.ReadFile(path)
@@ -322,6 +334,9 @@ func (m *EnvironmentManager) LoadRawConfig(env Environment, name string) (map[st
 // 返回值：
 //   - error: 错误（如果有）
 func (m *EnvironmentManager) SaveConfig(env Environment, name string, config any) error {
+	if err := validateConfigName(name); err != nil {
+		return err
+	}
 	path := filepath.Join(m.baseDir, string(env), fmt.Sprintf("%s.yaml", name))
 
 	data, err := yaml.Marshal(config)
@@ -345,7 +360,20 @@ func (m *EnvironmentManager) SaveConfig(env Environment, name string, config any
 //
 // 返回值：
 //   - error: 错误（如果有）
+//
+// validateConfigName 防路径穿越：配置名必须是简单标识符，不含 `..` / 路径分隔符 / 绝对路径，
+// 否则 filepath.Join(baseDir, env, name+".yaml") 可逃逸 baseDir（gosec G703）。
+func validateConfigName(name string) error {
+	if name == "" || strings.Contains(name, "..") || strings.ContainsAny(name, `/\`) || filepath.IsAbs(name) {
+		return fmt.Errorf("invalid config name %q (must be a simple identifier)", name)
+	}
+	return nil
+}
+
 func (m *EnvironmentManager) CopyConfig(name string, fromEnv, toEnv Environment) error {
+	if err := validateConfigName(name); err != nil {
+		return err
+	}
 	// 读取源配置
 	srcPath := filepath.Join(m.baseDir, string(fromEnv), fmt.Sprintf("%s.yaml", name))
 	data, err := os.ReadFile(srcPath)
