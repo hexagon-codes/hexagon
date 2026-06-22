@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.5.2]
+> 维护版本：核心并发/退避/SSE/SSRF 原语统一委托 toolkit（消除多份重复实现的防护漂移）+ config 防路径穿越 + 依赖升级。注：`CircuitBreaker` 状态回调时序由同步改异步（详见 Changed），调用方如依赖回调同步落地请留意。
+
+### Changed
+- **core/CircuitBreaker**：状态机委托 `toolkit/util/circuit.Breaker`，移除自维护的 atomic 状态/计数。**行为变更**：`OnStateChange` 回调由同步改为**异步**投递（channel + 后台 goroutine）；`Allow()` 须与随后**恰好一次** `RecordSuccess()`/`RecordFailure()` 配对（半开探测门控契约，生产 `RunnableWithCircuitBreaker.Invoke/Stream` 已满足）。
+- **orchestration/workflow**：`calculateRetryInterval` 退避委托 `toolkit/util/retry.ExponentialBackoff`，退避序列（`InitialInterval` ×`Multiplier` 封顶 `MaxInterval`）逐项不变。
+- **runtime/sse**：`SSEEventSink` 事件帧（`event:`/`data:`）委托 `toolkit/net/sse.Writer`（SSE 头部 + 线程安全 flush 一致）；注释帧 `: <text>\n\n` 仍走手写以保 wire 字节不变。
+- 依赖升级：toolkit v0.2.0 → **v0.2.1**（`net/httpx.RawClient` 默认遵循 `HTTP(S)_PROXY`/`NO_PROXY`）、ai-core v0.1.6 → **v0.1.7**（lockstep）。
+
+### Security
+- **tool/http、tool/browser**：SSRF 校验复用 `toolkit/net/ssrf.ValidateURL`（元数据/localhost 阻断 + DNS 解析逐 IP 私网检查，抗 DNS rebinding），替换各处手写私网名单；`browser` 此前缺 DNS 解析检查，此次一并加强（scheme 仅 http/https 的限制保留在本地）。
+- **config/EnvironmentManager**：`LoadAgentConfig`/`LoadTeamConfig`/`LoadWorkflowConfig`/`LoadRawConfig`/`SaveConfig`/`CopyConfig` 补 `validateConfigName` 防路径穿越（拒绝 `..`/路径分隔符/绝对路径），堵 `filepath.Join(baseDir, …, name)` 逃逸 baseDir 的面（gosec G703）。
+
 ## [0.5.1]
 > 维护版本：依赖升级 + 安全/并发缺陷修复。hexagon 公开 API 不变（SemVer patch）。
 
