@@ -9,14 +9,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/hexagon-codes/ai-core/tool"
-	iputil "github.com/hexagon-codes/toolkit/net/ip"
+	"github.com/hexagon-codes/toolkit/net/ssrf"
 )
 
 const (
@@ -347,43 +346,12 @@ func (t *GraphQLTool) Tool() tool.Tool {
 // validateURLSafety 验证 URL 是否安全，防止 SSRF 攻击
 // 禁止访问内网地址、元数据服务、非 HTTP(S) 协议等
 func validateURLSafety(u *url.URL) error {
-	// 只允许 http 和 https 协议
+	// scheme 限制：仅允许 http/https。toolkit ssrf.ValidateURL 不校验协议，故在此保留。
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
 		return fmt.Errorf("不允许的协议: %s（仅支持 http/https）", u.Scheme)
 	}
-
-	host := u.Hostname()
-	if host == "" {
-		return fmt.Errorf("URL 缺少主机名")
-	}
-
-	// 禁止 localhost 和常见本地主机名
-	lowerHost := strings.ToLower(host)
-	if lowerHost == "localhost" || lowerHost == "ip6-localhost" || lowerHost == "ip6-loopback" {
-		return fmt.Errorf("不允许访问本地地址: %s", host)
-	}
-
-	// 检查 IP 地址是否为内网/保留地址
-	ip := net.ParseIP(host)
-	if ip != nil {
-		if iputil.IsPrivateOrReservedIP(ip) {
-			return fmt.Errorf("不允许访问内网地址: %s", host)
-		}
-	}
-
-	// 通过 DNS 解析域名，检查解析后的 IP 是否为内网地址
-	if ip == nil {
-		ips, err := net.LookupIP(host)
-		if err != nil {
-			return fmt.Errorf("DNS 解析失败: %w", err)
-		}
-		for _, resolved := range ips {
-			if iputil.IsPrivateOrReservedIP(resolved) {
-				return fmt.Errorf("域名 %s 解析到内网地址: %s", host, resolved)
-			}
-		}
-	}
-
-	return nil
+	// SSRF 核心校验（元数据/localhost 阻断 + DNS 解析逐 IP 私网检查，抗 DNS rebinding）
+	// 复用 toolkit/net/ssrf，避免在多处各维护一份私网名单产生防护漂移。
+	return ssrf.ValidateURL(u.String())
 }

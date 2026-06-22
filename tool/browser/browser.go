@@ -24,14 +24,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
-	iputil "github.com/hexagon-codes/toolkit/net/ip"
+	"github.com/hexagon-codes/toolkit/net/ssrf"
 	"golang.org/x/net/html"
 )
 
@@ -911,29 +910,11 @@ func validateBrowserURL(rawURL string) error {
 		return fmt.Errorf("无效的 URL: %w", err)
 	}
 
-	// 只允许 http 和 https 协议
+	// scheme 限制：仅允许 http/https。toolkit ssrf.ValidateURL 不校验协议，故在此保留。
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
 		return fmt.Errorf("不允许的协议: %s（仅支持 http/https）", u.Scheme)
 	}
-
-	host := u.Hostname()
-	if host == "" {
-		return fmt.Errorf("URL 缺少主机名")
-	}
-
-	// 禁止 localhost 和常见本地主机名
-	lowerHost := strings.ToLower(host)
-	if lowerHost == "localhost" || lowerHost == "ip6-localhost" || lowerHost == "ip6-loopback" {
-		return fmt.Errorf("不允许访问本地地址: %s", host)
-	}
-
-	// 检查 IP 地址是否为内网/保留地址
-	if ip := net.ParseIP(host); ip != nil {
-		if iputil.IsPrivateOrReservedIP(ip) {
-			return fmt.Errorf("不允许访问内网地址: %s", host)
-		}
-	}
-
-	return nil
+	// SSRF 核心校验复用 toolkit/net/ssrf（含 DNS 解析逐 IP 私网检查，较旧实现增强了抗 DNS rebinding）。
+	return ssrf.ValidateURL(rawURL)
 }
