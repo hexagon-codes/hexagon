@@ -16,7 +16,6 @@ func TestClassify_Sentinels(t *testing.T) {
 		{context.Canceled, KindCanceled},
 		{context.DeadlineExceeded, KindTimeout},
 		{ErrBudgetExceeded, KindBudget},
-		{ErrMaxTurns, KindMaxTurns},
 		{ErrUnsafeReplay, KindUnsafeReplay},
 		{ErrNoProvider, KindProvider},
 		{errors.New("something else"), KindUnknown},

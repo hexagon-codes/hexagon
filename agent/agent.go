@@ -57,6 +57,10 @@ type Output struct {
 	// Usage Token 使用统计
 	Usage llm.Usage `json:"usage,omitempty"`
 
+	// StopReason 运行终止原因（end_turn / max_turns），与运行时 Result.StopReason 对齐，
+	// 让调用方据此决定如何呈现（如轮次耗尽时提示「可继续」），无需 errors.Is 反查。
+	StopReason agentruntime.StopReason `json:"stop_reason,omitempty"`
+
 	// Metadata 额外元数据
 	Metadata map[string]any `json:"metadata,omitempty"`
 }

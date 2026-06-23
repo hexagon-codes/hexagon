@@ -26,8 +26,6 @@ const (
 	KindPermission ErrorKind = "permission"
 	// KindProvider provider 不可用/未选择
 	KindProvider ErrorKind = "provider"
-	// KindMaxTurns 达到最大回合数仍无终态
-	KindMaxTurns ErrorKind = "max_turns"
 	// KindUnsafeReplay 拒绝重放有副作用的在途工具
 	KindUnsafeReplay ErrorKind = "unsafe_replay"
 	// KindToolFailure 工具执行失败
@@ -87,8 +85,6 @@ func Classify(err error) ErrorKind {
 		return KindTimeout
 	case errors.Is(err, ErrBudgetExceeded):
 		return KindBudget
-	case errors.Is(err, ErrMaxTurns):
-		return KindMaxTurns
 	case errors.Is(err, ErrUnsafeReplay):
 		return KindUnsafeReplay
 	case errors.Is(err, ErrNoProvider), errors.Is(err, ErrNoFallback):
