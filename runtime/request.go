@@ -36,13 +36,28 @@ type Limits struct {
 	MaxTurns int
 }
 
+// StopReason 是运行终止的一等原因，对齐 Anthropic/OpenAI 的 stop_reason 语义：到达 limit
+// 是正常终止而非错误。它是表达「为什么停」的**唯一**机制——始终随 Result 返回，调用方据此
+// 决定如何呈现（如 max_turns 时提示「可继续」），无需 errors.Is 反查。达到轮次上限不再产生
+// 任何 error（Run/Stream 返回 nil error + StopReason=max_turns）。
+type StopReason string
+
+const (
+	// StopReasonEndTurn 模型给出了最终答案，运行正常结束。
+	StopReasonEndTurn StopReason = "end_turn"
+	// StopReasonMaxTurns 达到工具循环轮次上限仍无终态——结果携带已产出的部分内容/用量，
+	// 调用方可据此呈现部分结果并提示用户继续。
+	StopReasonMaxTurns StopReason = "max_turns"
+)
+
 // Result is the product-neutral output of an agent runtime run.
 type Result struct {
-	Content   string
-	Reasoning string
-	ToolCalls []ToolCallRecord
-	Usage     llm.Usage
-	Metadata  map[string]any
+	Content    string
+	Reasoning  string
+	ToolCalls  []ToolCallRecord
+	Usage      llm.Usage
+	Metadata   map[string]any
+	StopReason StopReason
 }
 
 // State is the mutable state owned by the runtime state machine.

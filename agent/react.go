@@ -279,9 +279,10 @@ func outputFromRuntime(result *agentruntime.Result) Output {
 		return Output{}
 	}
 	out := Output{
-		Content:  result.Content,
-		Usage:    result.Usage,
-		Metadata: result.Metadata,
+		Content:    result.Content,
+		Usage:      result.Usage,
+		Metadata:   result.Metadata,
+		StopReason: result.StopReason,
 	}
 	for _, call := range result.ToolCalls {
 		rec := ToolCallRecord{Name: call.Name}
@@ -303,12 +304,17 @@ func agentruntimeResultFromState(state *agentruntime.State) *agentruntime.Result
 	if state == nil {
 		return nil
 	}
+	stop := agentruntime.StopReasonEndTurn
+	if !state.Final {
+		stop = agentruntime.StopReasonMaxTurns
+	}
 	return &agentruntime.Result{
-		Content:   state.FinalText,
-		Reasoning: state.Reasoning,
-		ToolCalls: state.ToolCalls,
-		Usage:     state.Usage,
-		Metadata:  state.Attributes,
+		Content:    state.FinalText,
+		Reasoning:  state.Reasoning,
+		ToolCalls:  state.ToolCalls,
+		Usage:      state.Usage,
+		Metadata:   state.Attributes,
+		StopReason: stop,
 	}
 }
 

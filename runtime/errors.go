@@ -7,8 +7,6 @@ var (
 	ErrNoProvider = errors.New("runtime: no provider selected")
 	// ErrNoFallback means provider fallback is unavailable.
 	ErrNoFallback = errors.New("runtime: no fallback provider")
-	// ErrMaxTurns means the run stopped before a final answer.
-	ErrMaxTurns = errors.New("runtime: max turns reached")
 	// ErrNilStream means the provider returned no stream for a streaming request.
 	ErrNilStream = errors.New("runtime: provider returned nil stream")
 	// ErrNoDurable means Resume was called but no DurableExecution was configured.

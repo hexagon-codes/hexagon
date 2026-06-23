@@ -331,11 +331,16 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 	}
 
 	if !state.Final {
-		err := ErrMaxTurns
-		_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("max_turns", err)})
-		// 返回携带已累积用量/推理/工具记录的部分结果：MaxTurns 耗尽时这些工作（含已
-		// 计费的 token）确实发生了，调用方应能据此恢复部分结果，而不是被丢弃为 nil。
-		return stateResult(state), err
+		// 达到轮次上限是一个**正常的终止结果**，不是错误（对齐 Anthropic/OpenAI 的
+		// stop_reason：到达 limit 返回 200 + stop_reason，而非报错）。返回携带已累积
+		// 用量/推理/工具记录的部分结果，StopReason=max_turns 由 stateResult 标注；调用
+		// 方据 result.StopReason 决定如何呈现，无需 errors.Is 反查。终止信号走 EventRunFinished
+		// （截断完成），与自然终态一致，由 payload.StopReason 区分。
+		result := stateResult(state)
+		if err := emitter.emit(ctx, Event{Type: EventRunFinished, State: state, Payload: result}); err != nil {
+			return result, err
+		}
+		return result, nil
 	}
 	if err := strategy.Finalize(ctx, state); err != nil {
 		_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("strategy_finalize", err)})
@@ -532,12 +537,18 @@ func stateResult(state *State) *Result {
 	if state == nil {
 		return nil
 	}
+	// 一等终止原因：抵达自然终态为 end_turn，否则（轮次耗尽）为 max_turns。
+	stop := StopReasonEndTurn
+	if !state.Final {
+		stop = StopReasonMaxTurns
+	}
 	return &Result{
-		Content:   state.FinalText,
-		Reasoning: state.Reasoning,
-		ToolCalls: append([]ToolCallRecord(nil), state.ToolCalls...),
-		Usage:     state.Usage,
-		Metadata:  state.Attributes,
+		Content:    state.FinalText,
+		Reasoning:  state.Reasoning,
+		ToolCalls:  append([]ToolCallRecord(nil), state.ToolCalls...),
+		Usage:      state.Usage,
+		Metadata:   state.Attributes,
+		StopReason: stop,
 	}
 }
 
@@ -591,13 +602,17 @@ func (r *DefaultRunner) savePendingProgress(ctx context.Context, state *State, r
 	return nil
 }
 
-
 // snapshotResult 由终态快照重建最终结果（Resume 命中 Final 快照时返回，不重跑）。
 func snapshotResult(snap Snapshot) *Result {
+	stop := StopReasonEndTurn
+	if !snap.Final {
+		stop = StopReasonMaxTurns
+	}
 	return &Result{
-		Content:   snap.FinalText,
-		ToolCalls: append([]ToolCallRecord(nil), snap.ToolCalls...),
-		Usage:     snap.Usage,
+		Content:    snap.FinalText,
+		ToolCalls:  append([]ToolCallRecord(nil), snap.ToolCalls...),
+		Usage:      snap.Usage,
+		StopReason: stop,
 	}
 }
 

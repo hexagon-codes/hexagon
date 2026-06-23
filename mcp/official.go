@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -159,7 +161,20 @@ func ConnectMCPServerV2(ctx context.Context, transport sdkmcp.Transport) ([]tool
 //	tools, cleanup, err := mcp.ConnectStdioServerV2(ctx, "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp")
 //	defer cleanup()
 func ConnectStdioServerV2(ctx context.Context, command string, args ...string) ([]tool.Tool, func(), error) {
-	cmd := exec.CommandContext(ctx, command, args...)
+	return ConnectStdioServerV2WithEnv(ctx, command, nil, args...)
+}
+
+// ConnectStdioServerV2WithEnv 同 ConnectStdioServerV2，但向子进程注入额外环境变量。
+//
+// 数据连接器走 MCP 的地基：MySQL/Redis 等 stdio MCP server 通过 env 配置连接信息
+// （如 MYSQL_HOST / MYSQL_PASSWORD）。env 合并进 os.Environ()（保留 PATH 等，否则 npx/uvx 不可用）。
+//
+// 示例：
+//
+//	tools, cleanup, err := mcp.ConnectStdioServerV2WithEnv(ctx, "npx",
+//	    map[string]string{"MYSQL_HOST": "localhost"}, "-y", "@benborla29/mcp-server-mysql")
+func ConnectStdioServerV2WithEnv(ctx context.Context, command string, env map[string]string, args ...string) ([]tool.Tool, func(), error) {
+	cmd := buildStdioCmd(ctx, command, env, args...)
 	transport := &sdkmcp.CommandTransport{Command: cmd}
 
 	tools, closer, err := ConnectMCPServerV2(ctx, transport)
@@ -171,6 +186,25 @@ func ConnectStdioServerV2(ctx context.Context, command string, args ...string) (
 		closer.Close()
 	}
 	return tools, cleanup, nil
+}
+
+// buildStdioCmd 构造 stdio MCP server 的子进程命令。env 非空时合并进 os.Environ()
+// （确定性排序，便于测试与复现）；env 为空时保持 cmd.Env=nil（继承父进程，不改既有行为）。
+func buildStdioCmd(ctx context.Context, command string, env map[string]string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, command, args...)
+	if len(env) > 0 {
+		merged := os.Environ()
+		keys := make([]string, 0, len(env))
+		for k := range env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			merged = append(merged, k+"="+env[k])
+		}
+		cmd.Env = merged
+	}
+	return cmd
 }
 
 // ConnectSSEServerV2 使用官方 SDK 连接 SSE MCP Server

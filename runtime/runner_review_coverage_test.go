@@ -34,10 +34,11 @@ func (e *noopToolExec) Execute(context.Context, llm.ToolCall) (ToolResult, error
 	return ToolResult{Content: "ok"}, nil
 }
 
-// When MaxTurns is exhausted without a final answer, the runner returns
-// ErrMaxTurns WITH a non-nil partial result carrying the accumulated usage,
-// reasoning and tool-call records — so a caller can recover partial work and
-// the token usage already billed.
+// When MaxTurns is exhausted without a final answer, the runner returns a
+// non-nil partial result carrying the accumulated usage, reasoning and
+// tool-call records — with NO error (max-turns is a normal terminal outcome
+// reported via StopReason) — so a caller can recover partial work and the
+// token usage already billed.
 func TestMaxTurns_DiscardsAllPartialWorkAndUsage(t *testing.T) {
 	provider := &loopingProvider{}
 	exec := &noopToolExec{}
@@ -53,11 +54,14 @@ func TestMaxTurns_DiscardsAllPartialWorkAndUsage(t *testing.T) {
 		Limits:   Limits{MaxTurns: 3},
 	})
 
-	if !errors.Is(err, ErrMaxTurns) {
-		t.Fatalf("want ErrMaxTurns, got %v", err)
+	if err != nil {
+		t.Fatalf("max-turns is not an error, want nil, got %v", err)
 	}
 	if result == nil {
 		t.Fatal("partial result must be returned on max-turns, got nil")
+	}
+	if result.StopReason != StopReasonMaxTurns {
+		t.Fatalf("StopReason = %q, want %q", result.StopReason, StopReasonMaxTurns)
 	}
 	// The provider was invoked MaxTurns times and tools ran each turn; the
 	// partial result must carry that work and the billed usage.
@@ -202,7 +206,7 @@ func TestDuplicateToolCallID_SilentlySkippedOnNormalPath(t *testing.T) {
 }
 
 // FINDING (context cancellation): a context canceled before the loop body is
-// observed and surfaced as the ctx error (not ErrMaxTurns / not a hang).
+// observed and surfaced as the ctx error (not a max-turns stop / not a hang).
 // Covers runner.go:212-215.
 func TestContextCanceled_SurfacesCtxError(t *testing.T) {
 	provider := &loopingProvider{}

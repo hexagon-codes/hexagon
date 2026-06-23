@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/hexagon-codes/ai-core/llm"
@@ -10,8 +9,9 @@ import (
 
 // TestMaxTurns_ReturnsPartialResultWithUsage proves that on MaxTurns
 // exhaustion the runner returns a non-nil partial *Result carrying the
-// accumulated token usage, reasoning and tool-call records alongside
-// ErrMaxTurns — instead of discarding all billed work with a nil result.
+// accumulated token usage, reasoning and tool-call records — with NO error
+// (max-turns is a normal terminal outcome reported via StopReason, like the
+// Anthropic/OpenAI stop_reason model), instead of discarding billed work.
 func TestMaxTurns_ReturnsPartialResultWithUsage(t *testing.T) {
 	provider := &loopingProvider{}
 	exec := &noopToolExec{}
@@ -27,11 +27,14 @@ func TestMaxTurns_ReturnsPartialResultWithUsage(t *testing.T) {
 		Limits:   Limits{MaxTurns: 3},
 	})
 
-	if !errors.Is(err, ErrMaxTurns) {
-		t.Fatalf("want ErrMaxTurns, got %v", err)
+	if err != nil {
+		t.Fatalf("max-turns is not an error, want nil, got %v", err)
 	}
 	if result == nil {
 		t.Fatal("partial result must be returned on max-turns, got nil")
+	}
+	if result.StopReason != StopReasonMaxTurns {
+		t.Fatalf("StopReason = %q, want %q", result.StopReason, StopReasonMaxTurns)
 	}
 	// Each of the 3 turns billed 2 tokens; the partial result must carry them.
 	if result.Usage.TotalTokens != 6 {
