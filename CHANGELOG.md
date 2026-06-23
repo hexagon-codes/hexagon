@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [0.5.3]
+> 功能版本：`StopReason` 升为一等终止原因，**达到轮次上限不再是错误**（对齐 Anthropic/OpenAI `stop_reason` 语义）+ MCP stdio server 支持注入 env（数据连接器地基）。**破坏性**：删除 `runtime.ErrMaxTurns` / `runtime.KindMaxTurns`，调用方改读 `Result.StopReason`（详见 Removed）。
+
+### Added
+- **runtime**：新增一等类型 `StopReason`（`StopReasonEndTurn` / `StopReasonMaxTurns`）及 `Result.StopReason` 字段——表达「为什么停」的**唯一**机制，始终随 `Result` 返回，调用方据此呈现（如 `max_turns` 时提示「可继续」），无需 `errors.Is` 反查。
+- **agent**：`Output.StopReason` 与运行时 `Result.StopReason` 对齐，`outputFromRuntime` / `agentruntimeResultFromState` 一并回填。
+- **mcp**：新增 `ConnectStdioServerV2WithEnv`（及顶层别名 `ConnectMCPStdioWithEnv`），向 stdio MCP 子进程注入额外环境变量——MySQL/Redis 等数据连接器靠 env 配凭证（`MYSQL_HOST`/`MYSQL_PASSWORD` 等）；env 合并进 `os.Environ()`（确定性排序，保留 `PATH` 否则 `npx`/`uvx` 不可用），`env` 为空时保持继承父进程、不改既有行为。
+
+### Changed
+- **runtime/runner**：达到 `MaxTurns` 由「返回错误」改为「正常终止」——`Run`/`Stream` 返回 `nil` error，携带已累积用量/推理/工具记录的**部分结果**，并标注 `StopReason=max_turns`；终止信号走 `EventRunFinished`（截断完成）而非 `EventRunFailed`，与自然终态一致，由 payload 的 `StopReason` 区分。`stateResult`/`snapshotResult` 一并标注 `StopReason`。
+
+### Removed
+- **破坏性**：移除 `runtime.ErrMaxTurns` 与 `runtime.ErrorKind` 的 `KindMaxTurns`。轮次耗尽不再产生 error，故 `Classify` 不再返回 `KindMaxTurns`。**迁移**：调用方将 `errors.Is(err, runtime.ErrMaxTurns)` 改为判断 `result.StopReason == runtime.StopReasonMaxTurns`。
+
 ## [0.5.2]
 > 维护版本：核心并发/退避/SSE/SSRF 原语统一委托 toolkit（消除多份重复实现的防护漂移）+ config 防路径穿越 + 依赖升级。注：`CircuitBreaker` 状态回调时序由同步改异步（详见 Changed），调用方如依赖回调同步落地请留意。
 
