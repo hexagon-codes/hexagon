@@ -572,6 +572,10 @@ var ConnectMCPServer = mcp.ConnectMCPServerV2
 //	defer cleanup()
 var ConnectMCPStdio = mcp.ConnectStdioServerV2
 
+// ConnectMCPStdioWithEnv 通过 Stdio 连接 MCP Server，并向子进程注入额外环境变量。
+// 数据连接器走 MCP 的地基：MySQL/Redis 等通过 env 配置连接信息（MYSQL_HOST/PASSWORD 等）。
+var ConnectMCPStdioWithEnv = mcp.ConnectStdioServerV2WithEnv
+
 // ConnectMCPSSE 通过 SSE 连接 MCP Server
 //
 // 示例：
