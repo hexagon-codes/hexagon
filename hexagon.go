@@ -56,7 +56,7 @@ func resolveVersion() string {
 			return strings.TrimPrefix(v, "v")
 		}
 	}
-	return "0.5.1" // fallback for development builds
+	return "0.5.4" // fallback for development builds
 }
 
 // 核心类型重新导出

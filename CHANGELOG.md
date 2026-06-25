@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.5.4]
+> 维护版本：RAG 文本截断改为 **rune-safe**，避免 CJK 字节切断产出乱码（BUG-20260625 F-4）+ ai-core v0.1.8 lockstep。hexagon 公开 API 不变（SemVer patch）。
+
+### Fixed
+- **rag/agentic、rag/citation、rag/corrective、rag/extractor、rag/selfrag**：`truncateText` 改为 **rune-safe 截断**（委托 `toolkit/lang/stringx.SubString`）。原以字节切片 `text[:maxLen]`，当 `maxLen` 落在多字节 UTF-8 字符（如 CJK）中间时会切断码点、产出乱码（BUG-20260625 F-4）；无需截断时（`head == text`）保持原样返回、不追加省略号，与旧实现「`len<=maxLen` 原样返回」语义一致。
+
+### Changed
+- 依赖升级：ai-core v0.1.7 → **v0.1.8**（lockstep）——同源修复 `media/image.truncateForError` 的 rune-safe 截断（BUG-20260625 F-4），与本次 rag 侧修复一致。
+
 ## [0.5.3]
 > 功能版本：`StopReason` 升为一等终止原因，**达到轮次上限不再是错误**（对齐 Anthropic/OpenAI `stop_reason` 语义）+ MCP stdio server 支持注入 env（数据连接器地基）。**破坏性**：删除 `runtime.ErrMaxTurns` / `runtime.KindMaxTurns`，调用方改读 `Result.StopReason`（详见 Removed）。
 
