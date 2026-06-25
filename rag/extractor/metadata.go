@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexagon/rag"
+	"github.com/hexagon-codes/toolkit/lang/stringx"
 )
 
 // MetadataExtractor 元数据提取器接口
@@ -547,10 +548,12 @@ func extractFirstLine(content string) string {
 
 // truncateText 截断文本
 func truncateText(text string, maxLen int) string {
-	if len(text) <= maxLen {
+	// rune-safe 截断（委托 toolkit stringx.SubString），避免 CJK 字节切断产生乱码（BUG-20260625 F-4）。
+	head := stringx.SubString(text, 0, maxLen)
+	if head == text {
 		return text
 	}
-	return text[:maxLen] + "..."
+	return head + "..."
 }
 
 // parseKeywordsJSON 解析关键词 JSON
