@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.5.5]
+> 维护版本：修复「Hexagon engine」版本号在装机构建里**消失 / 谎报成 hexclaw 版本**（BUG-20260626 R1+R2）。hexagon 公开 API 不变（SemVer patch）。
+
+### Fixed
+- **version (`resolveVersion`)**：修复 hexagon 作为引擎依赖下沉后，前端侧栏「Hexagon engine」版本号显示异常的两类问题。抽出纯函数 `resolveVersionFromBuildInfo` 便于测试。
+  - **R1**：依赖分支无条件返回 `dep.Version`——go.work / 装机开发构建里 hexagon 依赖被上报为 `"(devel)"`，透传给前端再被过滤 → 版本号消失。现对依赖分支补齐 `"(devel)"` 与空版本守卫（与主模块分支对称）。
+  - **R2**：命中 hexagon 依赖但版本无效时仅跳出、随后无条件落到 `info.Main.Version`——而装机 sidecar 主模块是 hexclaw，其 VCS 戳记（如 `"v0.4.6+dirty"`）能通过守卫 → 把 Hexagon engine 谎报成 hexclaw 版本（实测 0.4.6）。现命中 hexagon 依赖且版本无效时**直接回退** `devFallbackVersion`，绝不使用主模块版本。
+- **version**：`devFallbackVersion` 同步至 `0.5.5`（开发期回退基线，单一来源）。
+
 ## [0.5.4]
 > 维护版本：RAG 文本截断改为 **rune-safe**，避免 CJK 字节切断产出乱码（BUG-20260625 F-4）+ ai-core v0.1.8 lockstep。hexagon 公开 API 不变（SemVer patch）。
 

@@ -38,25 +38,45 @@ import (
 	"github.com/hexagon-codes/hexagon/agent"
 )
 
+// devFallbackVersion 是开发构建（go.work / 无可用 build info 版本）下的回退版本号，
+// 同时作为发布前当前框架版本基线。单一来源，测试与解析逻辑共用。
+const devFallbackVersion = "0.5.5"
+
+// hexagonModulePath 是 hexagon 框架自身的 module path，用于在 build info 依赖列表里定位。
+const hexagonModulePath = "github.com/hexagon-codes/hexagon"
+
 // Version is the current version of the Hexagon framework.
 // It is automatically resolved from Go module build info when available,
 // falling back to the hardcoded value for development builds.
 var Version = resolveVersion()
 
 func resolveVersion() string {
-	if info, ok := debug.ReadBuildInfo(); ok {
-		// When hexagon is imported as a dependency
+	info, ok := debug.ReadBuildInfo()
+	return resolveVersionFromBuildInfo(info, ok)
+}
+
+// resolveVersionFromBuildInfo 从 build info 解析 hexagon 框架版本（纯函数，便于测试）。
+func resolveVersionFromBuildInfo(info *debug.BuildInfo, ok bool) string {
+	if ok {
+		// hexagon 作为依赖被引入（hexclaw sidecar 永远走这条）。
 		for _, dep := range info.Deps {
-			if dep.Path == "github.com/hexagon-codes/hexagon" {
-				return strings.TrimPrefix(dep.Version, "v")
+			if dep.Path == hexagonModulePath {
+				// 过滤 "(devel)" 与空版本（go.work / 开发构建上报 "(devel)"），否则透传给前端再被过滤→版本号消失。
+				if v := strings.TrimPrefix(dep.Version, "v"); v != "" && v != "(devel)" {
+					return v
+				}
+				// 命中 hexagon 依赖但版本无效 → **直接回退 fallback**，绝不落到 info.Main.Version：
+				// 主模块是上层 hexclaw，其 VCS 戳记（如 "v0.4.6+dirty"）能通过守卫，会把 Hexagon engine
+				// 谎报成 hexclaw 版本（BUG-20260626 R2：装机构建实测显示 0.4.6 而非 hexagon 0.5.4）。
+				return devFallbackVersion
 			}
 		}
-		// When hexagon is the main module
+		// 仅当 hexagon 自身是主模块（hexagon 的二进制/测试）才用 Main.Version。
 		if v := info.Main.Version; v != "" && v != "(devel)" {
 			return strings.TrimPrefix(v, "v")
 		}
 	}
-	return "0.5.4" // fallback for development builds
+	return devFallbackVersion // fallback for development builds
 }
 
 // 核心类型重新导出
