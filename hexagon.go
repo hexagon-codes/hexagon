@@ -65,8 +65,10 @@ func resolveVersionFromBuildInfo(info *debug.BuildInfo, ok bool) string {
 				if v := strings.TrimPrefix(dep.Version, "v"); v != "" && v != "(devel)" {
 					return v
 				}
-				// 依赖版本无效（go.work/dirty 上报 "(devel)"）→ 跳出，回退到主模块 / fallback 判定。
-				break
+				// 命中 hexagon 依赖但版本无效 → **直接回退 fallback**，绝不落到 info.Main.Version：
+				// 主模块是上层 hexclaw，其 VCS 戳记（如 "v0.4.6+dirty"）能通过守卫，会把 Hexagon engine
+				// 谎报成 hexclaw 版本（BUG-20260626 R2：装机构建实测显示 0.4.6 而非 hexagon 0.5.4）。
+				return devFallbackVersion
 			}
 		}
 		// 仅当 hexagon 自身是主模块（hexagon 的二进制/测试）才用 Main.Version。
