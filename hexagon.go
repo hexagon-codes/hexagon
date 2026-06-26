@@ -40,7 +40,7 @@ import (
 
 // devFallbackVersion 是开发构建（go.work / 无可用 build info 版本）下的回退版本号，
 // 同时作为发布前当前框架版本基线。单一来源，测试与解析逻辑共用。
-const devFallbackVersion = "0.5.4"
+const devFallbackVersion = "0.5.5"
 
 // hexagonModulePath 是 hexagon 框架自身的 module path，用于在 build info 依赖列表里定位。
 const hexagonModulePath = "github.com/hexagon-codes/hexagon"
