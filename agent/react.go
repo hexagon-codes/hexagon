@@ -235,12 +235,12 @@ func (e *agentToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (age
 	}
 	if targetTool == nil {
 		msg := fmt.Sprintf("Error: tool '%s' not found", call.Name)
-		return agentruntime.ToolResult{Content: msg, Error: msg}, nil
+		return agentruntime.ToolResult{Content: msg, Error: msg, Status: agentruntime.ToolStatusError}, nil
 	}
 	args, err := tool.ParseArgs(call.Arguments)
 	if err != nil {
 		msg := fmt.Sprintf("Error: failed to parse arguments: %v", err)
-		return agentruntime.ToolResult{Content: msg, Error: err.Error()}, nil
+		return agentruntime.ToolResult{Content: msg, Error: err.Error(), Status: agentruntime.ToolStatusError}, nil
 	}
 
 	toolID := call.ID
@@ -257,21 +257,35 @@ func (e *agentToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (age
 	}
 	start := time.Now()
 	toolResult, execErr := targetTool.Execute(ctx, args)
+	durationMs := time.Since(start).Milliseconds()
 	if e.hookManager != nil {
 		e.hookManager.TriggerToolEnd(ctx, &hooks.ToolEndEvent{
 			RunID:    e.runID,
 			ToolName: call.Name,
 			ToolID:   toolID,
 			Output:   toolResult,
-			Duration: time.Since(start).Milliseconds(),
+			Duration: durationMs,
 			Error:    execErr,
 		})
 	}
 	if execErr != nil {
 		msg := fmt.Sprintf("Error: tool execution failed: %v", execErr)
-		return agentruntime.ToolResult{Content: msg, Raw: toolResult, Error: execErr.Error()}, nil
+		return agentruntime.ToolResult{
+			Content: msg, Raw: toolResult, Error: execErr.Error(),
+			Status: agentruntime.ToolStatusError, DurationMs: durationMs,
+		}, nil
 	}
-	return agentruntime.ToolResult{Content: formatToolResult(toolResult), Raw: toolResult}, nil
+	// 无 Go 级 execErr 时，仍尊重 ai-core 工具契约：tool.Result.Success=false 即软失败
+	// （formatToolResult 已把它渲染成 "Error: ..."，这里补上结构化状态/错误，避免上层再嗅探正文）。
+	res := agentruntime.ToolResult{
+		Content: formatToolResult(toolResult), Raw: toolResult,
+		Status: agentruntime.ToolStatusSuccess, DurationMs: durationMs,
+	}
+	if !toolResult.Success {
+		res.Status = agentruntime.ToolStatusError
+		res.Error = toolResult.Error
+	}
+	return res, nil
 }
 
 func outputFromRuntime(result *agentruntime.Result) Output {

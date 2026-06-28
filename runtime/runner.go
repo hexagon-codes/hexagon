@@ -451,11 +451,11 @@ func (r *DefaultRunner) executeToolCalls(ctx context.Context, state *State, call
 		var result ToolResult
 		var err error
 		if r.toolExecutor == nil {
-			result = ToolResult{Content: fmt.Sprintf("Error: tool %q not available", call.Name), Error: "tool executor not configured"}
+			result = ToolResult{Content: fmt.Sprintf("Error: tool %q not available", call.Name), Error: "tool executor not configured", Status: ToolStatusError}
 		} else {
 			result, err = r.toolExecutor.Execute(ctx, call)
 			if err != nil {
-				result = ToolResult{Content: fmt.Sprintf("Error: %v", err), Error: err.Error()}
+				result = ToolResult{Content: fmt.Sprintf("Error: %v", err), Error: err.Error(), Status: ToolStatusError}
 				if emitErr := emitter.emit(ctx, Event{Type: EventToolCallFailed, State: state, ToolCall: &call, ToolResult: &result, Error: err, RuntimeError: runtimeError("tool_call_failed", err)}); emitErr != nil {
 					return emitErr
 				}
