@@ -506,15 +506,19 @@ func formatToolResult(result tool.Result) string {
 	return truncateToolResult(s, maxToolResultChars)
 }
 
-// truncateToolResult 截断过长的工具结果，保留开头和结尾
+// truncateToolResult 截断过长的工具结果，保留开头和结尾。
+// 按 rune（Unicode 码点）切分，避免在多字节中文/emoji 中间切裂产生 U+FFFD（�）。
 func truncateToolResult(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
 	// 保留前 70% + 后 20%，中间用省略标记
 	headLen := maxLen * 7 / 10
 	tailLen := maxLen * 2 / 10
-	return s[:headLen] + fmt.Sprintf("\n\n...[结果已截断，原始 %d 字符，保留前 %d + 后 %d 字符]...\n\n", len(s), headLen, tailLen) + s[len(s)-tailLen:]
+	head := string(runes[:headLen])
+	tail := string(runes[len(runes)-tailLen:])
+	return head + fmt.Sprintf("\n\n...[结果已截断，原始 %d 字符，保留前 %d + 后 %d 字符]...\n\n", len(runes), headLen, tailLen) + tail
 }
 
 // saveToMemory 保存到记忆

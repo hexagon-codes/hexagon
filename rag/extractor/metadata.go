@@ -125,7 +125,7 @@ func (e *TitleExtractor) Extract(ctx context.Context, doc rag.Document) (map[str
 
 	// 截断过长的标题
 	if len(title) > e.maxTitleLen {
-		title = title[:e.maxTitleLen-3] + "..."
+		title = stringx.TruncateBytes(title, e.maxTitleLen-3, "...")
 	}
 
 	return map[string]any{"title": title}, nil

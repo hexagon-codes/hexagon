@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/tool"
+	"github.com/hexagon-codes/toolkit/lang/stringx"
 )
 
 // Config Shell 工具配置
@@ -200,10 +201,10 @@ func (t *Tool) execute(ctx context.Context, input ExecuteInput) (*ExecuteOutput,
 	stdoutStr := stdout.String()
 	stderrStr := stderr.String()
 	if len(stdoutStr) > t.config.MaxOutputSize {
-		stdoutStr = stdoutStr[:t.config.MaxOutputSize] + "\n... (truncated)"
+		stdoutStr = stringx.TruncateBytes(stdoutStr, t.config.MaxOutputSize, "\n... (truncated)")
 	}
 	if len(stderrStr) > t.config.MaxOutputSize {
-		stderrStr = stderrStr[:t.config.MaxOutputSize] + "\n... (truncated)"
+		stderrStr = stringx.TruncateBytes(stderrStr, t.config.MaxOutputSize, "\n... (truncated)")
 	}
 
 	return &ExecuteOutput{

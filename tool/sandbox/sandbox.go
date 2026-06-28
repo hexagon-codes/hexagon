@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/tool"
+	"github.com/hexagon-codes/toolkit/lang/stringx"
 )
 
 // SandboxType 沙箱类型
@@ -453,7 +454,7 @@ func (s *Sandbox) getInterpreter(language, codePath string) (string, []string) {
 // truncateOutput 截断输出
 func (s *Sandbox) truncateOutput(output string) string {
 	if len(output) > s.config.MaxOutputSize {
-		return output[:s.config.MaxOutputSize] + "\n... (truncated)"
+		return stringx.TruncateBytes(output, s.config.MaxOutputSize, "\n... (truncated)")
 	}
 	return output
 }
