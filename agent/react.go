@@ -235,12 +235,12 @@ func (e *agentToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (age
 	}
 	if targetTool == nil {
 		msg := fmt.Sprintf("Error: tool '%s' not found", call.Name)
-		return agentruntime.ToolResult{Content: msg, Error: msg}, nil
+		return agentruntime.ToolResult{Content: msg, Error: msg, Status: agentruntime.ToolStatusError}, nil
 	}
 	args, err := tool.ParseArgs(call.Arguments)
 	if err != nil {
 		msg := fmt.Sprintf("Error: failed to parse arguments: %v", err)
-		return agentruntime.ToolResult{Content: msg, Error: err.Error()}, nil
+		return agentruntime.ToolResult{Content: msg, Error: err.Error(), Status: agentruntime.ToolStatusError}, nil
 	}
 
 	toolID := call.ID
@@ -257,21 +257,35 @@ func (e *agentToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (age
 	}
 	start := time.Now()
 	toolResult, execErr := targetTool.Execute(ctx, args)
+	durationMs := time.Since(start).Milliseconds()
 	if e.hookManager != nil {
 		e.hookManager.TriggerToolEnd(ctx, &hooks.ToolEndEvent{
 			RunID:    e.runID,
 			ToolName: call.Name,
 			ToolID:   toolID,
 			Output:   toolResult,
-			Duration: time.Since(start).Milliseconds(),
+			Duration: durationMs,
 			Error:    execErr,
 		})
 	}
 	if execErr != nil {
 		msg := fmt.Sprintf("Error: tool execution failed: %v", execErr)
-		return agentruntime.ToolResult{Content: msg, Raw: toolResult, Error: execErr.Error()}, nil
+		return agentruntime.ToolResult{
+			Content: msg, Raw: toolResult, Error: execErr.Error(),
+			Status: agentruntime.ToolStatusError, DurationMs: durationMs,
+		}, nil
 	}
-	return agentruntime.ToolResult{Content: formatToolResult(toolResult), Raw: toolResult}, nil
+	// 无 Go 级 execErr 时，仍尊重 ai-core 工具契约：tool.Result.Success=false 即软失败
+	// （formatToolResult 已把它渲染成 "Error: ..."，这里补上结构化状态/错误，避免上层再嗅探正文）。
+	res := agentruntime.ToolResult{
+		Content: formatToolResult(toolResult), Raw: toolResult,
+		Status: agentruntime.ToolStatusSuccess, DurationMs: durationMs,
+	}
+	if !toolResult.Success {
+		res.Status = agentruntime.ToolStatusError
+		res.Error = toolResult.Error
+	}
+	return res, nil
 }
 
 func outputFromRuntime(result *agentruntime.Result) Output {
@@ -280,6 +294,7 @@ func outputFromRuntime(result *agentruntime.Result) Output {
 	}
 	out := Output{
 		Content:    result.Content,
+		Blocks:     result.Blocks,
 		Usage:      result.Usage,
 		Metadata:   result.Metadata,
 		StopReason: result.StopReason,
@@ -491,15 +506,19 @@ func formatToolResult(result tool.Result) string {
 	return truncateToolResult(s, maxToolResultChars)
 }
 
-// truncateToolResult 截断过长的工具结果，保留开头和结尾
+// truncateToolResult 截断过长的工具结果，保留开头和结尾。
+// 按 rune（Unicode 码点）切分，避免在多字节中文/emoji 中间切裂产生 U+FFFD（�）。
 func truncateToolResult(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
 	// 保留前 70% + 后 20%，中间用省略标记
 	headLen := maxLen * 7 / 10
 	tailLen := maxLen * 2 / 10
-	return s[:headLen] + fmt.Sprintf("\n\n...[结果已截断，原始 %d 字符，保留前 %d + 后 %d 字符]...\n\n", len(s), headLen, tailLen) + s[len(s)-tailLen:]
+	head := string(runes[:headLen])
+	tail := string(runes[len(runes)-tailLen:])
+	return head + fmt.Sprintf("\n\n...[结果已截断，原始 %d 字符，保留前 %d + 后 %d 字符]...\n\n", len(runes), headLen, tailLen) + tail
 }
 
 // saveToMemory 保存到记忆

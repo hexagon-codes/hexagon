@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/tool"
+	"github.com/hexagon-codes/toolkit/lang/stringx"
 )
 
 // validPythonIdentifier 验证 Python 变量名：只允许字母、数字、下划线，不能以数字开头，
@@ -182,10 +183,10 @@ func (t *Tool) execute(ctx context.Context, input ExecuteInput) (*ExecuteOutput,
 	output := stdout.String()
 	errOutput := stderr.String()
 	if len(output) > t.config.MaxOutputSize {
-		output = output[:t.config.MaxOutputSize] + "\n... (truncated)"
+		output = stringx.TruncateBytes(output, t.config.MaxOutputSize, "\n... (truncated)")
 	}
 	if len(errOutput) > t.config.MaxOutputSize {
-		errOutput = errOutput[:t.config.MaxOutputSize] + "\n... (truncated)"
+		errOutput = stringx.TruncateBytes(errOutput, t.config.MaxOutputSize, "\n... (truncated)")
 	}
 
 	return &ExecuteOutput{

@@ -30,6 +30,7 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/memory"
 	stream "github.com/hexagon-codes/ai-core/streamx"
+	"github.com/hexagon-codes/ai-core/template"
 	"github.com/hexagon-codes/ai-core/tool"
 	"github.com/hexagon-codes/hexagon/checkpoint"
 	"github.com/hexagon-codes/hexagon/core"
@@ -53,6 +54,10 @@ type Output struct {
 
 	// ToolCalls 执行的工具调用记录
 	ToolCalls []ToolCallRecord `json:"tool_calls,omitempty"`
+
+	// Blocks 本次运行的有序内容块流（text↔tool 交错序），与 runtime.Result.Blocks 对齐。
+	// SDK 消费者（如 hexeye）据此保真展示多步 ReAct，而非把 Content 压平。
+	Blocks template.Blocks `json:"blocks,omitempty"`
 
 	// Usage Token 使用统计
 	Usage llm.Usage `json:"usage,omitempty"`

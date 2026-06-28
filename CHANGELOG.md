@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [0.5.7]
+> 功能版本：工具执行**状态一等化** + **有序内容块流 Blocks**（保真多步 ReAct 交错）+ 截断 rune/字节安全 + ai-core v0.1.11 / toolkit v0.2.3 lockstep。hexagon 公开 API 仅新增字段（SemVer minor）。
+
+### Added
+- **runtime/agent**：`ToolResult` 新增一等字段 `Status`（`success`/`error`）与 `DurationMs`——由框架在执行点据 `execErr` 与 ai-core `tool.Result.Success` 判定并测量耗时，客户端据此渲染成功/失败，**无需对结果正文做字符串嗅探**。对齐 `StopReason` 的「执行真相一等化」范式。零值（空串/0）向后兼容老快照。
+- **runtime/agent**：`Result.Blocks` / `Output.Blocks`（`template.Blocks`）——**有序内容块流**（`text`/`tool_use`/`tool_result` 按执行序交错），修复 `Content` 单串 + `ToolCalls` 扁平数组无法表达多步 `text↔tool` 交错的结构性缺陷。SDK 消费者据此按序渲染，缺字段时回退 `Content` + `ToolCalls`；`tool_result` 状态/错误透传同 id 的 `ToolCallRecord`。
+
+### Fixed
+- **agent、rag/extractor、tool/python、tool/sandbox、tool/shell**：结果/输出截断由字节切片 `s[:maxLen]` 改为 **rune/字节安全截断**（`agent` 侧按 `[]rune` 切分，其余委托 `toolkit/lang/stringx.TruncateBytes`）。原实现当上限落在多字节 UTF-8（CJK/emoji）中间时会切断码点、产出 `U+FFFD`（�）。
+
+### Changed
+- 依赖升级（lockstep）：ai-core v0.1.8 → **v0.1.11**（提供 `template.Block` 有序内容块模型 + `BlockBuilder`）；toolkit v0.2.1 → **v0.2.3**（提供 `stringx.TruncateBytes` 按字节上限 rune-safe 截断）。
+- **version**：`devFallbackVersion` 同步至 `0.5.7`（开发期回退基线，单一来源）。
+
 ## [0.5.5]
 > 维护版本：修复「Hexagon engine」版本号在装机构建里**消失 / 谎报成 hexclaw 版本**（BUG-20260626 R1+R2）。hexagon 公开 API 不变（SemVer patch）。
 
