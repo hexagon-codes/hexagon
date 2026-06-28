@@ -294,6 +294,7 @@ func outputFromRuntime(result *agentruntime.Result) Output {
 	}
 	out := Output{
 		Content:    result.Content,
+		Blocks:     result.Blocks,
 		Usage:      result.Usage,
 		Metadata:   result.Metadata,
 		StopReason: result.StopReason,

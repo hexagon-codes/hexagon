@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/template"
 )
 
 // Runner executes agent requests using a unified state machine.
@@ -152,6 +153,8 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 		if prefix := strings.TrimSpace(strategy.BuildSystemPrefix(ctx, req)); prefix != "" {
 			state.Messages = prependSystemPrefix(state.Messages, prefix)
 		}
+		// 记录输入边界：本次运行新增的 assistant/tool 消息从此下标起，据此重建有序块。
+		state.runStart = len(state.Messages)
 	}
 
 	selection, err := r.selector.Select(ctx, req)
@@ -546,10 +549,49 @@ func stateResult(state *State) *Result {
 		Content:    state.FinalText,
 		Reasoning:  state.Reasoning,
 		ToolCalls:  append([]ToolCallRecord(nil), state.ToolCalls...),
+		Blocks:     blocksFromRun(state),
 		Usage:      state.Usage,
 		Metadata:   state.Attributes,
 		StopReason: stop,
 	}
+}
+
+// blocksFromRun 从本次运行新增的消息（Messages[runStart:]）重建**有序内容块流**。
+// 按真实执行顺序产出 text → tool_use → tool_result → text …，保真多步 text↔tool 交错
+// （这是 Content 单串 + ToolCalls 扁平数组结构性做不到的）。tool_result 的状态/错误
+// 取自同 id 的 ToolCallRecord（含框架在执行点产出的 status）。
+//
+// 注：Reasoning 仍走 Result.Reasoning 独立字段（客户端单独渲染思考过程），不重复进块流。
+func blocksFromRun(state *State) template.Blocks {
+	if state == nil {
+		return nil
+	}
+	start := state.runStart
+	if start < 0 || start > len(state.Messages) {
+		start = 0
+	}
+	results := make(map[string]ToolResult, len(state.ToolCalls))
+	for _, r := range state.ToolCalls {
+		results[r.ID] = r.Result
+	}
+	b := template.NewBlockBuilder()
+	for _, m := range state.Messages[start:] {
+		switch m.Role {
+		case llm.RoleAssistant:
+			b.Text(m.Content)
+			for _, tc := range m.ToolCalls {
+				b.ToolUse(tc.ID, tc.Name, tc.Arguments)
+			}
+		case llm.RoleTool:
+			res := results[m.ToolCallID]
+			out := m.Content
+			if res.Content != "" {
+				out = res.Content
+			}
+			b.ToolResult(m.ToolCallID, out, res.Error != "", string(res.Status))
+		}
+	}
+	return b.Build()
 }
 
 // saveSnapshot 在步边界持久化执行快照。仅当 Config.Durable 已配置且 runID 非空时生效。

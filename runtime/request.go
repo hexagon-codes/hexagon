@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/template"
 )
 
 // StreamMode controls how the runtime invokes the provider and projects output.
@@ -52,9 +53,13 @@ const (
 
 // Result is the product-neutral output of an agent runtime run.
 type Result struct {
-	Content    string
-	Reasoning  string
-	ToolCalls  []ToolCallRecord
+	Content   string
+	Reasoning string
+	ToolCalls []ToolCallRecord
+	// Blocks 是本次运行的**有序内容块流**（text/tool_use/tool_result 按执行序交错），
+	// 修复 Content 单串 + ToolCalls 扁平数组无法表达多步 text↔tool 交错的缺陷。
+	// 客户端有此字段时按序渲染，否则回退 Content + ToolCalls。
+	Blocks     template.Blocks
 	Usage      llm.Usage
 	Metadata   map[string]any
 	StopReason StopReason
@@ -73,6 +78,11 @@ type State struct {
 	FinalText  string
 	Reasoning  string
 	Attributes map[string]any
+
+	// runStart 是本次运行在 Messages 中的起始下标（init + 系统前缀之后）。
+	// 用于从 Messages 切出"本次运行新增的 assistant/tool 消息"重建有序块，
+	// 排除输入历史。
+	runStart int
 
 	emit func(context.Context, Event) error
 }
