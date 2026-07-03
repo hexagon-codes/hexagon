@@ -294,6 +294,13 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 		if len(resp.ToolCalls) == 0 {
 			state.Final = true
 			state.FinalText = resp.Content
+			// 终态回答同样进消息序列：blocksFromRun 按 Messages 重建有序内容块流，
+			// 缺了这条，用过工具的运行 Blocks 恒无最终 text 块，blocks 优先渲染的
+			// 客户端正文蒸发（BUG-20260703 B5）。
+			state.Messages = append(state.Messages, llm.Message{
+				Role:    llm.RoleAssistant,
+				Content: resp.Content,
+			})
 			if err := strategy.AfterLLM(ctx, state); err != nil {
 				_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("strategy_after_llm", err)})
 				return nil, err
