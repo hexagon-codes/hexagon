@@ -218,8 +218,8 @@ Hexagon 依赖以下外部库：
 
 | 依赖 | 版本 | 说明 |
 |-----|------|------|
-| `github.com/hexagon-codes/ai-core` | v0.1.4 | AI 基础能力库 |
-| `github.com/hexagon-codes/toolkit` | v0.1.0 | Go 通用工具库 |
+| `github.com/hexagon-codes/ai-core` | v0.2.0 | AI 基础能力库 |
+| `github.com/hexagon-codes/toolkit` | v0.2.6 | Go 通用工具库 |
 
 这些依赖的公开 API 变更会同步反映在 Hexagon 的版本号中。
 

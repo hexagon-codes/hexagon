@@ -217,8 +217,8 @@ Hexagon depends on the following external libraries:
 
 | Dependency | Version | Description |
 |-----|------|------|
-| `github.com/hexagon-codes/ai-core` | v0.1.4 | AI capability library |
-| `github.com/hexagon-codes/toolkit` | v0.1.0 | Go general-purpose toolkit |
+| `github.com/hexagon-codes/ai-core` | v0.2.0 | AI capability library |
+| `github.com/hexagon-codes/toolkit` | v0.2.6 | Go general-purpose toolkit |
 
 Breaking changes to the public APIs of these dependencies will be reflected in Hexagon's own version number.
 

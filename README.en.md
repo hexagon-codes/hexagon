@@ -6,7 +6,7 @@
 
 **The All-Around AI Agent Framework for the Go Ecosystem**
 
-[![Go Reference](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
+[![Go Reference](https://img.shields.io/badge/Go-1.25.7+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen)](https://github.com/hexagon-codes/hexagon/actions)
 

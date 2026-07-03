@@ -37,7 +37,7 @@ Hexagon is a complete AI Agent development ecosystem:
 
 ### System Requirements
 
-- Go 1.25 or higher
+- Go 1.25.7 or higher
 - Network access (to reach LLM APIs)
 
 ### Environment Variables

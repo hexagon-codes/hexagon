@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Changed
+- 依赖升级：ai-core v0.1.11 → **v0.2.0**、toolkit v0.2.3 → **v0.2.6**；主模块与 examples 独立模块同步到 Go **1.25.7** 基线。
+- **examples**：示例独立模块的 `github.com/hexagon-codes/hexagon` 依赖从 v0.4.8 同步到 **v0.5.7**，消除旧发布包仍包含 `examples/...` 时触发的 ambiguous import。
+
 ## [0.5.7]
 > 功能版本：工具执行**状态一等化** + **有序内容块流 Blocks**（保真多步 ReAct 交错）+ 截断 rune/字节安全 + ai-core v0.1.11 / toolkit v0.2.3 lockstep。hexagon 公开 API 仅新增字段（SemVer minor）。
 
