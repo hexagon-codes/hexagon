@@ -351,11 +351,8 @@ func (e *CitationEngine) extractTitle(doc rag.Document) string {
 	// 使用内容的第一行
 	lines := strings.SplitN(doc.Content, "\n", 2)
 	if len(lines) > 0 && len(lines[0]) > 0 {
-		title := lines[0]
-		if len(title) > 50 {
-			title = title[:50] + "..."
-		}
-		return title
+		// rune-safe 截断，避免 CJK 字节切断产生乱码（AP-141，用户可见标题）。
+		return stringx.TruncateBytes(lines[0], 50, "...")
 	}
 
 	return fmt.Sprintf("文档 %s", doc.ID)

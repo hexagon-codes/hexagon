@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/hexagon/internal/util"
+	"github.com/hexagon-codes/toolkit/lang/stringx"
 	"github.com/hexagon-codes/toolkit/util/retry"
 )
 
@@ -188,10 +189,7 @@ func LoggingMiddleware(logger *log.Logger) AgentMiddleware {
 			start := time.Now()
 
 			// 截断查询用于日志
-			query := input.Query
-			if len(query) > 100 {
-				query = query[:100] + "..."
-			}
+			query := truncateForLog(input.Query)
 
 			logger.Printf("[Agent] 开始处理: query=%q", query)
 
@@ -211,6 +209,11 @@ func LoggingMiddleware(logger *log.Logger) AgentMiddleware {
 			return output, err
 		}
 	}
+}
+
+// truncateForLog 截断查询用于日志展示（rune-safe，避免 CJK 字节切断乱码 AP-141）。
+func truncateForLog(query string) string {
+	return stringx.TruncateBytes(query, 100, "...")
 }
 
 // MetricsMiddleware 指标采集中间件

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/tokenizer"
 	hruntime "github.com/hexagon-codes/hexagon/runtime"
 )
 
@@ -97,12 +98,17 @@ func (Compaction) AfterTool(context.Context, *hruntime.State, llm.ToolCall, hrun
 // Finalize 无操作。
 func (Compaction) Finalize(context.Context, *hruntime.State) error { return nil }
 
-// estimateTokens 内置粗估：每条消息约 len(content)/4 token + 4 token 固定开销
-// （role/分隔符等）。仅作默认值，精确计量请注入 TokenCounter。
+// estimateTokens 内置默认估算：逐条消息委托 ai-core tokenizer.CountGPT4（GPT-4 参数，
+// 中文感知），与全生态统一口径，避免原 len(content)/4+4 字节口径对 CJK/英文漂移（RU-8）。
+// 仅作默认值，精确计量请注入 TokenCounter。
 func estimateTokens(messages []llm.Message) int {
 	total := 0
 	for _, m := range messages {
-		total += len(m.Content)/4 + 4
+		n := tokenizer.CountGPT4(m.Content)
+		if n == 0 && m.Content != "" {
+			n = 1
+		}
+		total += n
 	}
 	return total
 }

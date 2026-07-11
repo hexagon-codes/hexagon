@@ -6,7 +6,7 @@ module github.com/hexagon-codes/hexagon/examples
 go 1.25.7
 
 require (
-	github.com/hexagon-codes/ai-core v0.2.0
+	github.com/hexagon-codes/ai-core v0.2.4
 	github.com/hexagon-codes/hexagon v0.5.7
 )
 

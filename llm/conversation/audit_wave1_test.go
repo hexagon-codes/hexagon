@@ -271,24 +271,24 @@ func TestGetMessages_TokenOrderPreserved(t *testing.T) {
 
 func TestGetContext_TokenBudgetTruncation(t *testing.T) {
 	m := New(WithSystemPrompt(""))
-	// 每条 "aaaa"(4 runes) → estimateTokens = 2
+	// 规范口径 tokenizer.CountGPT4("aaaa") = 1 token/条（RU-8 修复后）
 	for i := 0; i < 5; i++ {
 		m.AddUserMessage("aaaa")
 	}
-	// 预算 4 token → 最多 2 条（2*2=4），第 3 条会使 6>4 break
+	// 预算 4 token → 最多 4 条（4*1=4），第 5 条会使 5>4 break
 	msgs := m.GetContext(4)
-	if len(msgs) != 2 {
-		t.Errorf("预算=4 时应保留 2 条, got %d", len(msgs))
+	if len(msgs) != 4 {
+		t.Errorf("预算=4 时应保留 4 条, got %d", len(msgs))
 	}
-	// 应保留最近的 2 条
+	// 应保留最近的 4 条（发生截断，最早 1 条被丢弃）
 }
 
 func TestGetContext_KeepsMostRecent(t *testing.T) {
 	m := New(WithSystemPrompt(""))
-	m.AddUserMessage("old")   // 3 runes -> 1 token
-	m.AddUserMessage("newer") // 5 runes -> 2 token
-	// 预算 2：从最近向前填充，先 "newer"(2) 用满，"old"(1) 加上为 3>2 break
-	msgs := m.GetContext(2)
+	m.AddUserMessage("old")   // CountGPT4 -> 1 token
+	m.AddUserMessage("newer") // CountGPT4 -> 1 token
+	// 预算 1：从最近向前填充，"newer"(1) 用满，"old"(1) 加上为 2>1 break
+	msgs := m.GetContext(1)
 	if len(msgs) != 1 {
 		t.Fatalf("len = %d, want 1", len(msgs))
 	}
@@ -299,10 +299,10 @@ func TestGetContext_KeepsMostRecent(t *testing.T) {
 
 func TestGetContext_SystemPromptConsumesBudget(t *testing.T) {
 	// 系统提示词先占用预算；若系统提示词已耗尽预算，则后续消息一条都进不来
-	m := New(WithSystemPrompt("aaaaaaaa")) // 8 runes -> 4 token
-	m.AddUserMessage("bb")                 // 2 runes -> 1 token
-	msgs := m.GetContext(4)
-	// usedTokens=4 已等于预算，user 消息 1 token 使 5>4 break
+	m := New(WithSystemPrompt("aaaaaaaa")) // CountGPT4 -> 2 token
+	m.AddUserMessage("bb")                 // CountGPT4 -> 1 token
+	msgs := m.GetContext(2)
+	// usedTokens=2 已等于预算，user 消息 1 token 使 3>2 break
 	if len(msgs) != 1 {
 		t.Errorf("系统提示词占满预算后应只有系统提示词, got len=%d: %+v", len(msgs), msgs)
 	}
@@ -413,11 +413,12 @@ func TestEstimateTokens(t *testing.T) {
 		in   string
 		want int
 	}{
+		// 规范口径：委托 ai-core tokenizer.CountGPT4（RU-8 修复后）
 		{"空字符串", "", 0},
-		{"单字符", "a", 1},     // 1 rune /2 =0 -> 补 1
-		{"两字符", "ab", 1},    // 2/2=1
-		{"中文四字", "你好世界", 2}, // 4 runes /2 =2
-		{"emoji", "😀😀", 1},  // 2 runes /2 =1
+		{"单字符", "a", 1},
+		{"两字符", "ab", 1},
+		{"中文四字", "你好世界", 3}, // CountGPT4 中文感知
+		{"emoji", "😀😀", 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

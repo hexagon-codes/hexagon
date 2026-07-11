@@ -494,15 +494,17 @@ func maskEmail(s string) string {
 	if at <= 0 {
 		return "***@***"
 	}
-	name := s[:at]
 	domain := s[at+1:]
+	// AP-141：按 rune 切片——国际化邮箱本地部分可含 CJK，字节切片会劈裂多字节字符产生
+	// 非法 UTF-8 脱敏串。len 判断也须用 rune 数（1 个 CJK=3 字节但 1 rune）。
+	name := []rune(s[:at])
 	if len(name) == 0 {
 		return "***@" + domain
 	}
 	if len(name) <= 2 {
-		return name[:1] + "***@" + domain
+		return string(name[:1]) + "***@" + domain
 	}
-	return name[:2] + "***@" + domain
+	return string(name[:2]) + "***@" + domain
 }
 
 func maskPhone(s string) string {

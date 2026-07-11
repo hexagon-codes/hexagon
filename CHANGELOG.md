@@ -5,7 +5,9 @@
 ## [Unreleased]
 
 ### Changed
-- 依赖升级：ai-core v0.1.11 → **v0.2.0**、toolkit v0.2.3 → **v0.2.6**；主模块与 examples 独立模块同步到 Go **1.25.7** 基线。
+- 依赖升级：ai-core v0.2.0 → **v0.2.4**；主模块与 examples 独立模块同步升级。
+- **agent、rag/citation、security/guard**：日志查询、文档标题和国际化邮箱脱敏改为按 rune/字节边界处理，避免 CJK 字符被截断。
+- **llm/conversation、runtime/middleware**：Token 估算统一委托 `ai-core/tokenizer.CountGPT4`，保持中文与英文文本的估算口径一致。
 - **examples**：示例独立模块的 `github.com/hexagon-codes/hexagon` 依赖从 v0.4.8 同步到 **v0.5.7**，消除旧发布包仍包含 `examples/...` 时触发的 ambiguous import。
 
 ## [0.5.7]

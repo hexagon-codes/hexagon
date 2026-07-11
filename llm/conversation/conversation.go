@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/tokenizer"
 )
 
 // ============== 对话管理器 ==============
@@ -328,18 +329,11 @@ func (m *Manager) Summarize(ctx context.Context, provider llm.Provider, keepRece
 
 // estimateTokens 估算文本的 Token 数
 //
-// 使用 rune 级别估算：英文约 4 字符/token，中文约 1-2 字符/token。
-// 按 rune 计数后除以 2，比 len(text)/4 对中文更准确：
-//   - 纯英文 "hello world"(11 runes) → 5 tokens (实际~3)，略高估
-//   - 纯中文 "你好世界"(4 runes) → 2 tokens (实际~4)，略低估
-//   - 混合文本取折中
+// 委托 ai-core tokenizer.CountGPT4（GPT-4 参数，中文感知），与全生态统一口径，
+// 避免手写 runeCount/2 对英文高估、对中文漂移（RU-8）。
 func estimateTokens(text string) int {
-	runeCount := 0
-	for range text {
-		runeCount++
-	}
-	n := runeCount / 2
-	if n == 0 && runeCount > 0 {
+	n := tokenizer.CountGPT4(text)
+	if n == 0 && text != "" {
 		n = 1
 	}
 	return n
