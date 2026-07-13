@@ -38,20 +38,41 @@ import (
 	"github.com/hexagon-codes/hexagon/agent"
 )
 
-// devFallbackVersion 是开发构建（go.work / 无可用 build info 版本）下的回退版本号，
-// 同时作为发布前当前框架版本基线。单一来源，测试与解析逻辑共用。
-const devFallbackVersion = "0.5.7"
+// devFallbackVersion 是「注入缺失且 build info 也无有效版本」时的最后兜底。
+// 方案 A（2026-07-13）后它不再是正常路径来源：正常构建走 injectedVersion（本机 go.work）
+// 或 build info 依赖版本（正式发布），git tag 才是唯一真相源。能走到此兜底 = 构建异常，
+// 版本「确实未知」。故刻意用非发布哨兵 "unknown" 而非某个具体版本号：
+//   - 绝不再用一个会过期的真实版本号谎报（历史上写死 "0.5.x" 漏同步 tag 正是显示旧版本的根因）；
+//   - 前端 Sidebar.pickEngineVersion 已把 "unknown"（同 "(devel)"）视为「不显示」，宁可留白不撒谎；
+//   - 永久稳定，发版无需再改。
+const devFallbackVersion = "unknown"
 
 // hexagonModulePath 是 hexagon 框架自身的 module path，用于在 build info 依赖列表里定位。
 const hexagonModulePath = "github.com/hexagon-codes/hexagon"
 
+// injectedVersion 由编译期 ldflags 注入，使 git tag 成为版本号唯一真相源：
+//
+//	go build -ldflags "-X github.com/hexagon-codes/hexagon.injectedVersion=$(git describe --tags --dirty)"
+//
+// 本机 go.work / 装机构建里 hexagon 作为依赖被 build info 上报 "(devel)"、拿不到真实版本，
+// 注入值填补这一空档；正式发布构建 injectedVersion 留空、退回 build info 依赖版本。
+var injectedVersion string
+
 // Version is the current version of the Hexagon framework.
-// It is automatically resolved from Go module build info when available,
-// falling back to the hardcoded value for development builds.
+// It is resolved from (优先级) 编译期注入 > Go module build info > devFallbackVersion 兜底。
 var Version = resolveVersion()
 
 func resolveVersion() string {
 	info, ok := debug.ReadBuildInfo()
+	return resolveVersionWithInjection(injectedVersion, info, ok)
+}
+
+// resolveVersionWithInjection 按「注入 > build info > 兜底」解析版本（纯函数，便于测试）。
+// 注入值去空白、去 v 前缀后非空即采用；否则委托 resolveVersionFromBuildInfo。
+func resolveVersionWithInjection(injected string, info *debug.BuildInfo, ok bool) string {
+	if v := strings.TrimPrefix(strings.TrimSpace(injected), "v"); v != "" {
+		return v
+	}
 	return resolveVersionFromBuildInfo(info, ok)
 }
 
