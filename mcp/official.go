@@ -434,8 +434,32 @@ func parseSchemaMap(m map[string]any) *llm.Schema {
 	if v, ok := m["type"].(string); ok {
 		s.Type = v
 	}
+	if v, ok := m["title"].(string); ok {
+		s.Title = v
+	}
 	if v, ok := m["description"].(string); ok {
 		s.Description = v
+	}
+	if v, ok := m["default"]; ok {
+		s.Default = v
+	}
+	if v, ok := m["minimum"].(float64); ok {
+		s.Minimum = &v
+	}
+	if v, ok := m["maximum"].(float64); ok {
+		s.Maximum = &v
+	}
+	if v, ok := schemaInt(m["minLength"]); ok {
+		s.MinLength = &v
+	}
+	if v, ok := schemaInt(m["maxLength"]); ok {
+		s.MaxLength = &v
+	}
+	if v, ok := m["pattern"].(string); ok {
+		s.Pattern = v
+	}
+	if v, ok := m["format"].(string); ok {
+		s.Format = v
 	}
 
 	// 解析 properties
@@ -449,14 +473,7 @@ func parseSchemaMap(m map[string]any) *llm.Schema {
 	}
 
 	// 解析 required
-	if req, ok := m["required"].([]any); ok {
-		s.Required = make([]string, 0, len(req))
-		for _, r := range req {
-			if str, ok := r.(string); ok {
-				s.Required = append(s.Required, str)
-			}
-		}
-	}
+	s.Required = schemaStringSlice(m["required"])
 
 	// 解析 items
 	if items, ok := m["items"].(map[string]any); ok {
@@ -469,14 +486,81 @@ func parseSchemaMap(m map[string]any) *llm.Schema {
 		copy(s.Enum, enum)
 	}
 
+	s.AnyOf = parseSchemaList(m["anyOf"])
+	s.OneOf = parseSchemaList(m["oneOf"])
+	s.AllOf = parseSchemaList(m["allOf"])
+	if notMap, ok := m["not"].(map[string]any); ok {
+		s.Not = parseSchemaMap(notMap)
+	}
+
+	switch additional := m["additionalProperties"].(type) {
+	case bool:
+		s.AdditionalProperties = additional
+	case map[string]any:
+		s.AdditionalProperties = parseSchemaMap(additional)
+	}
+
 	return s
+}
+
+func schemaStringSlice(raw any) []string {
+	switch values := raw.(type) {
+	case []string:
+		return append([]string(nil), values...)
+	case []any:
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			if text, ok := value.(string); ok {
+				result = append(result, text)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
+func schemaInt(raw any) (int, bool) {
+	switch value := raw.(type) {
+	case int:
+		return value, true
+	case int32:
+		return int(value), true
+	case int64:
+		return int(value), true
+	case float64:
+		return int(value), value == float64(int(value))
+	default:
+		return 0, false
+	}
+}
+
+func parseSchemaList(raw any) []*llm.Schema {
+	values, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]*llm.Schema, 0, len(values))
+	for _, value := range values {
+		if schemaMap, ok := value.(map[string]any); ok {
+			result = append(result, parseSchemaMap(schemaMap))
+		}
+	}
+	return result
 }
 
 // aicoreSchemaToSDK 将 ai-core Schema 转换为官方 SDK 接受的 InputSchema (map[string]any)
 //
 // 官方 SDK 的 server.AddTool 要求 InputSchema 的 type 必须为 "object"
 func aicoreSchemaToSDK(s *llm.Schema) map[string]any {
+	return aicoreSchemaToSDKMap(s, true)
+}
+
+func aicoreSchemaToSDKMap(s *llm.Schema, root bool) map[string]any {
 	if s == nil {
+		if !root {
+			return map[string]any{}
+		}
 		return map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -487,18 +571,42 @@ func aicoreSchemaToSDK(s *llm.Schema) map[string]any {
 
 	if s.Type != "" {
 		result["type"] = s.Type
-	} else {
+	} else if root {
 		result["type"] = "object"
 	}
 
+	if s.Title != "" {
+		result["title"] = s.Title
+	}
 	if s.Description != "" {
 		result["description"] = s.Description
+	}
+	if s.Default != nil {
+		result["default"] = s.Default
+	}
+	if s.Minimum != nil {
+		result["minimum"] = *s.Minimum
+	}
+	if s.Maximum != nil {
+		result["maximum"] = *s.Maximum
+	}
+	if s.MinLength != nil {
+		result["minLength"] = *s.MinLength
+	}
+	if s.MaxLength != nil {
+		result["maxLength"] = *s.MaxLength
+	}
+	if s.Pattern != "" {
+		result["pattern"] = s.Pattern
+	}
+	if s.Format != "" {
+		result["format"] = s.Format
 	}
 
 	if len(s.Properties) > 0 {
 		props := make(map[string]any, len(s.Properties))
 		for name, prop := range s.Properties {
-			props[name] = aicoreSchemaToSDK(prop)
+			props[name] = aicoreSchemaToSDKMap(prop, false)
 		}
 		result["properties"] = props
 	} else if result["type"] == "object" {
@@ -510,12 +618,44 @@ func aicoreSchemaToSDK(s *llm.Schema) map[string]any {
 	}
 
 	if s.Items != nil {
-		result["items"] = aicoreSchemaToSDK(s.Items)
+		result["items"] = aicoreSchemaToSDKMap(s.Items, false)
 	}
 
 	if len(s.Enum) > 0 {
 		result["enum"] = s.Enum
 	}
 
+	if len(s.AnyOf) > 0 {
+		result["anyOf"] = schemaListToSDK(s.AnyOf)
+	}
+	if len(s.OneOf) > 0 {
+		result["oneOf"] = schemaListToSDK(s.OneOf)
+	}
+	if len(s.AllOf) > 0 {
+		result["allOf"] = schemaListToSDK(s.AllOf)
+	}
+	if s.Not != nil {
+		result["not"] = aicoreSchemaToSDKMap(s.Not, false)
+	}
+
+	switch additional := s.AdditionalProperties.(type) {
+	case bool:
+		result["additionalProperties"] = additional
+	case *llm.Schema:
+		result["additionalProperties"] = aicoreSchemaToSDKMap(additional, false)
+	case map[string]any:
+		result["additionalProperties"] = additional
+	}
+
+	return result
+}
+
+func schemaListToSDK(schemas []*llm.Schema) []any {
+	result := make([]any, 0, len(schemas))
+	for _, item := range schemas {
+		if item != nil {
+			result = append(result, aicoreSchemaToSDKMap(item, false))
+		}
+	}
 	return result
 }
