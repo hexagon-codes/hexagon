@@ -448,16 +448,18 @@ func TestMiddleware(t *testing.T) {
 
 	// 测试 CORS 中间件
 	t.Run("CORS", func(t *testing.T) {
-		handler := CORSMiddleware("*")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		const allowedOrigin = "https://trusted.example"
+		handler := CORSMiddleware(allowedOrigin)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}))
 
 		// 测试 OPTIONS 请求
 		req := httptest.NewRequest(http.MethodOptions, "/", nil)
+		req.Header.Set("Origin", allowedOrigin)
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 
-		if w.Header().Get("Access-Control-Allow-Origin") != "*" {
+		if w.Header().Get("Access-Control-Allow-Origin") != allowedOrigin {
 			t.Error("expected CORS header")
 		}
 	})

@@ -150,15 +150,22 @@ func (lrw *loggingResponseWriter) WriteHeader(code int) {
 
 // CORSMiddleware CORS 中间件
 func CORSMiddleware(allowOrigin string) func(http.Handler) http.Handler {
+	allowed, configured := normalizeOrigin(allowOrigin)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", allowOrigin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
-			w.Header().Set("Access-Control-Max-Age", "86400")
-
-			if r.Method == http.MethodOptions {
-				w.WriteHeader(http.StatusOK)
+			origin, valid := normalizeOrigin(r.Header.Get("Origin"))
+			if configured && valid && origin == allowed {
+				w.Header().Add("Vary", "Origin")
+				w.Header().Set("Access-Control-Allow-Origin", allowed)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, "+csrfHeader)
+				w.Header().Set("Access-Control-Max-Age", "86400")
+				if r.Method == http.MethodOptions {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+			} else if r.Method == http.MethodOptions && r.Header.Get("Origin") != "" {
+				http.Error(w, "origin not allowed", http.StatusForbidden)
 				return
 			}
 

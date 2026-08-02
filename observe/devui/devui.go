@@ -41,11 +41,13 @@ type DevUI struct {
 	running       bool
 	mu            sync.Mutex
 	startTime     time.Time
+	sessionMu     sync.Mutex
+	sessions      map[string]devUISession
 }
 
 // Options 配置选项
 type Options struct {
-	// Addr 监听地址，默认 ":8080"
+	// Addr 监听地址，默认仅本机回环 "127.0.0.1:8080"
 	Addr string
 
 	// EnableSSE 是否启用 SSE 事件推送，默认 true
@@ -64,8 +66,15 @@ type Options struct {
 	// APIPrefix API 前缀，默认 "/api"
 	APIPrefix string
 
-	// CORSEnabled 是否启用 CORS，默认 true（开发模式）
+	// CORSEnabled 是否启用 CORS，默认 false。启用时仍只允许 AllowedOrigins。
 	CORSEnabled bool
+
+	// AllowedOrigins 是允许跨域访问的精确 Origin 列表；不支持通配符。
+	AllowedOrigins []string
+
+	// AuthToken 是 Builder 写端点的 bearer/CSRF token。loopback 模式
+	// 可为空并通过同源 bootstrap 建立短期 session；非 loopback 必须显式配置。
+	AuthToken string
 
 	// ReadTimeout HTTP 读取超时
 	ReadTimeout time.Duration
@@ -77,12 +86,12 @@ type Options struct {
 // DefaultOptions 返回默认配置
 func DefaultOptions() *Options {
 	return &Options{
-		Addr:          ":8080",
+		Addr:          "127.0.0.1:8080",
 		EnableSSE:     true,
 		EnableMetrics: true,
 		MaxEvents:     1000,
 		APIPrefix:     "/api",
-		CORSEnabled:   true,
+		CORSEnabled:   false,
 		ReadTimeout:   30 * time.Second,
 		WriteTimeout:  30 * time.Second,
 	}
@@ -142,6 +151,22 @@ func WithCORS(enabled bool) Option {
 	}
 }
 
+// WithAllowedOrigins 设置允许跨域访问的精确 Origin。非法值和 "*" 会被忽略。
+func WithAllowedOrigins(origins ...string) Option {
+	return func(o *Options) {
+		o.AllowedOrigins = normalizeOrigins(origins)
+	}
+}
+
+// WithAuthToken 设置 Builder 写端点所需的 bearer/CSRF token（至少 32
+// 个无空白字节）。空值不会关闭认证：loopback 仍要求短期 session，非 loopback
+// 会拒绝启动。
+func WithAuthToken(token string) Option {
+	return func(o *Options) {
+		o.AuthToken = token
+	}
+}
+
 // WithTimeouts 设置超时时间
 func WithTimeouts(read, write time.Duration) Option {
 	return func(o *Options) {
@@ -176,6 +201,7 @@ func New(opts ...Option) *DevUI {
 		options:       options,
 		graphStore:    NewGraphStore(),
 		replayManager: NewReplayManager(100),
+		sessions:      make(map[string]devUISession),
 	}
 }
 
@@ -202,6 +228,9 @@ func (d *DevUI) Replay() *ReplayManager {
 // Start 启动 DevUI 服务器
 // 此方法会阻塞，建议在 goroutine 中调用
 func (d *DevUI) Start() error {
+	if err := d.validateSecurityConfig(); err != nil {
+		return err
+	}
 	d.mu.Lock()
 	if d.running {
 		d.mu.Unlock()
@@ -222,7 +251,7 @@ func (d *DevUI) Start() error {
 		WriteTimeout: d.options.WriteTimeout,
 	}
 
-	fmt.Printf("🔮 Hexagon Dev UI starting at http://localhost%s\n", d.options.Addr)
+	fmt.Printf("🔮 Hexagon Dev UI starting at %s\n", d.URL())
 
 	if err := d.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		d.mu.Lock()
@@ -280,29 +309,12 @@ func (d *DevUI) Addr() string {
 
 // URL 返回完整的访问 URL
 func (d *DevUI) URL() string {
-	return fmt.Sprintf("http://localhost%s", d.options.Addr)
+	return devUIURL(d.options.Addr)
 }
 
 // setupRoutes 设置路由
 func (d *DevUI) setupRoutes() *http.ServeMux {
 	mux := http.NewServeMux()
-
-	// CORS 中间件
-	corsMiddleware := func(next http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			if d.options.CORSEnabled {
-				w.Header().Set("Access-Control-Allow-Origin", "*")
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept")
-
-				if r.Method == "OPTIONS" {
-					w.WriteHeader(http.StatusOK)
-					return
-				}
-			}
-			next(w, r)
-		}
-	}
 
 	handler := newHandler(d)
 	bHandler := newBuilderHandler(d.graphStore, d.collector)
@@ -312,38 +324,39 @@ func (d *DevUI) setupRoutes() *http.ServeMux {
 	prefix := d.options.APIPrefix
 
 	// 事件 API
-	mux.HandleFunc(prefix+"/events", corsMiddleware(handler.handleEvents))
-	mux.HandleFunc(prefix+"/events/", corsMiddleware(handler.handleEventByID))
+	mux.HandleFunc(prefix+"/events", d.corsMiddleware(handler.handleEvents))
+	mux.HandleFunc(prefix+"/events/", d.corsMiddleware(handler.handleEventByID))
 
 	// Trace API
-	mux.HandleFunc(prefix+"/traces", corsMiddleware(handler.handleTraces))
-	mux.HandleFunc(prefix+"/traces/", corsMiddleware(handler.handleTraceByID))
+	mux.HandleFunc(prefix+"/traces", d.corsMiddleware(handler.handleTraces))
+	mux.HandleFunc(prefix+"/traces/", d.corsMiddleware(handler.handleTraceByID))
 
 	// 指标 API
 	if d.options.EnableMetrics {
-		mux.HandleFunc(prefix+"/metrics", corsMiddleware(handler.handleMetrics))
-		mux.HandleFunc(prefix+"/stats", corsMiddleware(handler.handleStats))
+		mux.HandleFunc(prefix+"/metrics", d.corsMiddleware(handler.handleMetrics))
+		mux.HandleFunc(prefix+"/stats", d.corsMiddleware(handler.handleStats))
 	}
 
 	// Builder API
-	mux.HandleFunc(prefix+"/builder/graphs", corsMiddleware(bHandler.handleGraphs))
-	mux.HandleFunc(prefix+"/builder/graphs/", corsMiddleware(bHandler.handleGraph))
-	mux.HandleFunc(prefix+"/builder/node-types", corsMiddleware(bHandler.handleNodeTypes))
+	mux.HandleFunc(prefix+"/auth/bootstrap", d.corsMiddleware(d.handleAuthBootstrap))
+	mux.HandleFunc(prefix+"/builder/graphs", d.corsMiddleware(d.protectBuilderWrites(prefix, bHandler.handleGraphs)))
+	mux.HandleFunc(prefix+"/builder/graphs/", d.corsMiddleware(d.protectBuilderWrites(prefix, bHandler.handleGraph)))
+	mux.HandleFunc(prefix+"/builder/node-types", d.corsMiddleware(bHandler.handleNodeTypes))
 
 	// Replay API（调试回放）
-	mux.HandleFunc(prefix+"/replay/sessions", corsMiddleware(rHandler.handleSessions))
-	mux.HandleFunc(prefix+"/replay/sessions/", corsMiddleware(rHandler.handleSession))
+	mux.HandleFunc(prefix+"/replay/sessions", d.corsMiddleware(rHandler.handleSessions))
+	mux.HandleFunc(prefix+"/replay/sessions/", d.corsMiddleware(rHandler.handleSession))
 
 	// SSE 事件流
 	if d.options.EnableSSE {
-		mux.HandleFunc("/events", corsMiddleware(handler.handleSSE))
+		mux.HandleFunc("/events", d.corsMiddleware(handler.handleSSE))
 	}
 
 	// 健康检查
-	mux.HandleFunc("/health", corsMiddleware(handler.handleHealth))
+	mux.HandleFunc("/health", d.corsMiddleware(handler.handleHealth))
 
 	// 静态文件
-	mux.HandleFunc("/", corsMiddleware(handler.handleStatic))
+	mux.HandleFunc("/", d.corsMiddleware(handler.handleStatic))
 
 	return mux
 }
