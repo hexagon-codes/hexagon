@@ -1,11 +1,12 @@
 // Package sandbox 提供 AI Agent 的沙箱代码执行环境
 //
-// 本包实现了隔离的代码执行环境，支持多种沙箱类型：
+// 本包提供代码执行后端，并明确区分安全隔离与宿主进程 opt-in：
 //   - Docker 容器沙箱
-//   - 进程隔离沙箱
-//   - WebAssembly 沙箱
+//   - 进程沙箱占位模式（当前 fail-closed，不执行）
+//   - 显式不安全的宿主进程模式（仅可信代码）
+//   - WebAssembly 类型占位（当前 unsupported，fail-closed）
 //
-// 安全特性：
+// Docker 后端的安全配置包括：
 //   - 资源限制 (CPU/内存)
 //   - 网络隔离
 //   - 文件系统隔离
@@ -18,12 +19,13 @@
 //	    Image:   "python:3.11-slim",
 //	    Timeout: 30 * time.Second,
 //	})
-//	result, _ := sb.Execute(ctx, "print('hello')")
+//	execTool := sb.ExecuteTool()
 package sandbox
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -43,11 +45,18 @@ type SandboxType string
 const (
 	// TypeDocker Docker 沙箱
 	TypeDocker SandboxType = "docker"
-	// TypeProcess 进程沙箱（使用系统隔离）
+	// TypeProcess 保留原进程沙箱配置值。当前实现无法兑现网络、文件系统与
+	// 全部资源隔离，因此 Execute 会 fail-closed，不会运行宿主进程。
 	TypeProcess SandboxType = "process"
+	// TypeUnsafeProcess 显式选择在宿主机直接运行进程。此模式只提供超时和
+	// best-effort 资源限制，不提供安全隔离，不得用于不可信代码。
+	TypeUnsafeProcess SandboxType = "unsafe_process"
 	// TypeWASM WebAssembly 沙箱
 	TypeWASM SandboxType = "wasm"
 )
+
+// ErrProcessIsolationUnavailable 表示 TypeProcess 无法兑现其安全隔离契约。
+var ErrProcessIsolationUnavailable = errors.New("process sandbox isolation unavailable")
 
 // Config 沙箱配置
 type Config struct {
@@ -159,6 +168,8 @@ func (s *Sandbox) execute(ctx context.Context, input ExecuteInput) (*ExecuteOutp
 	case TypeDocker:
 		return s.executeDocker(ctx, input)
 	case TypeProcess:
+		return nil, fmt.Errorf("%w: use docker for untrusted code or TypeUnsafeProcess for an explicit host-process opt-in", ErrProcessIsolationUnavailable)
+	case TypeUnsafeProcess:
 		return s.executeProcess(ctx, input)
 	default:
 		return nil, fmt.Errorf("unsupported sandbox type: %s", s.config.Type)
@@ -305,7 +316,8 @@ func (s *Sandbox) executeDocker(ctx context.Context, input ExecuteInput) (*Execu
 	}, nil
 }
 
-// executeProcess 在进程中执行（使用系统限制）
+// executeProcess 直接在宿主进程中执行，仅供 TypeUnsafeProcess 使用。
+// 它不是安全边界；这里的超时和 ulimit 只能视为 best-effort 运行控制。
 func (s *Sandbox) executeProcess(ctx context.Context, input ExecuteInput) (*ExecuteOutput, error) {
 	// 设置超时
 	timeout := s.config.Timeout
@@ -482,7 +494,8 @@ func (s *Sandbox) Cleanup() {
 
 // ============== 预配置沙箱 ==============
 
-// PythonSandbox 创建 Python 沙箱工具
+// PythonSandbox 创建 Python 沙箱工具。useDocker=false 选择 fail-closed 的
+// TypeProcess；可信代码若确需直接运行宿主进程，必须显式使用 TypeUnsafeProcess。
 func PythonSandbox(useDocker bool) tool.Tool {
 	config := DefaultConfig()
 	if useDocker {
@@ -503,7 +516,7 @@ func PythonSandbox(useDocker bool) tool.Tool {
 	})
 }
 
-// NodeSandbox 创建 Node.js 沙箱工具
+// NodeSandbox 创建 Node.js 沙箱工具；非 Docker 模式会 fail-closed。
 func NodeSandbox(useDocker bool) tool.Tool {
 	config := DefaultConfig()
 	if useDocker {
@@ -524,7 +537,7 @@ func NodeSandbox(useDocker bool) tool.Tool {
 	})
 }
 
-// BashSandbox 创建 Bash 沙箱工具
+// BashSandbox 创建 Bash 沙箱工具；非 Docker 模式会 fail-closed。
 func BashSandbox(useDocker bool) tool.Tool {
 	config := DefaultConfig()
 	if useDocker {
@@ -545,7 +558,7 @@ func BashSandbox(useDocker bool) tool.Tool {
 	})
 }
 
-// MultiLanguageSandbox 创建多语言沙箱工具
+// MultiLanguageSandbox 创建多语言沙箱工具；非 Docker 模式会 fail-closed。
 func MultiLanguageSandbox(useDocker bool) tool.Tool {
 	sandbox := New(DefaultDockerConfig())
 	if !useDocker {
