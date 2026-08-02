@@ -6,15 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   gorelease:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with: { fetch-depth: 0 }
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with: { go-version: '1.25.x' }
       - name: Install gorelease
-        run: go install golang.org/x/exp/cmd/gorelease@latest
+        run: go install golang.org/x/exp/cmd/gorelease@v0.0.0-20260727155853-b88d891fe743
       - name: Check API compatibility
         run: gorelease || echo "::warning::gorelease 报告了 API 变更，请确认 SemVer 版本号相应升级"
