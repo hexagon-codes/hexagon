@@ -9,9 +9,8 @@ package embedder
 import (
 	"container/list"
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/hexagon-codes/ai-core/store/vector"
@@ -218,11 +217,12 @@ func (e *CachedEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 
 	// 使用 singleflight 防止并发请求相同文本时多次调用底层 Embedder
 	// 为整个批次创建聚合 hash key，避免大批量文本产生超长键
-	h := md5.New()
+	var batchKeyMaterial strings.Builder
+	batchKeyMaterial.Grow(len(toEmbed) * 64)
 	for _, text := range toEmbed {
-		h.Write([]byte(hashText(text)))
+		batchKeyMaterial.WriteString(hashText(text))
 	}
-	batchKey := hex.EncodeToString(h.Sum(nil))
+	batchKey := hash.SHA256(batchKeyMaterial.String())
 
 	embedResult, err, _ := e.sf.Do(batchKey, func() (interface{}, error) {
 		return e.embedder.Embed(ctx, toEmbed)
@@ -404,7 +404,7 @@ var _ vector.Embedder = (*FuncEmbedder)(nil)
 
 // ============== 辅助函数 ==============
 
-// hashText 计算文本的 MD5 哈希（复用 toolkit 的等价实现）
+// hashText 计算文本的 SHA-256 指纹（复用 toolkit 的唯一实现）
 func hashText(text string) string {
-	return hash.MD5(text)
+	return hash.SHA256(text)
 }

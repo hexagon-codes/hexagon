@@ -6,7 +6,9 @@ package text
 
 import (
 	"context"
+	"crypto/md5" // #nosec G501 -- 仅实现调用者明确选择的非安全 MD5 内容摘要。
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -159,8 +161,9 @@ func Tools() []tool.Tool {
 				var hashValue string
 				switch strings.ToLower(input.Algorithm) {
 				case "md5":
-					// 复用 toolkit 的等价实现
-					hashValue = hash.MD5(input.Text)
+					// 仅计算调用者明确指定的内容摘要，不得用于凭据、认证或签名。
+					digest := md5.Sum([]byte(input.Text)) // #nosec G401 -- 公开工具明确请求非安全 MD5 内容摘要。
+					hashValue = hex.EncodeToString(digest[:])
 				case "sha256":
 					// 复用 toolkit 的等价实现
 					hashValue = hash.SHA256(input.Text)

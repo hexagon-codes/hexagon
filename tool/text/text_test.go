@@ -481,7 +481,7 @@ func TestTextHash(t *testing.T) {
 		name      string
 		text      string
 		algorithm string
-		want      string // 期望哈希值，用于钉死与标准库等价（复用 toolkit/util/hash 后行为不变）
+		want      string // 期望哈希值，用于钉死与对应算法的标准库等价
 		wantErr   bool
 	}{
 		{

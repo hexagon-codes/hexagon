@@ -373,7 +373,7 @@ func (m *HotReloadManager) RollbackToVersion(ctx context.Context, name, version 
 
 // computeConfigHash 计算配置哈希
 //
-// 使用 MD5 算法对配置进行哈希，确保相同配置生成相同哈希值。
+// 使用 SHA-256 对配置进行哈希，确保相同配置生成相同指纹。
 // 通过排序 map 的 key 来保证序列化结果的稳定性。
 func computeConfigHash(config map[string]any) string {
 	if config == nil {
@@ -386,8 +386,8 @@ func computeConfigHash(config map[string]any) string {
 		return ""
 	}
 
-	// 计算 MD5 哈希（复用 toolkit 的等价实现）
-	return hash.MD5Bytes(data)
+	// 复用 toolkit 的唯一 SHA-256 字节入口。
+	return hash.SHA256Bytes(data)
 }
 
 // sortMapForHash 递归排序 map 的 key 以确保哈希稳定性

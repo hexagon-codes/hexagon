@@ -368,7 +368,7 @@ func TestHashText(t *testing.T) {
 		t.Error("different text should produce different hash")
 	}
 
-	if len(hash1) != 32 { // MD5 produces 32 hex characters
-		t.Errorf("expected hash length 32, got %d", len(hash1))
+	if len(hash1) != 64 { // toolkit SHA-256 生成 64 位小写十六进制字符串。
+		t.Errorf("expected hash length 64, got %d", len(hash1))
 	}
 }

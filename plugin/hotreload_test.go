@@ -295,15 +295,16 @@ func TestComputeConfigHash(t *testing.T) {
 	config := map[string]any{"key": "value"}
 
 	hash1 := computeConfigHash(config)
-	time.Sleep(time.Nanosecond) // 确保时间不同
 	hash2 := computeConfigHash(config)
 
-	if hash1 == "" {
-		t.Error("哈希不应为空")
+	if len(hash1) != 64 {
+		t.Fatalf("配置 SHA-256 长度 = %d，期望 64", len(hash1))
 	}
-	// 由于使用时间戳，两次哈希应该不同
-	if hash1 == hash2 {
-		t.Log("注意：两次哈希相同（时间精度问题）")
+	if hash1 != hash2 {
+		t.Fatal("相同配置必须得到稳定指纹")
+	}
+	if hash1 == computeConfigHash(map[string]any{"key": "other"}) {
+		t.Fatal("不同配置不得得到相同测试指纹")
 	}
 }
 
