@@ -35,7 +35,7 @@ cd deploy
 # docker network create dev-net  (already provided by docker-dev-env)
 
 # 2. Configure environment variables
-cp .env.dev.example .env
+cp env.dev.example .env
 
 # 3. Start (application services only, connecting to external middleware)
 make dev-up
@@ -74,7 +74,7 @@ helm install hexagon helm/hexagon/ \
 deploy/
 ├── docker-compose.yml          # Infrastructure services (Qdrant / Redis / PostgreSQL)
 ├── .env.example                # Environment variable template for full mode
-├── .env.dev.example            # Environment variable template for development mode
+├── env.dev.example             # Environment variable template for development mode
 ├── Makefile                    # Shortcut commands
 └── helm/hexagon/               # Helm Chart
     ├── Chart.yaml

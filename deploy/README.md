@@ -35,7 +35,7 @@ cd deploy
 # docker network create dev-net  (docker-dev-env 已提供)
 
 # 2. 配置环境变量
-cp .env.dev.example .env
+cp env.dev.example .env
 
 # 3. 启动（仅应用服务，连接外部中间件）
 make dev-up
@@ -74,7 +74,7 @@ helm install hexagon helm/hexagon/ \
 deploy/
 ├── docker-compose.yml          # 基础设施服务（Qdrant / Redis / PostgreSQL）
 ├── .env.example                # 完整模式环境变量模板
-├── .env.dev.example            # 开发模式环境变量模板
+├── env.dev.example             # 开发模式环境变量模板
 ├── Makefile                    # 快捷命令
 └── helm/hexagon/               # Helm Chart
     ├── Chart.yaml
