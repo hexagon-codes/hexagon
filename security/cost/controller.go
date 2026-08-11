@@ -95,7 +95,8 @@ func NewController(opts ...ControllerOption) *Controller {
 	}
 
 	// 初始化滑动窗口限流器
-	c.rateLimiter = rate.NewSlidingWindow(c.requestsPerMinute, time.Minute)
+	// requestsPerMinute 默认为 60，配置非法时（<=0）直接 panic 暴露编程错误。
+	c.rateLimiter = rate.MustNewSlidingWindow(c.requestsPerMinute, time.Minute)
 
 	return c
 }

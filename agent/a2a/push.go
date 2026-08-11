@@ -111,7 +111,7 @@ func NewPushManager(service PushService, opts ...PushManagerOption) *PushManager
 		service:     service,
 		configs:     make(map[string]*PushNotificationConfig),
 		retryConfig: DefaultRetryConfig,
-		rateLimiter: rate.NewTokenBucket(100, 100), // 默认 100 qps
+		rateLimiter: rate.MustNewTokenBucket(100, 100), // 默认 100 qps
 	}
 
 	for _, opt := range opts {
@@ -135,7 +135,8 @@ func WithRateLimit(limit int, window time.Duration) PushManagerOption {
 	return func(m *PushManager) {
 		// 计算每秒令牌生成速率
 		ratePerSec := float64(limit) / window.Seconds()
-		m.rateLimiter = rate.NewTokenBucket(limit, ratePerSec)
+		// limit/window 非法（<=0）时 Must 版本直接 panic 暴露配置错误
+		m.rateLimiter = rate.MustNewTokenBucket(limit, ratePerSec)
 	}
 }
 

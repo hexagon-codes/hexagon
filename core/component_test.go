@@ -818,11 +818,15 @@ func TestCircuitBreaker_ClosedToOpen(t *testing.T) {
 	}
 
 	// 记录 3 次失败达到阈值
+	// （toolkit v0.3.0 的 circuit 为 Permit 模型：每次失败必须先经 Allow 门控获取许可）
+	cb.Allow()
 	cb.RecordFailure()
+	cb.Allow()
 	cb.RecordFailure()
 	if cb.State() != CircuitClosed {
 		t.Fatalf("2 次失败后应仍为 CircuitClosed")
 	}
+	cb.Allow()
 	cb.RecordFailure()
 	if cb.State() != CircuitOpen {
 		t.Fatalf("3 次失败后应为 CircuitOpen")
@@ -837,6 +841,7 @@ func TestCircuitBreaker_OpenNotAllow(t *testing.T) {
 		Timeout:          time.Hour, // 长超时确保不会自动转半开
 	})
 
+	cb.Allow()         // 门控获取许可后记录失败
 	cb.RecordFailure() // 触发打开
 	if cb.State() != CircuitOpen {
 		t.Fatalf("期望 CircuitOpen")
@@ -854,6 +859,7 @@ func TestCircuitBreaker_OpenToHalfOpen(t *testing.T) {
 		Timeout:          5 * time.Millisecond,
 	})
 
+	cb.Allow()         // 门控获取许可后记录失败
 	cb.RecordFailure() // 触发打开
 	if cb.State() != CircuitOpen {
 		t.Fatalf("期望 CircuitOpen")
@@ -879,6 +885,7 @@ func TestCircuitBreaker_HalfOpenToClosed(t *testing.T) {
 		Timeout:          5 * time.Millisecond,
 	})
 
+	cb.Allow()                        // 门控获取许可后记录失败
 	cb.RecordFailure()                // → Open
 	time.Sleep(10 * time.Millisecond) // 等待超时
 	cb.Allow()                        // → HalfOpen
@@ -906,6 +913,7 @@ func TestCircuitBreaker_HalfOpenToOpen(t *testing.T) {
 		Timeout:          5 * time.Millisecond,
 	})
 
+	cb.Allow()                        // 门控获取许可后记录失败
 	cb.RecordFailure()                // → Open
 	time.Sleep(10 * time.Millisecond) // 等待超时
 	cb.Allow()                        // → HalfOpen
@@ -936,7 +944,9 @@ func TestCircuitBreaker_OnStateChange(t *testing.T) {
 		},
 	})
 
+	cb.Allow()
 	cb.RecordFailure()
+	cb.Allow()
 	cb.RecordFailure() // → Open
 
 	time.Sleep(10 * time.Millisecond)

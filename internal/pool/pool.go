@@ -20,6 +20,7 @@ package pool
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"sync"
 
@@ -78,7 +79,7 @@ func SubmitWait(fn func()) error {
 // SubmitWithContext 带 context 提交任务
 func SubmitWithContext(ctx context.Context, fn func()) error {
 	initGlobalPool()
-	return globalPool.SubmitWithContext(ctx, fn)
+	return globalPool.SubmitWithContext(ctx, func(_ context.Context) { fn() })
 }
 
 // ============== 并行执行工具 ==============
@@ -185,9 +186,12 @@ type ObjectPool[T any] struct {
 
 // NewObjectPool 创建对象池
 func NewObjectPool[T any](factory func() T, reset func(*T)) *ObjectPool[T] {
-	return &ObjectPool[T]{
-		pool: poolx.NewObjectPool(factory, reset),
+	pool, err := poolx.NewObjectPool(factory, reset)
+	if err != nil {
+		// 仅当 factory 为 nil 或返回 nil 值时出错，属于调用方编程错误，直接 panic 暴露。
+		panic(fmt.Errorf("hexagon/pool: create object pool: %w", err))
 	}
+	return &ObjectPool[T]{pool: pool}
 }
 
 // Get 获取对象

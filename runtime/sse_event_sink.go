@@ -51,7 +51,11 @@ func NewSSEEventSink(w http.ResponseWriter) (*SSEEventSink, error) {
 	}
 	// sse.NewWriter 设置 SSE 头部（Content-Type / Cache-Control / Connection /
 	// X-Accel-Buffering，与原手写一致）并提供标准事件帧格式 + 线程安全 flush。
-	return &SSEEventSink{sw: sse.NewWriter(w), w: w, flusher: flusher}, nil
+	sw, err := sse.NewWriter(w)
+	if err != nil {
+		return nil, fmt.Errorf("runtime/sse: create writer: %w", err)
+	}
+	return &SSEEventSink{sw: sw, w: w, flusher: flusher}, nil
 }
 
 // Emit 实现 EventSink。

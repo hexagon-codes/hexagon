@@ -1,18 +1,25 @@
 // Package core 提供 Hexagon 框架的核心接口和类型
 //
 // 本文件实现 WithFallback 机制：
+//
 //   - Fallback: 降级处理
+//
 //   - Retry: 重试机制
+//
 //   - CircuitBreaker: 熔断器
+//
 //   - RunnableWithFallback: 带降级的 Runnable
 //
 //   - Resilience4j: 弹性模式
+//
 //   - Polly: 弹性和瞬态故障处理
 package core
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/util/circuit"
@@ -344,30 +351,29 @@ func (r *RunnableWithRetry[I, O]) OutputSchema() *Schema {
 //     MaxDelay 封顶；toolkit 在 Multiplier>0 时自动启用 ExponentialBackoff，其
 //     第 n 次（一基）延迟为 Delay*Multiplier^(n-1) 并由 MaxDelay 封顶，曲线一致。
 //     手写循环不使用 Jitter 字段，故此处也不设置抖动，保持无抖动行为。
-//   - RetryOn → RetryIf：判定为不可重试时直接返回原始错误，语义一致。
-//   - OnRetry 计数：手写循环以零基传入（首次重试 attempt==0），故开启
-//     WithOnRetryZeroBased() 将 toolkit 默认的一基计数平移为零基。
-//   - 最终错误可解包：手写循环重试耗尽直接返回原始 lastErr，调用方可
-//     errors.Is(err, 原始错误)。toolkit 默认用 %v 嵌入会丢失错误链，故开启
-//     WithUnwrapFinalError() 使最终错误多 %w 包装，errors.Is 同时命中
-//     ErrMaxAttemptsReached 与原始 lastErr。
+//   - RetryOn → If：判定为不可重试时直接返回原始错误，语义一致。
+//   - OnRetry 计数：toolkit v0.3.0 以 0.3 一基计数传给回调（首次重试 n==1），
+//     而手写循环以零基传入（首次重试 attempt==0），故在此做 n-1 平移。
+//   - 最终错误可解包：toolkit v0.3.0 的 Do/DoWithContext 重试耗尽时固定返回
+//     fmt.Errorf("%w: %w", ErrMaxAttemptsReached, lastErr)，errors.Is 同时命中
+//     ErrMaxAttemptsReached 与原始 lastErr（旧版 WithUnwrapFinalError 的默认行为，
+//     v0.3.0 已内建，不再需要该选项）。
 func (r *RunnableWithRetry[I, O]) retryOptions() []retry.Option {
 	opts := []retry.Option{
 		retry.Attempts(r.config.MaxRetries + 1),
 		retry.Delay(r.config.InitialDelay),
 		retry.MaxDelay(r.config.MaxDelay),
 		retry.Multiplier(r.config.Multiplier),
-		// OnRetry 采用零基计数，对齐手写循环的 attempt 语义
-		retry.WithOnRetryZeroBased(),
-		// 重试耗尽时最终错误可被 errors.Is 解包到原始 lastErr
-		retry.WithUnwrapFinalError(),
 	}
 	if r.config.RetryOn != nil {
-		opts = append(opts, retry.RetryIf(r.config.RetryOn))
+		opts = append(opts, retry.If(r.config.RetryOn))
 	}
 	if r.config.OnRetry != nil {
-		// toolkit 的 OnRetry(n, err) 中 n 已按零基平移，与手写循环一致
-		opts = append(opts, retry.OnRetry(r.config.OnRetry))
+		onRetry := r.config.OnRetry
+		// toolkit 的 OnRetry(n, err) 中 n 为一基计数，平移为零基后与手写循环一致
+		opts = append(opts, retry.OnRetry(func(n int, err error) {
+			onRetry(n-1, err)
+		}))
 	}
 	return opts
 }
@@ -471,12 +477,21 @@ func DefaultCircuitBreakerConfig() *CircuitBreakerConfig {
 
 // CircuitBreaker 熔断器
 //
-// 状态机委托 toolkit/util/circuit，避免与 toolkit 各维护一份私网/状态逻辑产生防护漂移。
+// 状态机委托 toolkit/util/circuit，避免与 toolkit 各维护一份状态逻辑产生防护漂移。
 // 用法契约：Allow() 作门控检查（允许返回 true），随后**恰好**配对一次
 // RecordSuccess() 或 RecordFailure()（RunnableWithCircuitBreaker.Invoke/Stream 即如此）。
+//
+// toolkit v0.3.0 的 circuit 由 Allow/Success/Failure 改为 Permit 模型
+// （Acquire → Complete，每次放行必须提交结果）。本包装将最后一次 Allow
+// 获取的 Permit 暂存，供配对的 Record 提交结果；未配对直接调用 Record* 或
+// 在未 Record 的情况下重复 Allow 属于契约违约，分别按忽略 / 拒绝放行处理。
 type CircuitBreaker struct {
 	config  *CircuitBreakerConfig
 	breaker *circuit.Breaker
+
+	// permitMu 保护 permit 字段（Allow 与 Record 配对交换）
+	permitMu sync.Mutex
+	permit   *circuit.Permit
 }
 
 // NewCircuitBreaker 创建熔断器
@@ -501,9 +516,14 @@ func NewCircuitBreaker(config ...*CircuitBreakerConfig) *CircuitBreaker {
 		}))
 	}
 
+	breaker, err := circuit.New(opts...)
+	if err != nil {
+		// 仅当配置非法时出错，属于调用方配置错误，直接 panic 暴露。
+		panic(fmt.Errorf("core: create circuit breaker: %w", err))
+	}
 	return &CircuitBreaker{
 		config:  cfg,
-		breaker: circuit.New(opts...),
+		breaker: breaker,
 	}
 }
 
@@ -514,17 +534,42 @@ func (cb *CircuitBreaker) State() CircuitState {
 
 // Allow 检查是否允许执行（开路返回 false）
 func (cb *CircuitBreaker) Allow() bool {
-	return cb.breaker.Allow() == nil
+	permit, err := cb.breaker.Acquire()
+	if err != nil {
+		return false
+	}
+	cb.permitMu.Lock()
+	// 上一次 Allow 尚未配对 Record 即再次 Allow 属契约违约：归还新许可并拒绝放行。
+	if cb.permit != nil {
+		cb.permitMu.Unlock()
+		_ = permit.Complete(errors.New("circuit breaker: previous permit not completed"))
+		return false
+	}
+	cb.permit = permit
+	cb.permitMu.Unlock()
+	return true
 }
 
 // RecordSuccess 记录成功（须与一次 Allow 配对）
 func (cb *CircuitBreaker) RecordSuccess() {
-	cb.breaker.Success()
+	cb.permitMu.Lock()
+	permit := cb.permit
+	cb.permit = nil
+	cb.permitMu.Unlock()
+	if permit != nil {
+		_ = permit.Complete(nil)
+	}
 }
 
 // RecordFailure 记录失败（须与一次 Allow 配对）
 func (cb *CircuitBreaker) RecordFailure() {
-	cb.breaker.Failure()
+	cb.permitMu.Lock()
+	permit := cb.permit
+	cb.permit = nil
+	cb.permitMu.Unlock()
+	if permit != nil {
+		_ = permit.Complete(errors.New("circuit breaker: recorded failure"))
+	}
 }
 
 // RunnableWithCircuitBreaker 带熔断器的 Runnable

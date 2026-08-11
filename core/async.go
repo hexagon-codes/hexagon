@@ -361,10 +361,11 @@ func Delay[T any](duration time.Duration, fn func() (T, error)) *Future[T] {
 //     DelayType(FixedDelay) 覆盖为固定延迟；同时将 MaxDelay 设为 delay，
 //     避免默认 30s 上限在 delay>30s 时反向裁剪固定延迟（FixedDelay 返回值
 //     会被 MaxDelay 封顶）。FixedDelay 路径不叠加抖动，与手写循环一致。
-//   - 重试条件：手写循环对任意非 nil 错误重试，等同 toolkit 默认 RetryIf。
-//   - 最终错误可解包：手写循环重试耗尽直接返回原始 lastErr。toolkit 默认用
-//     %v 嵌入会丢失错误链，故开启 WithUnwrapFinalError() 使最终错误多 %w
-//     包装，errors.Is(err, 原始错误) 仍成立（错误文案会带 ErrMaxAttemptsReached 前缀）。
+//   - 重试条件：手写循环对任意非 nil 错误重试，等同 toolkit 默认 If。
+//   - 最终错误可解包：toolkit v0.3.0 的 Do 重试耗尽时固定返回
+//     fmt.Errorf("%w: %w", ErrMaxAttemptsReached, lastErr)，errors.Is(err, 原始错误)
+//     成立（错误文案带 ErrMaxAttemptsReached 前缀；旧版 WithUnwrapFinalError 为
+//     默认行为，v0.3.0 已内建，不再需要该选项）。
 //
 // 说明：本函数签名不含 context.Context，仍使用 retry.Do（非 ctx 版），
 // 延迟期间不感知取消——这是签名约束，ctx 感知属另一议题，本次下沉不引入。
@@ -382,7 +383,6 @@ func Retry[T any](maxRetries int, delay time.Duration, fn func() (T, error)) *Fu
 			retry.Delay(delay),
 			retry.MaxDelay(delay),
 			retry.DelayType(retry.FixedDelay),
-			retry.WithUnwrapFinalError(),
 		)
 		if err != nil {
 			var zero T

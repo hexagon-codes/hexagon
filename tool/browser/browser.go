@@ -1,14 +1,21 @@
 // Package browser 提供浏览器自动化工具
 //
 // 本包实现了浏览器自动化功能：
+//
 //   - 网页抓取：获取网页内容
+//
 //   - 截图：获取网页截图
+//
 //   - 元素交互：点击、输入、滚动
+//
 //   - JavaScript 执行：运行自定义脚本
+//
 //   - 多标签页管理
 //
 //   - Playwright: 浏览器自动化
+//
 //   - Puppeteer: Chrome DevTools Protocol
+//
 //   - Selenium: WebDriver API
 //
 // 使用示例：
@@ -200,7 +207,7 @@ func (b *Browser) GetContent(ctx context.Context, pageURL string) (*PageContent,
 	startTime := time.Now()
 
 	// SSRF 防护：验证目标 URL 安全性
-	if err := validateBrowserURL(pageURL); err != nil {
+	if err := validateBrowserURL(ctx, pageURL); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrNavigationFailed, err)
 	}
 
@@ -904,7 +911,7 @@ func (jt *JSONAPITool) Validate(args map[string]any) error {
 }
 
 // validateBrowserURL 验证浏览器请求的 URL 安全性，防止 SSRF 攻击
-func validateBrowserURL(rawURL string) error {
+func validateBrowserURL(ctx context.Context, rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("无效的 URL: %w", err)
@@ -916,5 +923,5 @@ func validateBrowserURL(rawURL string) error {
 		return fmt.Errorf("不允许的协议: %s（仅支持 http/https）", u.Scheme)
 	}
 	// SSRF 核心校验复用 toolkit/net/ssrf（含 DNS 解析逐 IP 私网检查，较旧实现增强了抗 DNS rebinding）。
-	return ssrf.ValidateURL(rawURL)
+	return ssrf.ValidateURL(ctx, rawURL)
 }

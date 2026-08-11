@@ -4,9 +4,12 @@
 //
 // 使用示例:
 //
-//	exporter := prometheus.NewExporter(
+//	exporter, err := prometheus.NewExporter(
 //	    prometheus.WithNamespace("myapp"),
 //	)
+//	if err != nil {
+//	    // 处理错误
+//	}
 //	http.Handle("/metrics", exporter.Handler())
 package prometheus
 
@@ -25,20 +28,17 @@ type (
 	// Registry 指标注册表
 	Registry = toolkitProm.Registry
 
-	// Collector 指标收集器
-	Collector = toolkitProm.Collector
-
 	// PrometheusCounter Prometheus Counter
-	PrometheusCounter = toolkitProm.PrometheusCounter
+	PrometheusCounter = toolkitProm.Counter
 
 	// PrometheusGauge Prometheus Gauge
-	PrometheusGauge = toolkitProm.PrometheusGauge
+	PrometheusGauge = toolkitProm.Gauge
 
 	// PrometheusHistogram Prometheus Histogram
-	PrometheusHistogram = toolkitProm.PrometheusHistogram
+	PrometheusHistogram = toolkitProm.Histogram
 
 	// PrometheusSummary Prometheus Summary
-	PrometheusSummary = toolkitProm.PrometheusSummary
+	PrometheusSummary = toolkitProm.Summary
 
 	// MetricsAdapter 指标适配器
 	MetricsAdapter = toolkitProm.MetricsAdapter
@@ -58,18 +58,12 @@ var (
 	// NewRegistry 创建注册表
 	NewRegistry = toolkitProm.NewRegistry
 
-	// NewCollector 创建收集器
-	NewCollector = toolkitProm.NewCollector
-
 	// NewMetricsAdapter 创建指标适配器
 	NewMetricsAdapter = toolkitProm.NewMetricsAdapter
-)
 
-// 重新导出变量
-var (
-	// DefaultBuckets 默认桶
+	// DefaultBuckets 返回默认桶
 	DefaultBuckets = toolkitProm.DefaultBuckets
 
-	// DefaultQuantiles 默认分位数
+	// DefaultQuantiles 返回默认分位数
 	DefaultQuantiles = toolkitProm.DefaultQuantiles
 )

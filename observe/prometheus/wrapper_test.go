@@ -13,7 +13,6 @@ func TestPrometheusTypes(t *testing.T) {
 		var _ prometheus.Exporter
 		var _ prometheus.ExporterOption
 		var _ prometheus.Registry
-		var _ prometheus.Collector
 		var _ prometheus.PrometheusCounter
 		var _ prometheus.PrometheusGauge
 		var _ prometheus.PrometheusHistogram
@@ -22,38 +21,16 @@ func TestPrometheusTypes(t *testing.T) {
 	})
 }
 
-// TestPrometheusFunctions 测试导出的函数
-func TestPrometheusFunctions(t *testing.T) {
-	t.Run("Functions", func(t *testing.T) {
-		if prometheus.NewExporter == nil {
-			t.Error("NewExporter should not be nil")
-		}
-		if prometheus.WithNamespace == nil {
-			t.Error("WithNamespace should not be nil")
-		}
-		if prometheus.WithSubsystem == nil {
-			t.Error("WithSubsystem should not be nil")
-		}
-		if prometheus.NewRegistry == nil {
-			t.Error("NewRegistry should not be nil")
-		}
-		if prometheus.NewCollector == nil {
-			t.Error("NewCollector should not be nil")
-		}
-		if prometheus.NewMetricsAdapter == nil {
-			t.Error("NewMetricsAdapter should not be nil")
-		}
-	})
-}
-
-// TestPrometheusVariables 测试导出的变量
+// TestPrometheusVariables 测试导出的默认配置
+// 注：DefaultBuckets/DefaultQuantiles 在 toolkit v0.3.0 中由变量改为函数，
+// 相应断言改为对函数值及其返回值做校验。
 func TestPrometheusVariables(t *testing.T) {
 	t.Run("DefaultBuckets", func(t *testing.T) {
 		if prometheus.DefaultBuckets == nil {
 			t.Fatal("DefaultBuckets should not be nil")
 		}
-		if len(prometheus.DefaultBuckets) == 0 {
-			t.Error("DefaultBuckets should not be empty")
+		if len(prometheus.DefaultBuckets()) == 0 {
+			t.Error("DefaultBuckets() should not be empty")
 		}
 	})
 
@@ -61,16 +38,20 @@ func TestPrometheusVariables(t *testing.T) {
 		if prometheus.DefaultQuantiles == nil {
 			t.Fatal("DefaultQuantiles should not be nil")
 		}
-		if len(prometheus.DefaultQuantiles) == 0 {
-			t.Error("DefaultQuantiles should not be empty")
+		if len(prometheus.DefaultQuantiles()) == 0 {
+			t.Error("DefaultQuantiles() should not be empty")
 		}
 	})
 }
 
 // TestNewExporter 测试创建导出器
+// 注：toolkit v0.3.0 的 NewExporter 返回 (exporter, error)，配置非法时返回错误。
 func TestNewExporter(t *testing.T) {
 	t.Run("DefaultExporter", func(t *testing.T) {
-		exporter := prometheus.NewExporter()
+		exporter, err := prometheus.NewExporter()
+		if err != nil {
+			t.Fatal("NewExporter() returned error:", err)
+		}
 		if exporter == nil {
 			t.Fatal("NewExporter() returned nil")
 		}
@@ -83,19 +64,25 @@ func TestNewExporter(t *testing.T) {
 	})
 
 	t.Run("WithNamespace", func(t *testing.T) {
-		exporter := prometheus.NewExporter(
+		exporter, err := prometheus.NewExporter(
 			prometheus.WithNamespace("test"),
 		)
+		if err != nil {
+			t.Fatal("NewExporter() with namespace returned error:", err)
+		}
 		if exporter == nil {
 			t.Fatal("NewExporter() with namespace returned nil")
 		}
 	})
 
 	t.Run("WithSubsystem", func(t *testing.T) {
-		exporter := prometheus.NewExporter(
+		exporter, err := prometheus.NewExporter(
 			prometheus.WithNamespace("test"),
 			prometheus.WithSubsystem("api"),
 		)
+		if err != nil {
+			t.Fatal("NewExporter() with subsystem returned error:", err)
+		}
 		if exporter == nil {
 			t.Fatal("NewExporter() with subsystem returned nil")
 		}
@@ -134,7 +121,7 @@ func BenchmarkPrometheusExporter(b *testing.B) {
 	b.Run("NewExporter", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_ = prometheus.NewExporter()
+			_, _ = prometheus.NewExporter()
 		}
 	})
 

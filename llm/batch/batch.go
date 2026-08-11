@@ -236,7 +236,8 @@ func NewBatcher(provider Provider, config ...*Config) *Batcher {
 	// 限流场景下令牌桶容量与速率均取 RateLimit（每秒请求数）。
 	var limiter *rate.TokenBucket
 	if cfg.RateLimit > 0 {
-		limiter = rate.NewTokenBucket(cfg.RateLimit, float64(cfg.RateLimit))
+		// RateLimit 已保证 > 0，参数合法，直接使用 Must 版本（配置无效时 panic）。
+		limiter = rate.MustNewTokenBucket(cfg.RateLimit, float64(cfg.RateLimit))
 	}
 
 	return &Batcher{
@@ -497,7 +498,7 @@ func (b *Batcher) processRequest(pending *pendingRequest) {
 		retry.Attempts(b.config.MaxRetries+1),
 		retry.Delay(b.config.RetryDelay),
 		retry.DelayType(retry.LinearBackoff),
-		retry.RetryIf(func(err error) bool { return isRetryableError(err) }),
+		retry.If(func(err error) bool { return isRetryableError(err) }),
 	)
 	// 归一化错误：优先保留 provider 返回的原始失败原因，
 	// 仅在确实拿不到任何原始错误时才回退到 ErrBatchFailed 哨兵。

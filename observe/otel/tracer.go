@@ -36,7 +36,7 @@ import (
 // 将 Hexagon 的追踪抽象映射到 OTel 标准
 type OTelHexagonTracer struct {
 	config     *TracerConfig
-	otelTracer *OTelTracer
+	otelTracer *Tracer
 	spans      sync.Map   // traceID -> []*OTelHexagonSpan
 	spansMu    sync.Mutex // 保护对 spans 中切片值的「读-改-写」追加操作
 	closed     int32
@@ -117,17 +117,16 @@ func NewOTelHexagonTracer(opts ...TracerOption) *OTelHexagonTracer {
 	}
 
 	// 创建底层 OTel 追踪器
-	otelOpts := []OTelOption{
+	// 注：toolkit v0.3.0 移除了 WithEndpoint/WithBatchConfig 选项，端点导出需
+	// 通过 NewOTLPExporter + SetExporter 显式挂载；Endpoint 配置字段保留兼容。
+	otelOpts := []Option{
 		WithServiceName(config.ServiceName),
 		WithServiceVersion(config.ServiceVersion),
 		WithEnvironment(config.Environment),
 		WithSamplingRate(config.SamplingRate),
 	}
-	if config.Endpoint != "" {
-		otelOpts = append(otelOpts, WithEndpoint(config.Endpoint))
-	}
 
-	otelTracer := NewOTelTracer(otelOpts...)
+	otelTracer := NewTracer(otelOpts...)
 
 	return &OTelHexagonTracer{
 		config:     config,

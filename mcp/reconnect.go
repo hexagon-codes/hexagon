@@ -81,12 +81,18 @@ func (s *MCPToolSet) reconnectWithBackoff(ctx context.Context, cfg *ReconnectCon
 	if multiplier < 1 {
 		multiplier = 2.0
 	}
+	// toolkit v0.3.0 的 retry 校验 MaxDelay 必须为正，零值配置须一并兜底，
+	// 否则 DoWithContext 直接返回 invalid retry config 而非执行首次尝试。
+	maxDelay := cfg.MaxDelay
+	if maxDelay <= 0 {
+		maxDelay = 30 * time.Second
+	}
 	return retry.DoWithContext(ctx, func() error {
 		return s.client.Initialize(ctx)
 	},
 		retry.Attempts(attempts),
 		retry.Delay(delay),
-		retry.MaxDelay(cfg.MaxDelay),
+		retry.MaxDelay(maxDelay),
 		retry.Multiplier(multiplier),
 	)
 }

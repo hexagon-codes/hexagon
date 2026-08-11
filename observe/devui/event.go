@@ -23,6 +23,7 @@
 package devui
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -133,16 +134,25 @@ func (e *Event) Clone() *Event {
 
 // eventPool 事件对象池
 // 使用 toolkit 的泛型对象池减少 GC 压力
-var eventPool = poolx.NewObjectPool(
-	func() *Event {
-		return &Event{
-			Data: make(map[string]any, 8), // 预分配常用容量
-		}
-	},
-	func(e **Event) {
-		(*e).Reset()
-	},
-)
+var eventPool = newEventPool()
+
+// newEventPool 构造事件对象池；factory 为常量构造，出错属编程错误，直接 panic 暴露。
+func newEventPool() *poolx.ObjectPool[*Event] {
+	pool, err := poolx.NewObjectPool(
+		func() *Event {
+			return &Event{
+				Data: make(map[string]any, 8), // 预分配常用容量
+			}
+		},
+		func(e **Event) {
+			(*e).Reset()
+		},
+	)
+	if err != nil {
+		panic(fmt.Errorf("devui: create event pool: %w", err))
+	}
+	return pool
+}
 
 // AcquireEvent 从对象池获取事件对象
 func AcquireEvent() *Event {

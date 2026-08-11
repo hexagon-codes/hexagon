@@ -58,14 +58,8 @@ func TestOTelFunctions(t *testing.T) {
 		if otel.WithEnvironment == nil {
 			t.Error("WithEnvironment should not be nil")
 		}
-		if otel.WithEndpoint == nil {
-			t.Error("WithEndpoint should not be nil")
-		}
 		if otel.WithSamplingRate == nil {
 			t.Error("WithSamplingRate should not be nil")
-		}
-		if otel.WithBatchConfig == nil {
-			t.Error("WithBatchConfig should not be nil")
 		}
 	})
 
@@ -244,24 +238,10 @@ func TestOTelOptions(t *testing.T) {
 		}
 	})
 
-	t.Run("WithEndpoint", func(t *testing.T) {
-		opt := otel.WithEndpoint("localhost:4317")
-		if opt == nil {
-			t.Error("WithEndpoint should return a valid option")
-		}
-	})
-
 	t.Run("WithSamplingRate", func(t *testing.T) {
 		opt := otel.WithSamplingRate(0.5)
 		if opt == nil {
 			t.Error("WithSamplingRate should return a valid option")
-		}
-	})
-
-	t.Run("WithBatchConfig", func(t *testing.T) {
-		opt := otel.WithBatchConfig(100, 1000)
-		if opt == nil {
-			t.Error("WithBatchConfig should return a valid option")
 		}
 	})
 }

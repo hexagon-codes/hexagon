@@ -509,7 +509,7 @@ func TestAPIKeyValidator(t *testing.T) {
 
 func TestRateLimiter(t *testing.T) {
 	// 使用 toolkit 的 TokenBucket: 容量为 2，速率为 2/0.1s = 20/s
-	limiter := rate.NewTokenBucket(2, 20)
+	limiter := rate.MustNewTokenBucket(2, 20)
 
 	// 前两次应该允许
 	if !limiter.Allow() {

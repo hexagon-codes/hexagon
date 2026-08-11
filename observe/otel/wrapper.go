@@ -4,11 +4,16 @@
 //
 // 使用示例:
 //
-//	tracer := otel.NewOTelTracer(
+//	tracer := otel.NewTracer(
 //	    otel.WithServiceName("my-service"),
-//	    otel.WithEndpoint("localhost:4317"),
 //	)
 //	defer tracer.Shutdown(context.Background())
+//
+//	exporter, err := otel.NewOTLPExporter("https://collector:4318")
+//	if err != nil {
+//	    // 处理错误
+//	}
+//	_ = tracer.SetExporter(context.Background(), exporter)
 package otel
 
 import (
@@ -17,17 +22,29 @@ import (
 
 // 重新导出类型
 type (
-	// OTelTracer OpenTelemetry 追踪器
-	OTelTracer = toolkitOtel.OTelTracer
+	// Tracer OpenTelemetry 追踪器（toolkit v0.3.0 新名称）
+	Tracer = toolkitOtel.Tracer
 
-	// OTelConfig OpenTelemetry 配置
-	OTelConfig = toolkitOtel.OTelConfig
+	// Config OpenTelemetry 配置（toolkit v0.3.0 新名称）
+	Config = toolkitOtel.Config
 
-	// OTelOption 配置选项
-	OTelOption = toolkitOtel.OTelOption
+	// Option 配置选项（toolkit v0.3.0 新名称）
+	Option = toolkitOtel.Option
 
-	// OTelSpan OpenTelemetry Span
-	OTelSpan = toolkitOtel.OTelSpan
+	// Span OpenTelemetry Span（toolkit v0.3.0 新名称）
+	Span = toolkitOtel.Span
+
+	// OTelTracer OpenTelemetry 追踪器（旧名兼容）
+	OTelTracer = toolkitOtel.Tracer
+
+	// OTelConfig OpenTelemetry 配置（旧名兼容）
+	OTelConfig = toolkitOtel.Config
+
+	// OTelOption 配置选项（旧名兼容）
+	OTelOption = toolkitOtel.Option
+
+	// OTelSpan OpenTelemetry Span（旧名兼容）
+	OTelSpan = toolkitOtel.Span
 
 	// SpanData 导出数据
 	SpanData = toolkitOtel.SpanData
@@ -92,11 +109,17 @@ type (
 
 // 重新导出函数
 var (
-	// NewOTelTracer 创建 OpenTelemetry 追踪器
-	NewOTelTracer = toolkitOtel.NewOTelTracer
+	// NewTracer 创建 OpenTelemetry 追踪器（toolkit v0.3.0 新名称）
+	NewTracer = toolkitOtel.NewTracer
 
-	// DefaultOTelConfig 返回默认配置
-	DefaultOTelConfig = toolkitOtel.DefaultOTelConfig
+	// DefaultConfig 返回默认配置（toolkit v0.3.0 新名称）
+	DefaultConfig = toolkitOtel.DefaultConfig
+
+	// NewOTelTracer 创建 OpenTelemetry 追踪器（旧名兼容）
+	NewOTelTracer = toolkitOtel.NewTracer
+
+	// DefaultOTelConfig 返回默认配置（旧名兼容）
+	DefaultOTelConfig = toolkitOtel.DefaultConfig
 
 	// WithServiceName 设置服务名称
 	WithServiceName = toolkitOtel.WithServiceName
@@ -107,14 +130,8 @@ var (
 	// WithEnvironment 设置环境
 	WithEnvironment = toolkitOtel.WithEnvironment
 
-	// WithEndpoint 设置端点
-	WithEndpoint = toolkitOtel.WithEndpoint
-
 	// WithSamplingRate 设置采样率
 	WithSamplingRate = toolkitOtel.WithSamplingRate
-
-	// WithBatchConfig 设置批量配置
-	WithBatchConfig = toolkitOtel.WithBatchConfig
 
 	// NewConsoleExporter 创建控制台导出器
 	NewConsoleExporter = toolkitOtel.NewConsoleExporter
