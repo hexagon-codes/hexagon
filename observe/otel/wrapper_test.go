@@ -2,20 +2,36 @@ package otel_test
 
 import (
 	"context"
+	"errors"
+	"io"
 	"testing"
+	"time"
 
 	"github.com/hexagon-codes/hexagon/observe/otel"
 )
+
+// TestErrTracerShutdownReexport 锁定 Hexagon 对 toolkit 关闭错误的直接重导出。
+func TestErrTracerShutdownReexport(t *testing.T) {
+	tracer := otel.NewTracer()
+	if err := tracer.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+
+	err := tracer.SetExporter(context.Background(), otel.NewConsoleExporter(io.Discard))
+	if !errors.Is(err, otel.ErrTracerShutdown) {
+		t.Fatalf("SetExporter() error = %v, want ErrTracerShutdown", err)
+	}
+}
 
 // TestOTelTypes 测试导出的类型
 func TestOTelTypes(t *testing.T) {
 	// 验证所有导出的类型都不为 nil
 	t.Run("Types", func(t *testing.T) {
 		// 这里主要是编译时检查，确保类型正确导出
-		var _ otel.OTelTracer
-		var _ otel.OTelConfig
-		var _ otel.OTelOption
-		var _ otel.OTelSpan
+		var _ otel.Tracer
+		var _ otel.Config
+		var _ otel.Option
+		var _ otel.Span
 		var _ otel.SpanData
 		var _ otel.SpanEvent
 		var _ otel.Exporter
@@ -43,11 +59,11 @@ func TestOTelTypes(t *testing.T) {
 func TestOTelFunctions(t *testing.T) {
 	t.Run("Functions", func(t *testing.T) {
 		// 验证函数不为 nil
-		if otel.NewOTelTracer == nil {
-			t.Error("NewOTelTracer should not be nil")
+		if otel.NewTracer == nil {
+			t.Error("NewTracer should not be nil")
 		}
-		if otel.DefaultOTelConfig == nil {
-			t.Error("DefaultOTelConfig should not be nil")
+		if otel.DefaultConfig == nil {
+			t.Error("DefaultConfig should not be nil")
 		}
 		if otel.WithServiceName == nil {
 			t.Error("WithServiceName should not be nil")
@@ -58,14 +74,8 @@ func TestOTelFunctions(t *testing.T) {
 		if otel.WithEnvironment == nil {
 			t.Error("WithEnvironment should not be nil")
 		}
-		if otel.WithEndpoint == nil {
-			t.Error("WithEndpoint should not be nil")
-		}
 		if otel.WithSamplingRate == nil {
 			t.Error("WithSamplingRate should not be nil")
-		}
-		if otel.WithBatchConfig == nil {
-			t.Error("WithBatchConfig should not be nil")
 		}
 	})
 
@@ -116,9 +126,9 @@ func TestOTelFunctions(t *testing.T) {
 }
 
 // TestDefaultOTelConfig 测试默认配置
-func TestDefaultOTelConfig(t *testing.T) {
+func TestDefaultConfig(t *testing.T) {
 	t.Run("DefaultConfig", func(t *testing.T) {
-		config := otel.DefaultOTelConfig()
+		config := otel.DefaultConfig()
 
 		// 验证默认配置有合理的值
 		if config.ServiceName == "" {
@@ -128,14 +138,14 @@ func TestDefaultOTelConfig(t *testing.T) {
 }
 
 // TestOTelTracerCreation 测试追踪器创建
-func TestOTelTracerCreation(t *testing.T) {
+func TestTracerCreation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping OTel integration test in short mode")
 	}
 
-	t.Run("NewOTelTracer", func(t *testing.T) {
+	t.Run("NewTracer", func(t *testing.T) {
 		// 测试创建追踪器（可能需要实际的 OTEL 后端）
-		tracer := otel.NewOTelTracer(
+		tracer := otel.NewTracer(
 			otel.WithServiceName("test-service"),
 			otel.WithServiceVersion("1.0.0"),
 			otel.WithEnvironment("test"),
@@ -244,13 +254,6 @@ func TestOTelOptions(t *testing.T) {
 		}
 	})
 
-	t.Run("WithEndpoint", func(t *testing.T) {
-		opt := otel.WithEndpoint("localhost:4317")
-		if opt == nil {
-			t.Error("WithEndpoint should return a valid option")
-		}
-	})
-
 	t.Run("WithSamplingRate", func(t *testing.T) {
 		opt := otel.WithSamplingRate(0.5)
 		if opt == nil {
@@ -258,12 +261,6 @@ func TestOTelOptions(t *testing.T) {
 		}
 	})
 
-	t.Run("WithBatchConfig", func(t *testing.T) {
-		opt := otel.WithBatchConfig(100, 1000)
-		if opt == nil {
-			t.Error("WithBatchConfig should return a valid option")
-		}
-	})
 }
 
 // TestOTLPExporterOptions 测试 OTLP 导出器选项
@@ -282,6 +279,20 @@ func TestOTLPExporterOptions(t *testing.T) {
 		opt := otel.WithOTLPBatchSize(512)
 		if opt == nil {
 			t.Error("WithOTLPBatchSize should return a valid option")
+		}
+	})
+
+	t.Run("WithOTLPBatchTimeout", func(t *testing.T) {
+		opt := otel.WithOTLPBatchTimeout(time.Second)
+		if opt == nil {
+			t.Error("WithOTLPBatchTimeout should return a valid option")
+		}
+	})
+
+	t.Run("WithOTLPMaxQueueSize", func(t *testing.T) {
+		opt := otel.WithOTLPMaxQueueSize(2048)
+		if opt == nil {
+			t.Error("WithOTLPMaxQueueSize should return a valid option")
 		}
 	})
 }
@@ -314,7 +325,7 @@ func BenchmarkOTelTracer(b *testing.B) {
 	b.Run("DefaultConfig", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_ = otel.DefaultOTelConfig()
+			_ = otel.DefaultConfig()
 		}
 	})
 }

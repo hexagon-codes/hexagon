@@ -35,7 +35,10 @@ func (p *budgetMockProvider) Stream(context.Context, llm.CompletionRequest) (*ll
 // 累计成本突破上限时在下一轮 BeforeLLM fail-closed 中断执行。
 func TestReActAgentBudgetCostDimFailClosed(t *testing.T) {
 	provider := &budgetMockProvider{}
-	ctrl := cost.NewController(cost.WithBudget(100.0)) // 默认定价表 default=0.001/0.002 per 1k
+	ctrl, err := cost.NewController(cost.WithBudget(100.0)) // 默认定价表 default=0.001/0.002 per 1k
+	if err != nil {
+		t.Fatalf("NewController() error = %v", err)
+	}
 
 	a := NewReAct(
 		WithLLM(provider),
@@ -48,7 +51,7 @@ func TestReActAgentBudgetCostDimFailClosed(t *testing.T) {
 		}),
 	)
 
-	_, err := a.Run(context.Background(), Input{Query: "hi"})
+	_, err = a.Run(context.Background(), Input{Query: "hi"})
 	if err == nil {
 		t.Fatal("预期成本维 fail-closed 报错，实际 nil")
 	}
@@ -95,7 +98,10 @@ func TestReActAgentBudgetTokenDimFailClosed(t *testing.T) {
 // 预算 0.00005：第 1 次 run 累计 0.00003 未超；第 2 次 run 累计 0.00006 > 0.00005 → fail-closed。
 // 关键：单次调用成本 0.00003 本身不超预算，只有跨 run 共享累加器才会在第 2 次触发。
 func TestCostControlCumulativeBudgetAcrossRuns(t *testing.T) {
-	ctrl := cost.NewController(cost.WithBudget(0.00005))
+	ctrl, err := cost.NewController(cost.WithBudget(0.00005))
+	if err != nil {
+		t.Fatalf("NewController() error = %v", err)
+	}
 	cc := middleware.CostControl{Record: ctrl.RecordUsageFunc()}
 	provider := &contentMockProvider{}
 	ctx := context.Background()
@@ -106,7 +112,7 @@ func TestCostControlCumulativeBudgetAcrossRuns(t *testing.T) {
 		t.Fatalf("第 1 次 run 不应超预算: %v", err)
 	}
 	// 第 2 次 run：累计 0.00006 > 0.00005 → 经共享累加器 fail-closed。
-	_, err := runCompletionWithRuntime(ctx, provider, "run-2", msgs, nil, cc)
+	_, err = runCompletionWithRuntime(ctx, provider, "run-2", msgs, nil, cc)
 	if err == nil {
 		t.Fatal("第 2 次 run 累计应超预算并 fail-closed，实际 nil")
 	}

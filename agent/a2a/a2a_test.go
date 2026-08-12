@@ -3,6 +3,7 @@ package a2a
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -509,7 +510,7 @@ func TestAPIKeyValidator(t *testing.T) {
 
 func TestRateLimiter(t *testing.T) {
 	// 使用 toolkit 的 TokenBucket: 容量为 2，速率为 2/0.1s = 20/s
-	limiter := rate.NewTokenBucket(2, 20)
+	limiter := rate.MustNewTokenBucket(2, 20)
 
 	// 前两次应该允许
 	if !limiter.Allow() {
@@ -530,6 +531,95 @@ func TestRateLimiter(t *testing.T) {
 	// 现在应该允许
 	if !limiter.Allow() {
 		t.Error("RateLimiter.Allow() should return true after window reset")
+	}
+}
+
+func TestNewPushManagerRejectsInvalidRateLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		limit   int
+		window  time.Duration
+		wantErr error
+	}{
+		{name: "zero limit", limit: 0, window: time.Second, wantErr: rate.ErrInvalidCapacity},
+		{name: "negative limit", limit: -1, window: time.Second, wantErr: rate.ErrInvalidCapacity},
+		{name: "zero window", limit: 1, window: 0, wantErr: rate.ErrInvalidWindow},
+		{name: "negative window", limit: 1, window: -time.Second, wantErr: rate.ErrInvalidWindow},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.Errorf("NewPushManager panicked for invalid rate limit: %v", recovered)
+				}
+			}()
+
+			manager, err := NewPushManager(&fakePushService{}, WithRateLimit(tt.limit, tt.window))
+			if manager != nil {
+				t.Errorf("NewPushManager() manager = %v, want nil", manager)
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("NewPushManager() error = %v, want %v", err, tt.wantErr)
+			}
+			if !errors.Is(err, ErrInvalidPushManagerConfig) {
+				t.Errorf("NewPushManager() error = %v, want ErrInvalidPushManagerConfig", err)
+			}
+		})
+	}
+}
+
+type valuePushService struct{}
+
+func (valuePushService) Push(context.Context, *PushNotificationConfig, *PushNotification) error {
+	return nil
+}
+
+func expectPushManagerConfigError(t *testing.T, service PushService, opts ...PushManagerOption) {
+	t.Helper()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Errorf("NewPushManager() panicked: %v", recovered)
+		}
+	}()
+
+	manager, err := NewPushManager(service, opts...)
+	if manager != nil {
+		t.Errorf("NewPushManager() manager = %v, want nil", manager)
+	}
+	if !errors.Is(err, ErrInvalidPushManagerConfig) {
+		t.Errorf("NewPushManager() error = %v, want ErrInvalidPushManagerConfig", err)
+	}
+}
+
+func TestNewPushManagerRejectsNilDependencies(t *testing.T) {
+	t.Run("nil service", func(t *testing.T) {
+		expectPushManagerConfigError(t, nil)
+	})
+
+	t.Run("typed nil service", func(t *testing.T) {
+		var service *fakePushService
+		expectPushManagerConfigError(t, service)
+	})
+
+	t.Run("nil option", func(t *testing.T) {
+		expectPushManagerConfigError(t, valuePushService{}, nil)
+	})
+}
+
+func TestNewPushManagerAcceptsNonNilablePushService(t *testing.T) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Errorf("NewPushManager() panicked for non-nilable service: %v", recovered)
+		}
+	}()
+
+	manager, err := NewPushManager(valuePushService{})
+	if err != nil {
+		t.Fatalf("NewPushManager() error = %v", err)
+	}
+	if manager == nil {
+		t.Fatal("NewPushManager() manager = nil")
 	}
 }
 

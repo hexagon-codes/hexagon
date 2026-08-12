@@ -359,6 +359,7 @@ func TestHashText(t *testing.T) {
 	hash1 := hashText("hello")
 	hash2 := hashText("hello")
 	hash3 := hashText("world")
+	const wantHelloSHA256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 
 	if hash1 != hash2 {
 		t.Error("same text should produce same hash")
@@ -370,5 +371,17 @@ func TestHashText(t *testing.T) {
 
 	if len(hash1) != 64 { // toolkit SHA-256 生成 64 位小写十六进制字符串。
 		t.Errorf("expected hash length 64, got %d", len(hash1))
+	}
+
+	if hash1 != wantHelloSHA256 {
+		t.Errorf("hashText(hello) = %q, want %q", hash1, wantHelloSHA256)
+	}
+}
+
+func TestHashTexts(t *testing.T) {
+	const want = "15e178b71fae8849ee562c9cc0d7ea322fba6cd495411329d47234479167cc8b"
+
+	if got := hashTexts([]string{"hello", "world"}); got != want {
+		t.Errorf("hashTexts() = %q, want %q", got, want)
 	}
 }

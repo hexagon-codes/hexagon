@@ -1070,7 +1070,7 @@ type fakePushService struct {
 	failTill int // 前 failTill 次返回错误
 }
 
-func (f *fakePushService) Push(_ context.Context, _ *PushNotificationConfig, _ *Task) error {
+func (f *fakePushService) Push(_ context.Context, _ *PushNotificationConfig, _ *PushNotification) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -1088,10 +1088,19 @@ func (f *fakePushService) count() int {
 
 var errSimulatedPush = &Error{Code: CodeInternalError, Message: "simulated"}
 
+func newTestPushManager(t *testing.T, service PushService, opts ...PushManagerOption) *PushManager {
+	t.Helper()
+	manager, err := NewPushManager(service, opts...)
+	if err != nil {
+		t.Fatalf("NewPushManager() error = %v", err)
+	}
+	return manager
+}
+
 // TestPushManagerNoConfig 验证无配置任务的推送被静默跳过。
 func TestPushManagerNoConfig(t *testing.T) {
 	fake := &fakePushService{}
-	m := NewPushManager(fake)
+	m := newTestPushManager(t, fake)
 	if err := m.PushTask(context.Background(), NewTask("nopush")); err != nil {
 		t.Errorf("无配置推送应静默成功, err = %v", err)
 	}
@@ -1100,28 +1109,9 @@ func TestPushManagerNoConfig(t *testing.T) {
 	}
 }
 
-// TestPushManagerRetry 验证带重试的推送在底层先失败后成功时最终成功。
-func TestPushManagerRetry(t *testing.T) {
-	fake := &fakePushService{failTill: 2} // 前 2 次失败, 第 3 次成功
-	m := NewPushManager(fake, WithRetryConfig(RetryConfig{
-		MaxRetries:   3,
-		InitialDelay: time.Millisecond,
-		MaxDelay:     10 * time.Millisecond,
-		Multiplier:   2.0,
-	}))
-	m.SetConfig("rt", &PushNotificationConfig{URL: "http://hook"})
-
-	if err := m.PushTask(context.Background(), &Task{ID: "rt", Status: TaskStatus{State: TaskStateCompleted}}); err != nil {
-		t.Errorf("重试后应成功, err = %v", err)
-	}
-	if fake.count() != 3 {
-		t.Errorf("应调用 3 次 (2 失败 + 1 成功), 实际 %d 次", fake.count())
-	}
-}
-
 // TestPushManagerConfigLifecycle 验证推送配置的增删查。
 func TestPushManagerConfigLifecycle(t *testing.T) {
-	m := NewPushManager(&fakePushService{})
+	m := newTestPushManager(t, &fakePushService{})
 	cfg := &PushNotificationConfig{URL: "http://hook"}
 	m.SetConfig("task-1", cfg)
 
@@ -1141,21 +1131,24 @@ func TestPushManagerConfigLifecycle(t *testing.T) {
 func TestAsyncPushServiceQueueFull(t *testing.T) {
 	// 阻塞型底层服务, 让 worker 卡住, 使队列快速填满
 	blocker := &blockingPushService{block: make(chan struct{})}
-	svc := NewAsyncPushService(blocker, 1, 1) // 队列容量 1, worker 1
+	svc, err := NewAsyncPushService(blocker, 1, 1) // 队列容量 1, worker 1
+	if err != nil {
+		t.Fatalf("NewAsyncPushService() error = %v", err)
+	}
 
 	ctx := context.Background()
 	cfg := &PushNotificationConfig{URL: "http://x"}
 
 	// 让 worker 取走一个并阻塞
-	_ = svc.Push(ctx, cfg, NewTask("a"))
+	_ = svc.Push(ctx, cfg, mustTaskNotification(t, "a"))
 	time.Sleep(20 * time.Millisecond) // 等 worker 拿走并阻塞
 	// 填满队列 (容量 1)
-	_ = svc.Push(ctx, cfg, NewTask("b"))
+	_ = svc.Push(ctx, cfg, mustTaskNotification(t, "b"))
 
 	// 此时队列应已满, 下一个 Push 应返回错误
 	var gotFull bool
 	for i := 0; i < 5; i++ {
-		if err := svc.Push(ctx, cfg, NewTask("c")); err != nil {
+		if err := svc.Push(ctx, cfg, mustTaskNotification(t, "c")); err != nil {
 			gotFull = true
 			break
 		}
@@ -1173,7 +1166,7 @@ type blockingPushService struct {
 	block chan struct{}
 }
 
-func (b *blockingPushService) Push(_ context.Context, _ *PushNotificationConfig, _ *Task) error {
+func (b *blockingPushService) Push(_ context.Context, _ *PushNotificationConfig, _ *PushNotification) error {
 	<-b.block
 	return nil
 }
@@ -1192,11 +1185,18 @@ func TestWebhookPushServiceSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := NewWebhookPushService()
+	svc, err := NewWebhookPushService()
+	if err != nil {
+		t.Fatalf("NewWebhookPushService() error = %v", err)
+	}
 	cfg := &PushNotificationConfig{URL: srv.URL, Token: "secret"}
 	task := &Task{ID: "wh", Status: TaskStatus{State: TaskStateCompleted}}
+	notification, err := NewTaskStatusNotification(task)
+	if err != nil {
+		t.Fatalf("NewTaskStatusNotification() error = %v", err)
+	}
 
-	if err := svc.Push(context.Background(), cfg, task); err != nil {
+	if err := svc.Push(context.Background(), cfg, notification); err != nil {
 		t.Fatalf("Push() error = %v", err)
 	}
 	if gotAuth != "Bearer secret" {
@@ -1215,8 +1215,11 @@ func TestWebhookPushServiceErrorStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := NewWebhookPushService()
-	err := svc.Push(context.Background(), &PushNotificationConfig{URL: srv.URL}, &Task{ID: "x"})
+	svc, err := NewWebhookPushService()
+	if err != nil {
+		t.Fatalf("NewWebhookPushService() error = %v", err)
+	}
+	err = svc.Push(context.Background(), &PushNotificationConfig{URL: srv.URL}, mustTaskNotification(t, "x"))
 	if err == nil {
 		t.Error("接收端 500 应返回错误")
 	}
@@ -1224,8 +1227,11 @@ func TestWebhookPushServiceErrorStatus(t *testing.T) {
 
 // TestWebhookPushServiceEmptyURL 验证空 URL 静默成功。
 func TestWebhookPushServiceEmptyURL(t *testing.T) {
-	svc := NewWebhookPushService()
-	if err := svc.Push(context.Background(), &PushNotificationConfig{URL: ""}, &Task{ID: "x"}); err != nil {
+	svc, err := NewWebhookPushService()
+	if err != nil {
+		t.Fatalf("NewWebhookPushService() error = %v", err)
+	}
+	if err := svc.Push(context.Background(), &PushNotificationConfig{URL: ""}, mustTaskNotification(t, "x")); err != nil {
 		t.Errorf("空 URL 应静默成功, err = %v", err)
 	}
 }

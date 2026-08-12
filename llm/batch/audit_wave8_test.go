@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/retry"
 )
 
 // ============== 测试用 Provider 桩 ==============
@@ -299,10 +301,10 @@ func TestSubmit_ContextCanceledWhileWaiting(t *testing.T) {
 // 当 provider 返回不可重试错误时，调用方应能拿到"原始错误"。
 //
 // 数据流分析：
-//   - retry.DoWithContext 在 RetryIf 返回 false 时，直接返回原始错误（未包装）。
+//   - retry.DoWithContext 在 If 返回 false 时，直接返回原始错误（未包装）。
 //   - processRequest 中：err != nil && resp == nil →
-//       err = errors.Unwrap(err)  // 对未包装的错误返回 nil！
-//       if err == nil { err = ErrBatchFailed }  // 原始错误被丢弃
+//     err = errors.Unwrap(err)  // 对未包装的错误返回 nil！
+//     if err == nil { err = ErrBatchFailed }  // 原始错误被丢弃
 //   - 结果：调用方拿到 ErrBatchFailed，真实错误（如 "invalid api key"）丢失。
 //
 // 期望：调用方应能从返回错误中识别出原始错误内容。
@@ -360,10 +362,9 @@ func TestSubmit_RetryableError_ExhaustsRetries(t *testing.T) {
 	if got := p.callCount(); got != int64(cfg.MaxRetries+1) {
 		t.Errorf("provider 调用 %d 次, 期望 %d 次 (MaxRetries+1)", got, cfg.MaxRetries+1)
 	}
-	// 重试耗尽时 DoWithContext 返回 ErrMaxAttemptsReached 包装的错误，
-	// processRequest 会 Unwrap 它。验证最终错误能反映出原始原因。
-	if !strings.Contains(err.Error(), "timeout") {
-		t.Errorf("重试耗尽错误未保留原始原因: %q", err.Error())
+	// 重试层应同时保留耗尽哨兵和最后一次上游失败。
+	if !errors.Is(err, retry.ErrMaxAttemptsReached) || !errors.Is(err, retryable) {
+		t.Errorf("retry exhaustion error chain is incomplete: %v", err)
 	}
 	_ = resp
 }
@@ -740,8 +741,8 @@ func TestStop_WithoutStart(t *testing.T) {
 //   - Stop() 调用 close(b.stopChan)。
 //   - collector 的 for-select 命中 <-b.stopChan 分支，调用 flush()。
 //   - flush() 内部 select 同时就绪两个 case：
-//       case b.batchChan <- batchCopy:   // 把残留批次交给 worker
-//       case <-b.stopChan:               // stopChan 已 close，永远就绪 → return（丢弃批次！）
+//     case b.batchChan <- batchCopy:   // 把残留批次交给 worker
+//     case <-b.stopChan:               // stopChan 已 close，永远就绪 → return（丢弃批次！）
 //   - Go select 在多个就绪 case 间随机选择，约 50% 概率走 <-b.stopChan，
 //     残留批次被静默丢弃，对应请求的 response channel 永不写入，
 //     Submit 调用方（若 ctx 无超时）将永久阻塞。

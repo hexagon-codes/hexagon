@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	stream "github.com/hexagon-codes/ai-core/streamx"
+	"github.com/hexagon-codes/toolkit/util/retry"
 )
 
 func TestNewSliceStream(t *testing.T) {
@@ -564,6 +566,150 @@ func TestWithRetry_FirstSuccess(t *testing.T) {
 	}
 }
 
+// TestWithRetry_PartialConfigStillInvokesRunnable 验证部分配置不会在首次调用前被拒绝。
+func TestWithRetry_PartialConfigStillInvokesRunnable(t *testing.T) {
+	callCount := 0
+	primary := NewRunnable[string, string]("primary", "", func(ctx context.Context, input string, opts ...Option) (string, error) {
+		callCount++
+		return "ok", nil
+	})
+
+	r := WithRetry(primary, &RetryConfig{MaxRetries: 0})
+	result, err := r.Invoke(context.Background(), "input")
+	if err != nil {
+		t.Fatalf("Invoke() error = %v, want nil", err)
+	}
+	if result != "ok" {
+		t.Fatalf("Invoke() result = %q, want %q", result, "ok")
+	}
+	if callCount != 1 {
+		t.Fatalf("Invoke() calls = %d, want 1", callCount)
+	}
+}
+
+// TestWithRetry_ZeroMaxDelayRetriesImmediately 验证零最大延迟保持立即重试语义。
+func TestWithRetry_ZeroMaxDelayRetriesImmediately(t *testing.T) {
+	callCount := 0
+	primary := NewRunnable[string, string]("primary", "", func(ctx context.Context, input string, opts ...Option) (string, error) {
+		callCount++
+		if callCount < 3 {
+			return "", errPrimary
+		}
+		return "ok", nil
+	})
+
+	r := WithRetry(primary, &RetryConfig{
+		MaxRetries:   2,
+		InitialDelay: time.Second,
+		MaxDelay:     0,
+		Multiplier:   2,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	result, err := r.Invoke(ctx, "input")
+	if err != nil {
+		t.Fatalf("Invoke() error = %v, want nil", err)
+	}
+	if result != "ok" {
+		t.Fatalf("Invoke() result = %q, want %q", result, "ok")
+	}
+	if callCount != 3 {
+		t.Fatalf("Invoke() calls = %d, want 3", callCount)
+	}
+}
+
+// TestWithRetry_ZeroMultiplierUsesFixedDelay 验证零倍数保持固定延迟语义。
+func TestWithRetry_ZeroMultiplierUsesFixedDelay(t *testing.T) {
+	primary := newSuccessRunnable("primary", "ok")
+	r := WithRetry(primary, &RetryConfig{
+		MaxRetries:   2,
+		InitialDelay: 25 * time.Millisecond,
+		MaxDelay:     time.Second,
+		Multiplier:   0,
+	})
+
+	config := retry.DefaultConfig()
+	for _, option := range r.retryOptions() {
+		option(config)
+	}
+	if config.DelayFunc == nil {
+		t.Fatal("retry delay function is nil")
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if got := config.DelayFunc(attempt, config); got != 25*time.Millisecond {
+			t.Fatalf("delay for retry %d = %v, want 25ms", attempt, got)
+		}
+	}
+}
+
+// TestWithRetry_ZeroInitialDelayRetriesImmediately 验证零初始延迟按公开合同立即重试。
+func TestWithRetry_ZeroInitialDelayRetriesImmediately(t *testing.T) {
+	callCount := 0
+	primary := NewRunnable[string, string]("primary", "", func(ctx context.Context, input string, opts ...Option) (string, error) {
+		callCount++
+		if callCount < 3 {
+			return "", errPrimary
+		}
+		return "ok", nil
+	})
+	r := WithRetry(primary, &RetryConfig{
+		MaxRetries:   2,
+		InitialDelay: 0,
+		MaxDelay:     time.Second,
+		Multiplier:   2,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	result, err := r.Invoke(ctx, "input")
+	if err != nil {
+		t.Fatalf("Invoke() error = %v, want nil", err)
+	}
+	if result != "ok" {
+		t.Fatalf("Invoke() result = %q, want %q", result, "ok")
+	}
+	if callCount != 3 {
+		t.Fatalf("Invoke() calls = %d, want 3", callCount)
+	}
+}
+
+// TestWithRetry_ZeroMaxDelayDoesNotHideInvalidConfig 验证合法零上限不会掩盖其他非法字段。
+func TestWithRetry_ZeroMaxDelayDoesNotHideInvalidConfig(t *testing.T) {
+	tests := []struct {
+		name         string
+		initialDelay time.Duration
+		multiplier   float64
+	}{
+		{name: "negative initial delay", initialDelay: -time.Nanosecond, multiplier: 2},
+		{name: "negative multiplier", multiplier: -1},
+		{name: "NaN multiplier", multiplier: math.NaN()},
+		{name: "infinite multiplier", multiplier: math.Inf(1)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			callCount := 0
+			primary := NewRunnable[string, string]("primary", "", func(ctx context.Context, input string, opts ...Option) (string, error) {
+				callCount++
+				return "ok", nil
+			})
+			r := WithRetry(primary, &RetryConfig{
+				InitialDelay: test.initialDelay,
+				MaxDelay:     0,
+				Multiplier:   test.multiplier,
+			})
+
+			_, err := r.Invoke(context.Background(), "input")
+			if !errors.Is(err, retry.ErrInvalidConfig) {
+				t.Fatalf("Invoke() error = %v, want retry.ErrInvalidConfig", err)
+			}
+			if callCount != 0 {
+				t.Fatalf("Invoke() calls = %d, want 0", callCount)
+			}
+		})
+	}
+}
+
 // TestWithRetry_RetryThenSuccess 测试重试后成功
 func TestWithRetry_RetryThenSuccess(t *testing.T) {
 	callCount := 0
@@ -805,9 +951,29 @@ func TestRunnableWithRetry_Schema(t *testing.T) {
 // CircuitBreaker 测试
 // ============================================================================
 
+func mustNewCircuitBreaker(t *testing.T, config *CircuitBreakerConfig) *CircuitBreaker {
+	t.Helper()
+	breaker, err := NewCircuitBreaker(config)
+	if err != nil {
+		t.Fatalf("NewCircuitBreaker() error = %v", err)
+	}
+	return breaker
+}
+
+func mustCompleteCircuit(t *testing.T, breaker *CircuitBreaker, resultErr error) {
+	t.Helper()
+	permit, err := breaker.Acquire()
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	if err := permit.Complete(resultErr); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+}
+
 // TestCircuitBreaker_ClosedToOpen 测试从关闭到打开状态
 func TestCircuitBreaker_ClosedToOpen(t *testing.T) {
-	cb := NewCircuitBreaker(&CircuitBreakerConfig{
+	cb := mustNewCircuitBreaker(t, &CircuitBreakerConfig{
 		FailureThreshold: 3,
 		SuccessThreshold: 2,
 		Timeout:          time.Second,
@@ -817,44 +983,44 @@ func TestCircuitBreaker_ClosedToOpen(t *testing.T) {
 		t.Fatalf("期望初始状态为 CircuitClosed")
 	}
 
-	// 记录 3 次失败达到阈值
-	cb.RecordFailure()
-	cb.RecordFailure()
+	// 三个独立许可分别完成失败后达到阈值。
+	mustCompleteCircuit(t, cb, errPrimary)
+	mustCompleteCircuit(t, cb, errPrimary)
 	if cb.State() != CircuitClosed {
 		t.Fatalf("2 次失败后应仍为 CircuitClosed")
 	}
-	cb.RecordFailure()
+	mustCompleteCircuit(t, cb, errPrimary)
 	if cb.State() != CircuitOpen {
 		t.Fatalf("3 次失败后应为 CircuitOpen")
 	}
 }
 
-// TestCircuitBreaker_OpenNotAllow 测试打开状态不允许执行
-func TestCircuitBreaker_OpenNotAllow(t *testing.T) {
-	cb := NewCircuitBreaker(&CircuitBreakerConfig{
+// TestCircuitBreaker_OpenRejectsAcquire 测试打开状态拒绝获取许可。
+func TestCircuitBreaker_OpenRejectsAcquire(t *testing.T) {
+	cb := mustNewCircuitBreaker(t, &CircuitBreakerConfig{
 		FailureThreshold: 1,
 		SuccessThreshold: 1,
 		Timeout:          time.Hour, // 长超时确保不会自动转半开
 	})
 
-	cb.RecordFailure() // 触发打开
+	mustCompleteCircuit(t, cb, errPrimary)
 	if cb.State() != CircuitOpen {
 		t.Fatalf("期望 CircuitOpen")
 	}
-	if cb.Allow() {
-		t.Error("打开状态不应允许执行")
+	if _, err := cb.Acquire(); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("Acquire() error = %v, want ErrCircuitOpen", err)
 	}
 }
 
 // TestCircuitBreaker_OpenToHalfOpen 测试超时后从打开到半开
 func TestCircuitBreaker_OpenToHalfOpen(t *testing.T) {
-	cb := NewCircuitBreaker(&CircuitBreakerConfig{
+	cb := mustNewCircuitBreaker(t, &CircuitBreakerConfig{
 		FailureThreshold: 1,
 		SuccessThreshold: 1,
 		Timeout:          5 * time.Millisecond,
 	})
 
-	cb.RecordFailure() // 触发打开
+	mustCompleteCircuit(t, cb, errPrimary)
 	if cb.State() != CircuitOpen {
 		t.Fatalf("期望 CircuitOpen")
 	}
@@ -862,37 +1028,34 @@ func TestCircuitBreaker_OpenToHalfOpen(t *testing.T) {
 	// 等待超时
 	time.Sleep(10 * time.Millisecond)
 
-	// Allow() 应该触发转为 HalfOpen
-	if !cb.Allow() {
-		t.Error("超时后应允许执行（半开状态）")
+	// Acquire 应触发转为 HalfOpen，并返回与本次探测绑定的许可。
+	permit, err := cb.Acquire()
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
 	}
 	if cb.State() != CircuitHalfOpen {
 		t.Fatalf("超时后期望 CircuitHalfOpen，但得到 %d", cb.State())
+	}
+	if err := permit.Complete(nil); err != nil {
+		t.Fatal(err)
 	}
 }
 
 // TestCircuitBreaker_HalfOpenToClosed 测试半开状态成功达到阈值后关闭
 func TestCircuitBreaker_HalfOpenToClosed(t *testing.T) {
-	cb := NewCircuitBreaker(&CircuitBreakerConfig{
+	cb := mustNewCircuitBreaker(t, &CircuitBreakerConfig{
 		FailureThreshold: 1,
 		SuccessThreshold: 2,
 		Timeout:          5 * time.Millisecond,
 	})
 
-	cb.RecordFailure()                // → Open
+	mustCompleteCircuit(t, cb, errPrimary)
 	time.Sleep(10 * time.Millisecond) // 等待超时
-	cb.Allow()                        // → HalfOpen
-
-	if cb.State() != CircuitHalfOpen {
-		t.Fatalf("期望 CircuitHalfOpen")
-	}
-
-	cb.RecordSuccess()
+	mustCompleteCircuit(t, cb, nil)
 	if cb.State() != CircuitHalfOpen {
 		t.Fatalf("1 次成功后应仍为 CircuitHalfOpen")
 	}
-	cb.Allow() // 配对契约：每次成功探测前先经 Allow 门控（与生产 Invoke/Stream 一致）
-	cb.RecordSuccess()
+	mustCompleteCircuit(t, cb, nil)
 	if cb.State() != CircuitClosed {
 		t.Fatalf("2 次成功后应为 CircuitClosed")
 	}
@@ -900,21 +1063,15 @@ func TestCircuitBreaker_HalfOpenToClosed(t *testing.T) {
 
 // TestCircuitBreaker_HalfOpenToOpen 测试半开状态失败后重新打开
 func TestCircuitBreaker_HalfOpenToOpen(t *testing.T) {
-	cb := NewCircuitBreaker(&CircuitBreakerConfig{
+	cb := mustNewCircuitBreaker(t, &CircuitBreakerConfig{
 		FailureThreshold: 1,
 		SuccessThreshold: 3,
 		Timeout:          5 * time.Millisecond,
 	})
 
-	cb.RecordFailure()                // → Open
+	mustCompleteCircuit(t, cb, errPrimary)
 	time.Sleep(10 * time.Millisecond) // 等待超时
-	cb.Allow()                        // → HalfOpen
-
-	if cb.State() != CircuitHalfOpen {
-		t.Fatalf("期望 CircuitHalfOpen")
-	}
-
-	cb.RecordFailure() // → 重新 Open
+	mustCompleteCircuit(t, cb, errPrimary)
 	if cb.State() != CircuitOpen {
 		t.Fatalf("半开状态失败后应为 CircuitOpen")
 	}
@@ -925,7 +1082,7 @@ func TestCircuitBreaker_OnStateChange(t *testing.T) {
 	var transitions []string
 	var mu sync.Mutex
 
-	cb := NewCircuitBreaker(&CircuitBreakerConfig{
+	cb := mustNewCircuitBreaker(t, &CircuitBreakerConfig{
 		FailureThreshold: 2,
 		SuccessThreshold: 1,
 		Timeout:          5 * time.Millisecond,
@@ -936,25 +1093,11 @@ func TestCircuitBreaker_OnStateChange(t *testing.T) {
 		},
 	})
 
-	cb.RecordFailure()
-	cb.RecordFailure() // → Open
+	mustCompleteCircuit(t, cb, errPrimary)
+	mustCompleteCircuit(t, cb, errPrimary)
 
 	time.Sleep(10 * time.Millisecond)
-	cb.Allow() // → HalfOpen
-
-	cb.RecordSuccess() // → Closed
-
-	// toolkit/util/circuit 的状态变更回调为异步投递（经 channel + 后台 goroutine），轮询等待落地。
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		n := len(transitions)
-		mu.Unlock()
-		if n >= 3 {
-			break
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+	mustCompleteCircuit(t, cb, nil)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -962,6 +1105,120 @@ func TestCircuitBreaker_OnStateChange(t *testing.T) {
 	// 应该有 3 次状态变化: Closed→Open, Open→HalfOpen, HalfOpen→Closed
 	if len(transitions) != 3 {
 		t.Fatalf("期望 3 次状态变化，但得到 %d 次: %v", len(transitions), transitions)
+	}
+}
+
+func TestCircuitBreaker_ConstructorValidationAndPermitLifecycle(t *testing.T) {
+	if _, err := NewCircuitBreaker(&CircuitBreakerConfig{}); err == nil {
+		t.Fatal("invalid configuration returned nil error")
+	}
+
+	cb := mustNewCircuitBreaker(t, &CircuitBreakerConfig{
+		FailureThreshold: 1,
+		SuccessThreshold: 1,
+		Timeout:          time.Second,
+	})
+	permit, err := cb.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := permit.Complete(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := permit.Complete(nil); err == nil {
+		t.Fatal("completing the same permit twice returned nil error")
+	}
+}
+
+// TestCircuitBreaker_ZeroHalfOpenMaxRequestsUsesDefault 验证零值使用公开默认并发上限。
+func TestCircuitBreaker_ZeroHalfOpenMaxRequestsUsesDefault(t *testing.T) {
+	config := &CircuitBreakerConfig{
+		FailureThreshold:    1,
+		SuccessThreshold:    4,
+		HalfOpenMaxRequests: 0,
+		Timeout:             time.Millisecond,
+	}
+	cb := mustNewCircuitBreaker(t, config)
+	defer cb.Close()
+	if config.HalfOpenMaxRequests != 0 {
+		t.Fatalf("NewCircuitBreaker() mutated HalfOpenMaxRequests to %d", config.HalfOpenMaxRequests)
+	}
+
+	mustCompleteCircuit(t, cb, errPrimary)
+	time.Sleep(5 * time.Millisecond)
+
+	permits := make([]interface{ Complete(error) error }, 0, 3)
+	for index := 0; index < 3; index++ {
+		permit, err := cb.Acquire()
+		if err != nil {
+			t.Fatalf("Acquire() probe %d error = %v", index+1, err)
+		}
+		permits = append(permits, permit)
+	}
+	if _, err := cb.Acquire(); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("Acquire() beyond default half-open capacity error = %v, want ErrCircuitOpen", err)
+	}
+
+	for index, permit := range permits {
+		if err := permit.Complete(nil); err != nil {
+			t.Fatalf("Complete() probe %d error = %v", index+1, err)
+		}
+	}
+	if state := cb.State(); state != CircuitHalfOpen {
+		t.Fatalf("State() after three successes = %s, want half-open", state)
+	}
+	mustCompleteCircuit(t, cb, nil)
+	if state := cb.State(); state != CircuitClosed {
+		t.Fatalf("State() after fourth success = %s, want closed", state)
+	}
+}
+
+// TestCircuitBreaker_HalfOpenLimitsAreIndependent 验证并发上限与成功阈值相互独立。
+func TestCircuitBreaker_HalfOpenLimitsAreIndependent(t *testing.T) {
+	cb := mustNewCircuitBreaker(t, &CircuitBreakerConfig{
+		FailureThreshold:    1,
+		SuccessThreshold:    2,
+		HalfOpenMaxRequests: 1,
+		Timeout:             time.Millisecond,
+	})
+	defer cb.Close()
+
+	mustCompleteCircuit(t, cb, errPrimary)
+	time.Sleep(5 * time.Millisecond)
+
+	first, err := cb.Acquire()
+	if err != nil {
+		t.Fatalf("first half-open Acquire() error = %v", err)
+	}
+	if _, err := cb.Acquire(); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("second concurrent Acquire() error = %v, want ErrCircuitOpen", err)
+	}
+	if err := first.Complete(nil); err != nil {
+		t.Fatalf("first half-open Complete() error = %v", err)
+	}
+	if state := cb.State(); state != CircuitHalfOpen {
+		t.Fatalf("State() after first success = %s, want half-open", state)
+	}
+
+	mustCompleteCircuit(t, cb, nil)
+	if state := cb.State(); state != CircuitClosed {
+		t.Fatalf("State() after second sequential success = %s, want closed", state)
+	}
+}
+
+// TestCircuitBreaker_RejectsNegativeHalfOpenMaxRequests 验证负并发上限被拒绝。
+func TestCircuitBreaker_RejectsNegativeHalfOpenMaxRequests(t *testing.T) {
+	_, err := NewCircuitBreaker(&CircuitBreakerConfig{
+		FailureThreshold:    1,
+		SuccessThreshold:    1,
+		HalfOpenMaxRequests: -1,
+		Timeout:             time.Second,
+	})
+	if err == nil {
+		t.Fatal("NewCircuitBreaker() error = nil, want negative half-open capacity error")
+	}
+	if !strings.Contains(err.Error(), "half-open max requests") {
+		t.Fatalf("NewCircuitBreaker() error = %q, want half-open capacity context", err)
 	}
 }
 
@@ -973,6 +1230,9 @@ func TestDefaultCircuitBreakerConfig(t *testing.T) {
 	}
 	if cfg.SuccessThreshold != 3 {
 		t.Errorf("期望 SuccessThreshold=3，但得到 %d", cfg.SuccessThreshold)
+	}
+	if cfg.HalfOpenMaxRequests != 3 {
+		t.Errorf("HalfOpenMaxRequests = %d, want 3", cfg.HalfOpenMaxRequests)
 	}
 	if cfg.Timeout != 30*time.Second {
 		t.Errorf("期望 Timeout=30s，但得到 %v", cfg.Timeout)
@@ -987,11 +1247,14 @@ func TestRunnableWithCircuitBreaker_Invoke(t *testing.T) {
 		return "", errPrimary
 	})
 
-	r := WithCircuitBreaker(primary, &CircuitBreakerConfig{
+	r, err := WithCircuitBreaker(primary, &CircuitBreakerConfig{
 		FailureThreshold: 2,
 		SuccessThreshold: 1,
 		Timeout:          time.Hour,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 
 	// 触发熔断
@@ -999,7 +1262,7 @@ func TestRunnableWithCircuitBreaker_Invoke(t *testing.T) {
 	r.Invoke(ctx, "b")
 
 	// 熔断后应直接返回 ErrCircuitOpen
-	_, err := r.Invoke(ctx, "c")
+	_, err = r.Invoke(ctx, "c")
 	if !errors.Is(err, ErrCircuitOpen) {
 		t.Fatalf("期望 ErrCircuitOpen，但得到: %v", err)
 	}
@@ -1012,11 +1275,14 @@ func TestRunnableWithCircuitBreaker_Invoke(t *testing.T) {
 func TestRunnableWithCircuitBreaker_InvokeSuccess(t *testing.T) {
 	primary := newSuccessRunnable("primary", "成功")
 
-	r := WithCircuitBreaker(primary, &CircuitBreakerConfig{
+	r, err := WithCircuitBreaker(primary, &CircuitBreakerConfig{
 		FailureThreshold: 3,
 		SuccessThreshold: 1,
 		Timeout:          time.Second,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 
 	result, err := r.Invoke(ctx, "input")
@@ -1035,18 +1301,21 @@ func TestRunnableWithCircuitBreaker_Stream(t *testing.T) {
 		return nil, errPrimary
 	}
 
-	r := WithCircuitBreaker[string, string](primary, &CircuitBreakerConfig{
+	r, err := WithCircuitBreaker[string, string](primary, &CircuitBreakerConfig{
 		FailureThreshold: 1,
 		SuccessThreshold: 1,
 		Timeout:          time.Hour,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 
 	// 第一次失败触发熔断
 	r.Stream(ctx, "a")
 
 	// 第二次应被熔断
-	_, err := r.Stream(ctx, "b")
+	_, err = r.Stream(ctx, "b")
 	if !errors.Is(err, ErrCircuitOpen) {
 		t.Fatalf("期望 ErrCircuitOpen，但得到: %v", err)
 	}
@@ -1059,16 +1328,19 @@ func TestRunnableWithCircuitBreaker_Batch(t *testing.T) {
 		return nil, errPrimary
 	}
 
-	r := WithCircuitBreaker[string, string](primary, &CircuitBreakerConfig{
+	r, err := WithCircuitBreaker[string, string](primary, &CircuitBreakerConfig{
 		FailureThreshold: 1,
 		SuccessThreshold: 1,
 		Timeout:          time.Hour,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 
 	r.Batch(ctx, []string{"a"})
 
-	_, err := r.Batch(ctx, []string{"b"})
+	_, err = r.Batch(ctx, []string{"b"})
 	if !errors.Is(err, ErrCircuitOpen) {
 		t.Fatalf("期望 ErrCircuitOpen，但得到: %v", err)
 	}
@@ -1081,25 +1353,58 @@ func TestRunnableWithCircuitBreaker_BatchStream(t *testing.T) {
 		return nil, errPrimary
 	}
 
-	r := WithCircuitBreaker[string, string](primary, &CircuitBreakerConfig{
+	r, err := WithCircuitBreaker[string, string](primary, &CircuitBreakerConfig{
 		FailureThreshold: 1,
 		SuccessThreshold: 1,
 		Timeout:          time.Hour,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 
 	r.BatchStream(ctx, []string{"a"})
 
-	_, err := r.BatchStream(ctx, []string{"b"})
+	_, err = r.BatchStream(ctx, []string{"b"})
 	if !errors.Is(err, ErrCircuitOpen) {
 		t.Fatalf("期望 ErrCircuitOpen，但得到: %v", err)
+	}
+}
+
+func TestRunnableWithCircuitBreaker_PanicCompletesPermit(t *testing.T) {
+	primary := NewRunnable("primary", "", func(_ context.Context, _ string, _ ...Option) (string, error) {
+		panic("provider panic")
+	})
+	r, err := WithCircuitBreaker(primary, &CircuitBreakerConfig{
+		FailureThreshold: 1,
+		SuccessThreshold: 1,
+		Timeout:          time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Invoke() did not propagate panic")
+			}
+		}()
+		_, _ = r.Invoke(context.Background(), "first")
+	}()
+
+	if _, err := r.Invoke(context.Background(), "second"); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("Invoke() error = %v, want ErrCircuitOpen", err)
 	}
 }
 
 // TestRunnableWithCircuitBreaker_Schema 测试带熔断 Runnable 的 Schema 委托
 func TestRunnableWithCircuitBreaker_Schema(t *testing.T) {
 	primary := newSuccessRunnable("primary", "ok")
-	r := WithCircuitBreaker(primary)
+	r, err := WithCircuitBreaker(primary)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if r.Name() != "primary_with_circuit_breaker" {
 		t.Errorf("期望名称 'primary_with_circuit_breaker'，但得到 '%s'", r.Name())
 	}
@@ -1527,6 +1832,49 @@ func TestRetryAsync_Success(t *testing.T) {
 	}
 	if result != "重试成功" {
 		t.Errorf("期望 '重试成功'，但得到 '%s'", result)
+	}
+}
+
+// TestRetryAsync_ZeroDelayRetriesUntilSuccess 验证零延迟仍会执行并完成重试。
+func TestRetryAsync_ZeroDelayRetriesUntilSuccess(t *testing.T) {
+	callCount := int32(0)
+	f := Retry(2, 0, func() (string, error) {
+		count := atomic.AddInt32(&callCount, 1)
+		if count < 3 {
+			return "", errPrimary
+		}
+		return "ok", nil
+	})
+
+	result, err := f.Get()
+	if err != nil {
+		t.Fatalf("Retry() error = %v, want nil", err)
+	}
+	if result != "ok" {
+		t.Fatalf("Retry() result = %q, want %q", result, "ok")
+	}
+	if got := atomic.LoadInt32(&callCount); got != 3 {
+		t.Fatalf("Retry() calls = %d, want 3", got)
+	}
+}
+
+// TestRetryAsync_ZeroDelayExhaustsAttempts 验证零延迟耗尽时保留错误链和尝试次数。
+func TestRetryAsync_ZeroDelayExhaustsAttempts(t *testing.T) {
+	callCount := int32(0)
+	f := Retry(2, 0, func() (string, error) {
+		atomic.AddInt32(&callCount, 1)
+		return "", errPrimary
+	})
+
+	_, err := f.Get()
+	if !errors.Is(err, errPrimary) {
+		t.Fatalf("Retry() error = %v, want error wrapping errPrimary", err)
+	}
+	if !errors.Is(err, retry.ErrMaxAttemptsReached) {
+		t.Fatalf("Retry() error = %v, want retry.ErrMaxAttemptsReached", err)
+	}
+	if got := atomic.LoadInt32(&callCount); got != 3 {
+		t.Fatalf("Retry() calls = %d, want 3", got)
 	}
 }
 

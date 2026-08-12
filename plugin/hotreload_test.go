@@ -293,6 +293,7 @@ func TestPluginUpdateStrategy(t *testing.T) {
 // TestComputeConfigHash 测试配置哈希
 func TestComputeConfigHash(t *testing.T) {
 	config := map[string]any{"key": "value"}
+	const wantSHA256 = "e43abcf3375244839c012f9633f95862d232a95b00d5bc7348b3098b9fed7f32"
 
 	hash1 := computeConfigHash(config)
 	hash2 := computeConfigHash(config)
@@ -302,6 +303,9 @@ func TestComputeConfigHash(t *testing.T) {
 	}
 	if hash1 != hash2 {
 		t.Fatal("相同配置必须得到稳定指纹")
+	}
+	if hash1 != wantSHA256 {
+		t.Fatalf("computeConfigHash() = %q, want %q", hash1, wantSHA256)
 	}
 	if hash1 == computeConfigHash(map[string]any{"key": "other"}) {
 		t.Fatal("不同配置不得得到相同测试指纹")

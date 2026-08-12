@@ -3,8 +3,11 @@ package mcp
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/retry"
 )
 
 // flakyTransport 是一个可控的传输层桩：前 failInits 次 Initialize 失败、之后成功；
@@ -77,18 +80,99 @@ func TestReconnect_ExhaustReturnsError(t *testing.T) {
 }
 
 // TestBugRev0618_1_ReconnectZeroConfigStillAttemptsOnce 回归锁定 [BUG-REV0618-1]：
-// 零值 ReconnectConfig（MaxAttempts=0）经规范化兜底后仍至少尝试一次 Initialize，
-// 而非一次不跑直接失败（底层 retry 循环 attempt=1..MaxAttempts，0 时 fn 永不执行）。
+// 零值 ReconnectConfig 表示执行一次、零次重试；即使初始化失败，也必须调用一次
+// Initialize，而不是在适配 Toolkit 前因缺少退避字段直接拒绝。
 func TestBugRev0618_1_ReconnectZeroConfigStillAttemptsOnce(t *testing.T) {
-	ft := &flakyTransport{failInits: 0, tools: []map[string]any{{"name": "a"}}} // 首次即成功
+	ft := &flakyTransport{failInits: 100}
 	ts := NewMCPToolSet(NewTransportClient(ft), nil)
-	ts.SetReconnectPolicy(&ReconnectConfig{}) // 全零值
+	ts.SetReconnectPolicy(&ReconnectConfig{})
 
-	if err := ts.Reconnect(context.Background()); err != nil {
-		t.Fatalf("零值配置经兜底应成功重连: %v", err)
+	err := ts.Reconnect(context.Background())
+	if !errors.Is(err, retry.ErrMaxAttemptsReached) {
+		t.Fatalf("zero-value configuration error = %v, want retry exhaustion chain", err)
 	}
 	if ft.initCalls != 1 {
-		t.Errorf("零值配置应至少尝试 1 次 Initialize, got %d", ft.initCalls)
+		t.Errorf("zero-value configuration Initialize calls = %d, want 1", ft.initCalls)
+	}
+	if ft.listCalls != 0 {
+		t.Errorf("tool-list calls after initialization failure = %d, want 0", ft.listCalls)
+	}
+}
+
+// TestReconnect_PartialConfigUsesDefaults 验证部分配置只补齐未设置的零值字段。
+func TestReconnect_PartialConfigUsesDefaults(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *ReconnectConfig
+	}{
+		{name: "only attempts", cfg: &ReconnectConfig{MaxAttempts: 1}},
+		{name: "only initial delay", cfg: &ReconnectConfig{InitialDelay: time.Microsecond}},
+		{name: "only max delay", cfg: &ReconnectConfig{MaxDelay: time.Millisecond}},
+		{name: "only multiplier", cfg: &ReconnectConfig{Multiplier: 1.5}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ft := &flakyTransport{tools: []map[string]any{{"name": "a"}}}
+			ts := NewMCPToolSet(NewTransportClient(ft), nil)
+			ts.SetReconnectPolicy(test.cfg)
+
+			if err := ts.Reconnect(context.Background()); err != nil {
+				t.Fatalf("normalized partial configuration error = %v, want nil", err)
+			}
+			if ft.initCalls != 1 {
+				t.Errorf("partial configuration Initialize calls = %d, want 1", ft.initCalls)
+			}
+		})
+	}
+}
+
+// TestReconnect_ExplicitInvalidConfigFailsClosed 验证显式非法值不被默认值掩盖。
+func TestReconnect_ExplicitInvalidConfigFailsClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *ReconnectConfig
+	}{
+		{
+			name: "negative attempts",
+			cfg:  &ReconnectConfig{MaxAttempts: -1, InitialDelay: time.Microsecond, MaxDelay: time.Millisecond, Multiplier: 2},
+		},
+		{
+			name: "negative initial delay",
+			cfg:  &ReconnectConfig{MaxAttempts: 1, InitialDelay: -time.Microsecond, MaxDelay: time.Millisecond, Multiplier: 2},
+		},
+		{
+			name: "negative max delay",
+			cfg:  &ReconnectConfig{MaxAttempts: 1, InitialDelay: time.Microsecond, MaxDelay: -time.Millisecond, Multiplier: 2},
+		},
+		{
+			name: "negative multiplier",
+			cfg:  &ReconnectConfig{MaxAttempts: 1, InitialDelay: time.Microsecond, MaxDelay: time.Millisecond, Multiplier: -1},
+		},
+		{
+			name: "nan multiplier",
+			cfg:  &ReconnectConfig{MaxAttempts: 1, InitialDelay: time.Microsecond, MaxDelay: time.Millisecond, Multiplier: math.NaN()},
+		},
+		{
+			name: "infinite multiplier",
+			cfg:  &ReconnectConfig{MaxAttempts: 1, InitialDelay: time.Microsecond, MaxDelay: time.Millisecond, Multiplier: math.Inf(1)},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ft := &flakyTransport{}
+			ts := NewMCPToolSet(NewTransportClient(ft), nil)
+			ts.SetReconnectPolicy(test.cfg)
+
+			err := ts.Reconnect(context.Background())
+			if !errors.Is(err, retry.ErrInvalidConfig) {
+				t.Fatalf("explicit invalid configuration error = %v, want ErrInvalidConfig chain", err)
+			}
+			if ft.initCalls != 0 {
+				t.Errorf("explicit invalid configuration Initialize calls = %d, want 0", ft.initCalls)
+			}
+		})
 	}
 }
 
@@ -120,6 +204,7 @@ func TestRefresh_NoReconnectPolicyFailsFast(t *testing.T) {
 
 // listFailOnceTransport 让首次 ListTools 失败、之后成功；Initialize 始终成功。
 type listFailOnceTransport struct {
+	initCalls int
 	listCalls int
 	tools     []map[string]any
 }
@@ -127,6 +212,7 @@ type listFailOnceTransport struct {
 func (f *listFailOnceTransport) Send(ctx context.Context, req *MCPRequest) (*MCPResponse, error) {
 	switch req.Method {
 	case MethodInitialize:
+		f.initCalls++
 		return &MCPResponse{Result: map[string]any{"capabilities": map[string]any{}}}, nil
 	case MethodToolsList:
 		f.listCalls++
@@ -140,3 +226,20 @@ func (f *listFailOnceTransport) Send(ctx context.Context, req *MCPRequest) (*MCP
 }
 
 func (f *listFailOnceTransport) Close() error { return nil }
+
+// TestRefresh_PartialReconnectConfigUsesDefaults 验证 Refresh 复用同一规范化边界。
+func TestRefresh_PartialReconnectConfigUsesDefaults(t *testing.T) {
+	lf := &listFailOnceTransport{tools: []map[string]any{{"name": "x"}}}
+	ts := NewMCPToolSet(NewTransportClient(lf), nil)
+	ts.SetReconnectPolicy(&ReconnectConfig{MaxAttempts: 1})
+
+	if err := ts.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh() with normalized partial reconnect configuration error = %v", err)
+	}
+	if lf.initCalls != 1 {
+		t.Errorf("Refresh() Initialize calls = %d, want 1", lf.initCalls)
+	}
+	if lf.listCalls != 2 {
+		t.Errorf("Refresh() tool-list calls after reconnect = %d, want 1", lf.listCalls)
+	}
+}

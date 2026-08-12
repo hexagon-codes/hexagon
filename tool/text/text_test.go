@@ -2,6 +2,7 @@ package text
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/hexagon-codes/ai-core/tool"
@@ -496,6 +497,12 @@ func TestTextHash(t *testing.T) {
 			algorithm: "sha256",
 			want:      "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
 		},
+		{
+			name:      "未知算法",
+			text:      "hello",
+			algorithm: "sha1",
+			wantErr:   true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -506,22 +513,31 @@ func TestTextHash(t *testing.T) {
 			}
 
 			result, err := textHash.Execute(ctx, args)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Execute() error = %v, wantErr %v", err, tt.wantErr)
+			if err != nil {
+				t.Fatalf("Execute() returned transport error: %v", err)
+			}
+			if tt.wantErr {
+				if result.Success {
+					t.Fatal("unknown algorithm should return a failed tool result")
+				}
+				if !strings.Contains(result.Error, "unknown algorithm") {
+					t.Fatalf("result error = %q, want unknown algorithm error", result.Error)
+				}
 				return
 			}
 
-			if !tt.wantErr {
-				if resultMap, ok := result.Output.(map[string]any); ok {
-					if hash, ok := resultMap["hash"].(string); ok {
-						if hash == "" {
-							t.Error("hash should not be empty")
-						}
-						if tt.want != "" && hash != tt.want {
-							t.Errorf("hash = %q, want %q", hash, tt.want)
-						}
-					}
-				}
+			if !result.Success {
+				t.Fatalf("tool result failed: %s", result.Error)
+			}
+			output, ok := result.Output.(textHashOutput)
+			if !ok {
+				t.Fatalf("output type = %T, want textHashOutput", result.Output)
+			}
+			if output.Hash == "" {
+				t.Error("hash should not be empty")
+			}
+			if tt.want != "" && output.Hash != tt.want {
+				t.Errorf("hash = %q, want %q", output.Hash, tt.want)
 			}
 		})
 	}

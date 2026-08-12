@@ -2,12 +2,27 @@ package cost
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"math"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/rate"
 )
 
+func newTestController(t *testing.T, opts ...ControllerOption) *Controller {
+	t.Helper()
+	controller, err := NewController(opts...)
+	if err != nil {
+		t.Fatalf("NewController() error = %v", err)
+	}
+	return controller
+}
+
 func TestNewController(t *testing.T) {
-	c := NewController()
+	c := newTestController(t)
 	if c == nil {
 		t.Fatal("NewController returned nil")
 	}
@@ -19,9 +34,6 @@ func TestNewController(t *testing.T) {
 	if c.maxTokensPerRequest != 8000 {
 		t.Errorf("expected maxTokensPerRequest=8000, got %d", c.maxTokensPerRequest)
 	}
-	if c.maxTokensPerSession != 100000 {
-		t.Errorf("expected maxTokensPerSession=100000, got %d", c.maxTokensPerSession)
-	}
 	if c.maxTokensTotal != 1000000 {
 		t.Errorf("expected maxTokensTotal=1000000, got %d", c.maxTokensTotal)
 	}
@@ -30,11 +42,33 @@ func TestNewController(t *testing.T) {
 	}
 }
 
+func TestNewControllerRejectsInvalidRequestsPerMinute(t *testing.T) {
+	for _, rpm := range []int{0, -1} {
+		t.Run(fmt.Sprintf("rpm_%d", rpm), func(t *testing.T) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.Errorf("NewController panicked for invalid requests per minute: %v", recovered)
+				}
+			}()
+
+			controller, err := NewController(WithRequestsPerMinute(rpm))
+			if controller != nil {
+				t.Errorf("NewController() controller = %v, want nil", controller)
+			}
+			if !errors.Is(err, rate.ErrInvalidCapacity) {
+				t.Errorf("NewController() error = %v, want %v", err, rate.ErrInvalidCapacity)
+			}
+			if !errors.Is(err, ErrInvalidControllerConfig) {
+				t.Errorf("NewController() error = %v, want ErrInvalidControllerConfig", err)
+			}
+		})
+	}
+}
+
 func TestNewController_WithOptions(t *testing.T) {
-	c := NewController(
+	c := newTestController(t,
 		WithBudget(100.0),
 		WithMaxTokensPerRequest(4000),
-		WithMaxTokensPerSession(50000),
 		WithMaxTokensTotal(500000),
 		WithRequestsPerMinute(30),
 	)
@@ -48,9 +82,6 @@ func TestNewController_WithOptions(t *testing.T) {
 	if c.maxTokensPerRequest != 4000 {
 		t.Errorf("expected maxTokensPerRequest=4000, got %d", c.maxTokensPerRequest)
 	}
-	if c.maxTokensPerSession != 50000 {
-		t.Errorf("expected maxTokensPerSession=50000, got %d", c.maxTokensPerSession)
-	}
 	if c.maxTokensTotal != 500000 {
 		t.Errorf("expected maxTokensTotal=500000, got %d", c.maxTokensTotal)
 	}
@@ -59,12 +90,98 @@ func TestNewController_WithOptions(t *testing.T) {
 	}
 }
 
+func expectControllerConfigError(t *testing.T, opts ...ControllerOption) {
+	t.Helper()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Errorf("NewController() panicked: %v", recovered)
+		}
+	}()
+
+	controller, err := NewController(opts...)
+	if controller != nil {
+		t.Errorf("NewController() controller = %v, want nil", controller)
+	}
+	if !errors.Is(err, ErrInvalidControllerConfig) {
+		t.Errorf("NewController() error = %v, want ErrInvalidControllerConfig", err)
+	}
+}
+
+func TestNewControllerRejectsNilOption(t *testing.T) {
+	expectControllerConfigError(t, nil)
+}
+
+func TestNewControllerRejectsInvalidConfiguration(t *testing.T) {
+	tests := []struct {
+		name   string
+		option ControllerOption
+	}{
+		{name: "negative budget", option: WithBudget(-1)},
+		{name: "nan budget", option: WithBudget(math.NaN())},
+		{name: "positive infinite budget", option: WithBudget(math.Inf(1))},
+		{name: "negative infinite budget", option: WithBudget(math.Inf(-1))},
+		{name: "negative request token limit", option: WithMaxTokensPerRequest(-1)},
+		{name: "negative total token limit", option: WithMaxTokensTotal(-1)},
+		{name: "negative prompt price", option: WithPricing(map[string]ModelPricing{"custom": {PromptPrice: -1}})},
+		{name: "nan prompt price", option: WithPricing(map[string]ModelPricing{"custom": {PromptPrice: math.NaN()}})},
+		{name: "infinite prompt price", option: WithPricing(map[string]ModelPricing{"custom": {PromptPrice: math.Inf(1)}})},
+		{name: "negative completion price", option: WithPricing(map[string]ModelPricing{"custom": {CompletionPrice: -1}})},
+		{name: "nan completion price", option: WithPricing(map[string]ModelPricing{"custom": {CompletionPrice: math.NaN()}})},
+		{name: "infinite completion price", option: WithPricing(map[string]ModelPricing{"custom": {CompletionPrice: math.Inf(1)}})},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expectControllerConfigError(t, tt.option)
+		})
+	}
+}
+
+func TestNewControllerAllowsZeroConfiguration(t *testing.T) {
+	controller, err := NewController(
+		WithBudget(0),
+		WithMaxTokensPerRequest(0),
+		WithMaxTokensTotal(0),
+		WithPricing(map[string]ModelPricing{"free": {}}),
+	)
+	if err != nil {
+		t.Fatalf("NewController() error = %v", err)
+	}
+	if err := controller.CheckRequest(context.Background(), math.MaxInt64); err != nil {
+		t.Errorf("CheckRequest() error = %v, want unlimited token limits", err)
+	}
+	if got := controller.RemainingTokens(); got != math.MaxInt64 {
+		t.Errorf("RemainingTokens() = %d, want %d", got, int64(math.MaxInt64))
+	}
+}
+
+func TestNewControllerDoesNotRetainConfigSnapshot(t *testing.T) {
+	var snapshot *controllerConfig
+	controller, err := NewController(func(config *controllerConfig) {
+		snapshot = config
+		config.budget = 10
+		config.pricing["snapshot"] = ModelPricing{PromptPrice: 1, CompletionPrice: 2}
+	})
+	if err != nil {
+		t.Fatalf("NewController() error = %v", err)
+	}
+
+	snapshot.budget = 20
+	snapshot.pricing["snapshot"] = ModelPricing{PromptPrice: 3, CompletionPrice: 4}
+	if controller.budget != 10 {
+		t.Errorf("controller budget = %v, want immutable snapshot value 10", controller.budget)
+	}
+	if got := controller.pricing["snapshot"]; got != (ModelPricing{PromptPrice: 1, CompletionPrice: 2}) {
+		t.Errorf("controller pricing = %+v, want immutable snapshot value", got)
+	}
+}
+
 func TestController_WithPricing(t *testing.T) {
 	customPricing := map[string]ModelPricing{
 		"custom-model": {PromptPrice: 0.01, CompletionPrice: 0.02},
 	}
 
-	c := NewController(WithPricing(customPricing))
+	c := newTestController(t, WithPricing(customPricing))
 
 	if pricing, ok := c.pricing["custom-model"]; !ok {
 		t.Error("custom pricing not added")
@@ -76,7 +193,7 @@ func TestController_WithPricing(t *testing.T) {
 }
 
 func TestController_CheckRequest(t *testing.T) {
-	c := NewController(
+	c := newTestController(t,
 		WithMaxTokensPerRequest(1000),
 		WithMaxTokensTotal(5000),
 		WithRequestsPerMinute(100), // 设置高一点避免速率限制影响测试
@@ -103,8 +220,70 @@ func TestController_CheckRequest(t *testing.T) {
 	}
 }
 
+func TestController_CheckRequestRejectsUnsafeTokenCounts(t *testing.T) {
+	t.Run("negative estimate", func(t *testing.T) {
+		c := newTestController(t, WithRequestsPerMinute(100))
+		beforeCount := c.rateLimiter.Count()
+
+		if err := c.CheckRequest(context.Background(), -1); err == nil {
+			t.Fatal("CheckRequest() error = nil, want invalid token count error")
+		}
+		if got := c.rateLimiter.Count(); got != beforeCount {
+			t.Errorf("rate limiter count = %d, want unchanged %d", got, beforeCount)
+		}
+	})
+
+	t.Run("projected total overflow", func(t *testing.T) {
+		c := newTestController(t, WithRequestsPerMinute(100))
+		c.usedTokens = math.MaxInt64
+		beforeCount := c.rateLimiter.Count()
+
+		if err := c.CheckRequest(context.Background(), 1); err == nil {
+			t.Fatal("CheckRequest() error = nil, want token overflow error")
+		}
+		if got := c.usedTokens; got != math.MaxInt64 {
+			t.Errorf("used tokens = %d, want unchanged %d", got, int64(math.MaxInt64))
+		}
+		if got := c.rateLimiter.Count(); got != beforeCount {
+			t.Errorf("rate limiter count = %d, want unchanged %d", got, beforeCount)
+		}
+	})
+}
+
+func TestController_CheckRequestRejectsInvalidContextWithoutConsumingRate(t *testing.T) {
+	canceledContext, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name    string
+		ctx     context.Context
+		wantErr error
+	}{
+		{name: "nil context", ctx: nil},
+		{name: "canceled context", ctx: canceledContext, wantErr: context.Canceled},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestController(t, WithRequestsPerMinute(100))
+			beforeCount := c.rateLimiter.Count()
+
+			err := c.CheckRequest(tt.ctx, 1)
+			if err == nil {
+				t.Fatal("CheckRequest() error = nil, want context error")
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Errorf("CheckRequest() error = %v, want %v", err, tt.wantErr)
+			}
+			if got := c.rateLimiter.Count(); got != beforeCount {
+				t.Errorf("rate limiter count = %d, want unchanged %d", got, beforeCount)
+			}
+		})
+	}
+}
+
 func TestController_CheckRequest_RateLimit(t *testing.T) {
-	c := NewController(
+	c := newTestController(t,
 		WithRequestsPerMinute(2), // 非常低的限制
 	)
 	ctx := context.Background()
@@ -128,7 +307,7 @@ func TestController_CheckRequest_RateLimit(t *testing.T) {
 }
 
 func TestController_RecordUsage(t *testing.T) {
-	c := NewController(WithBudget(10.0))
+	c := newTestController(t, WithBudget(10.0))
 
 	usage := TokenUsage{
 		PromptTokens:     1000,
@@ -157,7 +336,7 @@ func TestController_RecordUsage(t *testing.T) {
 
 func TestController_RecordUsage_BudgetExceeded(t *testing.T) {
 	var callbackCalled bool
-	c := NewController(
+	c := newTestController(t,
 		WithBudget(0.01), // 非常低的预算
 		OnBudgetExceeded(func(used, budget float64) {
 			callbackCalled = true
@@ -181,7 +360,7 @@ func TestController_RecordUsage_BudgetExceeded(t *testing.T) {
 }
 
 func TestController_RecordUsage_UnknownModel(t *testing.T) {
-	c := NewController()
+	c := newTestController(t)
 
 	usage := TokenUsage{
 		PromptTokens:     1000,
@@ -203,8 +382,247 @@ func TestController_RecordUsage_UnknownModel(t *testing.T) {
 	}
 }
 
+func TestController_RecordUsageRejectsInvalidTokenUsage(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage TokenUsage
+	}{
+		{
+			name:  "negative prompt tokens",
+			usage: TokenUsage{PromptTokens: -1, CompletionTokens: 1, TotalTokens: 0},
+		},
+		{
+			name:  "negative completion tokens",
+			usage: TokenUsage{PromptTokens: 1, CompletionTokens: -1, TotalTokens: 0},
+		},
+		{
+			name:  "negative total tokens",
+			usage: TokenUsage{TotalTokens: -1},
+		},
+		{
+			name: "component sum overflow",
+			usage: TokenUsage{
+				PromptTokens:     math.MaxInt,
+				CompletionTokens: 1,
+				TotalTokens:      math.MaxInt,
+			},
+		},
+		{
+			name:  "inconsistent total tokens",
+			usage: TokenUsage{PromptTokens: 2, CompletionTokens: 1, TotalTokens: 2},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestController(t, WithBudget(100))
+			before := c.Stats()
+
+			if err := c.RecordUsage("default", tt.usage); err == nil {
+				t.Fatal("RecordUsage() error = nil, want invalid usage error")
+			}
+			if got := c.Stats(); got != before {
+				t.Errorf("controller stats = %+v, want unchanged %+v", got, before)
+			}
+		})
+	}
+}
+
+func TestController_RecordUsageCanonicalizesTokenTotals(t *testing.T) {
+	tests := []struct {
+		name       string
+		usage      TokenUsage
+		wantTokens int64
+		wantCost   float64
+	}{
+		{
+			name:       "derive omitted total from components",
+			usage:      TokenUsage{PromptTokens: 2, CompletionTokens: 1},
+			wantTokens: 3,
+			wantCost:   0.000004,
+		},
+		{
+			name:       "accept matching explicit total",
+			usage:      TokenUsage{PromptTokens: 2, CompletionTokens: 1, TotalTokens: 3},
+			wantTokens: 3,
+			wantCost:   0.000004,
+		},
+		{
+			// 缺少拆分维度时保留 aggregate-only 配额计数，成本因无定价维度为零。
+			name:       "accept aggregate-only total",
+			usage:      TokenUsage{TotalTokens: 1000},
+			wantTokens: 1000,
+			wantCost:   0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestController(t, WithBudget(100))
+
+			if err := c.RecordUsage("default", tt.usage); err != nil {
+				t.Fatalf("RecordUsage() error = %v, want nil", err)
+			}
+			if got := c.usedTokens; got != tt.wantTokens {
+				t.Errorf("used tokens = %d, want %d", got, tt.wantTokens)
+			}
+			if math.Abs(c.used-tt.wantCost) > 1e-12 {
+				t.Errorf("used cost = %.12f, want %.12f", c.used, tt.wantCost)
+			}
+		})
+	}
+}
+
+func TestController_RecordUsageAllowsAllZeroTokenUsage(t *testing.T) {
+	c := newTestController(t, WithBudget(100))
+	before := c.Stats()
+
+	if err := c.RecordUsage("default", TokenUsage{}); err != nil {
+		t.Fatalf("RecordUsage() error = %v, want nil", err)
+	}
+	if got := c.Stats(); got != before {
+		t.Errorf("controller stats = %+v, want unchanged %+v", got, before)
+	}
+}
+
+func TestController_RecordUsageRejectsTokenLedgerOverflow(t *testing.T) {
+	c := newTestController(t)
+	c.usedTokens = math.MaxInt64
+	before := c.Stats()
+
+	err := c.RecordUsage("default", TokenUsage{PromptTokens: 1, TotalTokens: 1})
+	if err == nil {
+		t.Fatal("RecordUsage() error = nil, want token ledger overflow error")
+	}
+	if got := c.Stats(); got != before {
+		t.Errorf("controller stats = %+v, want unchanged %+v", got, before)
+	}
+}
+
+func TestController_RecordUsageEnforcesTokenLimitAtomically(t *testing.T) {
+	const workers = 16
+	c := newTestController(t,
+		WithMaxTokensPerRequest(1),
+		WithMaxTokensTotal(1),
+		WithRequestsPerMinute(workers+1),
+	)
+
+	var checked sync.WaitGroup
+	var finished sync.WaitGroup
+	checked.Add(workers)
+	finished.Add(workers)
+	releaseRecords := make(chan struct{})
+	precheckResults := make(chan error, workers)
+	recordResults := make(chan error, workers)
+
+	for range workers {
+		go func() {
+			defer finished.Done()
+			precheckErr := c.CheckRequest(context.Background(), 1)
+			precheckResults <- precheckErr
+			checked.Done()
+			<-releaseRecords
+			if precheckErr == nil {
+				recordResults <- c.RecordUsage("default", TokenUsage{TotalTokens: 1})
+			}
+		}()
+	}
+
+	checked.Wait()
+	for range workers {
+		if err := <-precheckResults; err != nil {
+			t.Errorf("CheckRequest() error = %v, want all prechecks to pass", err)
+		}
+	}
+	close(releaseRecords)
+	finished.Wait()
+	close(recordResults)
+
+	successes := 0
+	for err := range recordResults {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Errorf("successful RecordUsage() calls = %d, want 1", successes)
+	}
+	if got := c.Stats().UsedTokens; got != 1 {
+		t.Errorf("used tokens = %d, want 1", got)
+	}
+}
+
+func TestController_RecordUsageUsesCheckedCostArithmetic(t *testing.T) {
+	t.Run("price beyond microdollar int64 range", func(t *testing.T) {
+		const price = 1e20
+		c := newTestController(t, WithPricing(map[string]ModelPricing{
+			"extreme": {PromptPrice: price},
+		}))
+
+		if err := c.RecordUsage("extreme", TokenUsage{PromptTokens: 1, TotalTokens: 1}); err != nil {
+			t.Fatalf("RecordUsage() error = %v, want nil", err)
+		}
+		if math.IsNaN(c.used) || math.IsInf(c.used, 0) || c.used <= 0 {
+			t.Errorf("used cost = %v, want finite positive cost", c.used)
+		}
+	})
+
+	t.Run("maximum token count", func(t *testing.T) {
+		c := newTestController(t,
+			WithMaxTokensTotal(0),
+			WithPricing(map[string]ModelPricing{
+				"extreme": {PromptPrice: 1},
+			}),
+		)
+
+		usage := TokenUsage{PromptTokens: math.MaxInt, TotalTokens: math.MaxInt}
+		if err := c.RecordUsage("extreme", usage); err != nil {
+			t.Fatalf("RecordUsage() error = %v, want nil", err)
+		}
+		if math.IsNaN(c.used) || math.IsInf(c.used, 0) || c.used <= 0 {
+			t.Errorf("used cost = %v, want finite positive cost", c.used)
+		}
+		if c.usedTokens != int64(math.MaxInt) {
+			t.Errorf("used tokens = %d, want %d", c.usedTokens, int64(math.MaxInt))
+		}
+	})
+
+	t.Run("single usage cost overflow", func(t *testing.T) {
+		c := newTestController(t, WithPricing(map[string]ModelPricing{
+			"extreme": {PromptPrice: math.MaxFloat64},
+		}))
+		before := c.Stats()
+
+		err := c.RecordUsage("extreme", TokenUsage{PromptTokens: 2000, TotalTokens: 2000})
+		if err == nil {
+			t.Fatal("RecordUsage() error = nil, want cost overflow error")
+		}
+		if got := c.Stats(); got != before {
+			t.Errorf("controller stats = %+v, want unchanged %+v", got, before)
+		}
+	})
+
+	t.Run("accumulated cost overflow", func(t *testing.T) {
+		c := newTestController(t, WithPricing(map[string]ModelPricing{
+			"extreme": {PromptPrice: math.MaxFloat64},
+		}))
+		usage := TokenUsage{PromptTokens: 1000, TotalTokens: 1000}
+		if err := c.RecordUsage("extreme", usage); err != nil {
+			t.Fatalf("first RecordUsage() error = %v, want nil", err)
+		}
+		before := c.Stats()
+
+		if err := c.RecordUsage("extreme", usage); err == nil {
+			t.Fatal("second RecordUsage() error = nil, want accumulated cost overflow error")
+		}
+		if got := c.Stats(); got != before {
+			t.Errorf("controller stats = %+v, want unchanged %+v", got, before)
+		}
+	})
+}
+
 func TestController_Stats(t *testing.T) {
-	c := NewController(
+	c := newTestController(t,
 		WithBudget(100.0),
 		WithMaxTokensTotal(10000),
 		WithRequestsPerMinute(60),
@@ -234,7 +652,7 @@ func TestController_Stats(t *testing.T) {
 }
 
 func TestController_Reset(t *testing.T) {
-	c := NewController(WithBudget(100.0))
+	c := newTestController(t, WithBudget(100.0))
 
 	// 记录一些使用量
 	c.RecordUsage("gpt-4", TokenUsage{TotalTokens: 1000, PromptTokens: 500, CompletionTokens: 500})
@@ -254,7 +672,7 @@ func TestController_Reset(t *testing.T) {
 }
 
 func TestController_EstimateCost(t *testing.T) {
-	c := NewController()
+	c := newTestController(t)
 
 	// GPT-4: prompt $0.03/1K, completion $0.06/1K
 	cost := c.EstimateCost("gpt-4", 1000, 1000)
@@ -271,8 +689,33 @@ func TestController_EstimateCost(t *testing.T) {
 	}
 }
 
+func TestController_EstimateCostFailsClosedForUnsafeInputs(t *testing.T) {
+	c := newTestController(t, WithPricing(map[string]ModelPricing{
+		"extreme": {PromptPrice: math.MaxFloat64},
+	}))
+	tests := []struct {
+		name             string
+		model            string
+		promptTokens     int
+		completionTokens int
+	}{
+		{name: "negative prompt tokens", model: "default", promptTokens: -1},
+		{name: "negative completion tokens", model: "default", completionTokens: -1},
+		{name: "cost overflow", model: "extreme", promptTokens: 2000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := c.EstimateCost(tt.model, tt.promptTokens, tt.completionTokens)
+			if !math.IsInf(got, 1) {
+				t.Errorf("EstimateCost() = %v, want +Inf", got)
+			}
+		})
+	}
+}
+
 func TestController_RemainingBudget(t *testing.T) {
-	c := NewController(WithBudget(100.0))
+	c := newTestController(t, WithBudget(100.0))
 
 	// 记录一些使用量
 	c.RecordUsage("gpt-4o-mini", TokenUsage{
@@ -291,7 +734,7 @@ func TestController_RemainingBudget(t *testing.T) {
 }
 
 func TestController_RemainingTokens(t *testing.T) {
-	c := NewController(WithMaxTokensTotal(10000))
+	c := newTestController(t, WithMaxTokensTotal(10000))
 
 	// 初始应该是全部
 	if c.RemainingTokens() != 10000 {
@@ -307,7 +750,7 @@ func TestController_RemainingTokens(t *testing.T) {
 }
 
 func TestController_CanAfford(t *testing.T) {
-	c := NewController(WithBudget(1.0))
+	c := newTestController(t, WithBudget(1.0))
 
 	// 可以负担
 	if !c.CanAfford(0.5) {
@@ -320,14 +763,37 @@ func TestController_CanAfford(t *testing.T) {
 	}
 
 	// 无预算限制
-	c2 := NewController() // budget = 0
+	c2 := newTestController(t) // budget = 0
 	if !c2.CanAfford(1000.0) {
 		t.Error("should be able to afford anything with no budget limit")
 	}
 }
 
+func TestController_CanAffordRejectsNonFiniteAndNegativeCosts(t *testing.T) {
+	tests := []struct {
+		name string
+		cost float64
+	}{
+		{name: "negative", cost: -1},
+		{name: "nan", cost: math.NaN()},
+		{name: "positive infinity", cost: math.Inf(1)},
+		{name: "negative infinity", cost: math.Inf(-1)},
+	}
+
+	for _, budget := range []float64{0, 1} {
+		c := newTestController(t, WithBudget(budget))
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("budget_%g/%s", budget, tt.name), func(t *testing.T) {
+				if c.CanAfford(tt.cost) {
+					t.Errorf("CanAfford(%v) = true, want false", tt.cost)
+				}
+			})
+		}
+	}
+}
+
 func TestContextWithController(t *testing.T) {
-	c := NewController()
+	c := newTestController(t)
 	ctx := context.Background()
 
 	// 添加控制器到 context
@@ -347,7 +813,7 @@ func TestContextWithController(t *testing.T) {
 }
 
 func TestCheckAndRecord(t *testing.T) {
-	c := NewController(
+	c := newTestController(t,
 		WithBudget(10.0),
 		WithRequestsPerMinute(100),
 	)
@@ -385,7 +851,7 @@ func TestCallbacks(t *testing.T) {
 	var tokenCallbackCalled bool
 	var rateCallbackCalled bool
 
-	c := NewController(
+	c := newTestController(t,
 		WithMaxTokensTotal(100),
 		WithRequestsPerMinute(1),
 		OnTokensExceeded(func(used, limit int64) {
@@ -415,8 +881,123 @@ func TestCallbacks(t *testing.T) {
 	}
 }
 
+func invokeControllerWithTimeout(t *testing.T, invoke func() error) error {
+	t.Helper()
+	result := make(chan error, 1)
+	go func() {
+		result <- invoke()
+	}()
+
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(time.Second):
+		t.Fatal("controller call timed out; callback may be running under the controller lock")
+		return nil
+	}
+}
+
+func TestControllerCallbacksCanReenterReadAPIs(t *testing.T) {
+	t.Run("token callback from request check", func(t *testing.T) {
+		var c *Controller
+		callbackCalled := false
+		c = newTestController(t,
+			WithMaxTokensTotal(1),
+			OnTokensExceeded(func(_, _ int64) {
+				_ = c.Stats()
+				_ = c.RemainingTokens()
+				callbackCalled = true
+			}),
+		)
+		c.usedTokens = 1
+
+		err := invokeControllerWithTimeout(t, func() error {
+			return c.CheckRequest(context.Background(), 1)
+		})
+		if err == nil {
+			t.Fatal("CheckRequest() error = nil, want token limit error")
+		}
+		if !callbackCalled {
+			t.Fatal("token callback was not called")
+		}
+	})
+
+	t.Run("token callback from usage record", func(t *testing.T) {
+		var c *Controller
+		callbackCalled := false
+		c = newTestController(t,
+			WithMaxTokensTotal(1),
+			OnTokensExceeded(func(_, _ int64) {
+				_ = c.Stats()
+				_ = c.RemainingTokens()
+				callbackCalled = true
+			}),
+		)
+
+		err := invokeControllerWithTimeout(t, func() error {
+			return c.RecordUsage("default", TokenUsage{TotalTokens: 2})
+		})
+		if err == nil {
+			t.Fatal("RecordUsage() error = nil, want token limit error")
+		}
+		if !callbackCalled {
+			t.Fatal("token callback was not called")
+		}
+	})
+
+	t.Run("rate callback", func(t *testing.T) {
+		var c *Controller
+		callbackCalled := false
+		c = newTestController(t,
+			WithRequestsPerMinute(1),
+			OnRateExceeded(func(_, _ int) {
+				_ = c.Stats()
+				_ = c.RemainingTokens()
+				callbackCalled = true
+			}),
+		)
+		if err := c.CheckRequest(context.Background(), 1); err != nil {
+			t.Fatalf("first CheckRequest() error = %v, want nil", err)
+		}
+
+		err := invokeControllerWithTimeout(t, func() error {
+			return c.CheckRequest(context.Background(), 1)
+		})
+		if err == nil {
+			t.Fatal("second CheckRequest() error = nil, want rate limit error")
+		}
+		if !callbackCalled {
+			t.Fatal("rate callback was not called")
+		}
+	})
+
+	t.Run("budget callback", func(t *testing.T) {
+		var c *Controller
+		callbackCalled := false
+		c = newTestController(t,
+			WithBudget(0.000001),
+			OnBudgetExceeded(func(_, _ float64) {
+				_ = c.Stats()
+				_ = c.RemainingBudget()
+				callbackCalled = true
+			}),
+		)
+
+		err := invokeControllerWithTimeout(t, func() error {
+			return c.RecordUsage("default", TokenUsage{PromptTokens: 1000, TotalTokens: 1000})
+		})
+		if err == nil {
+			t.Fatal("RecordUsage() error = nil, want budget limit error")
+		}
+		if !callbackCalled {
+			t.Fatal("budget callback was not called")
+		}
+	})
+}
+
 func TestDefaultPricing(t *testing.T) {
 	// 验证默认定价表包含预期的模型
+	pricing := DefaultPricing()
 	expectedModels := []string{
 		"gpt-4", "gpt-4-turbo", "gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo",
 		"claude-3-opus", "claude-3-sonnet", "claude-3-haiku",
@@ -425,7 +1006,7 @@ func TestDefaultPricing(t *testing.T) {
 	}
 
 	for _, model := range expectedModels {
-		if _, ok := DefaultPricing[model]; !ok {
+		if _, ok := pricing[model]; !ok {
 			t.Errorf("expected model %s in DefaultPricing", model)
 		}
 	}
@@ -484,7 +1065,7 @@ func TestControllerStats(t *testing.T) {
 }
 
 func TestController_ConcurrentAccess(t *testing.T) {
-	c := NewController(
+	c := newTestController(t,
 		WithBudget(1000.0),
 		WithMaxTokensTotal(1000000),
 		WithRequestsPerMinute(1000),
