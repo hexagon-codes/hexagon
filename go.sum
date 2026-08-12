@@ -19,8 +19,6 @@ github.com/google/jsonschema-go v0.4.2 h1:tmrUohrwoLZZS/P3x7ex0WAVknEkBZM46iALbc
 github.com/google/jsonschema-go v0.4.2/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/hexagon-codes/ai-core v0.2.10 h1:ung36pQJv8vuyom8MBavvGDBVU+hkYV/eX79litTj7k=
-github.com/hexagon-codes/ai-core v0.2.10/go.mod h1:S/D98uJPGtPivOch1gbbE5UVp5Wpkr+6DmWbGhr7hLY=
 github.com/hexagon-codes/ai-core v0.2.11 h1:NTmzzPTKgr9I0fqfpT+0bxie3dsPic/VALToR9xduOU=
 github.com/hexagon-codes/ai-core v0.2.11/go.mod h1:S/D98uJPGtPivOch1gbbE5UVp5Wpkr+6DmWbGhr7hLY=
 github.com/hexagon-codes/toolkit v0.3.4 h1:JLAmIocPUFztHx+2SrWZTZnS/qs0snEA9T2TOME1+sI=

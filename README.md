@@ -682,7 +682,8 @@ make fmt     # 格式化
 
 ### CI 与发布
 
-- 推送到 `main` 和提交 Pull Request 时，单一 CI 在 Go 1.25.12 下执行格式、依赖一致性、`go vet`、普通测试和 `govulncheck`，并在 Go 1.26.5 下补充一次 race 测试。
+- 推送到 `main` 和提交 Pull Request 时，单一 CI 使用 `go.mod` 声明的最低 Go 版本检查格式，并通过 `go test -count=1 -vet=all ./...` 执行完整 vet 和普通测试；最新稳定 Go 版本执行 race 测试和 `govulncheck`。
+- CI 使用 `GOWORK=off`、`GOTOOLCHAIN=local` 和 `GOFLAGS=-mod=readonly`，验证已发布依赖及声明的 Go 兼容性。依赖更新后仍建议执行 `go mod tidy`，但不再因 `go.sum` 中无用的历史校验和阻断提交。
 - 本仓没有自动发布工作流；维护者只在目标提交的 CI 成功后创建不可变 SemVer tag，Go 模块以该 tag 发布。
 - `examples/` 是独立 module，不在根模块 `./...` 的测试范围内；修改示例时应以 `examples/go.mod` 为基线单独验证。
 

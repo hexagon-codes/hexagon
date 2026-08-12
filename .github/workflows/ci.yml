@@ -27,10 +27,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - go: '1.25.12'
+          # 最低版本跟随模块声明，避免工作流与 go.mod 漂移。
+          - go: 'minimum'
             quality: true
             race: false
-          - go: '1.26.5'
+          # 最新稳定版承担竞态与漏洞检测，及时采用标准库修复。
+          - go: 'stable'
             quality: false
             race: true
     steps:
@@ -42,7 +44,9 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ matrix.go }}
+          go-version: ${{ matrix.go == 'stable' && 'stable' || '' }}
+          go-version-file: go.mod
+          check-latest: ${{ matrix.go == 'stable' }}
           cache-dependency-path: go.sum
 
       - name: Check formatting
@@ -55,26 +59,20 @@ jobs:
             exit 1
           fi
 
-      - name: Check dependencies
-        if: matrix.quality
-        run: go mod tidy -diff
-
-      - name: Vet
-        if: matrix.quality
-        run: go vet ./...
-
-      - name: Test
+      # 只读模块模式保留依赖解析与校验；多余的历史校验和不影响构建。
+      # 在测试编译阶段执行完整 vet，避免单独加载和检查同一批包。
+      - name: Vet and test
         if: ${{ !matrix.race }}
-        run: go test -count=1 ./...
+        run: go test -count=1 -vet=all ./...
 
       - name: Test with race detector
         if: matrix.race
         run: go test -count=1 -race ./...
 
       - name: Install govulncheck
-        if: matrix.quality
+        if: matrix.race
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
 
       - name: Check vulnerabilities
-        if: matrix.quality
+        if: matrix.race
         run: govulncheck ./...

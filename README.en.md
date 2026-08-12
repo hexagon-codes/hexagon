@@ -680,7 +680,8 @@ make fmt     # format
 
 ### CI and Release
 
-- On pushes to `main` and pull requests, the single CI workflow runs formatting, dependency consistency, `go vet`, regular tests, and `govulncheck` with Go 1.25.12, then adds one race-enabled test run with Go 1.26.5.
+- On pushes to `main` and pull requests, the single CI workflow uses the minimum Go version declared in `go.mod` for formatting checks and `go test -count=1 -vet=all ./...` for full vet analysis and regular tests. The latest stable Go version runs race-enabled tests and `govulncheck`.
+- CI sets `GOWORK=off`, `GOTOOLCHAIN=local`, and `GOFLAGS=-mod=readonly` to validate published dependencies and declared Go compatibility. Run `go mod tidy` after dependency updates, but unused historical checksums in `go.sum` no longer block CI.
 - This repository has no automated release workflow. Maintainers create an immutable SemVer tag only after CI succeeds for the target commit; that tag publishes the Go module.
 - `examples/` is a standalone module and is outside the root module's `./...` test scope; validate example changes separately against `examples/go.mod`.
 
