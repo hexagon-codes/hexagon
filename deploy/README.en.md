@@ -1,181 +1,160 @@
 <div align="right">Language: <a href="README.md">中文</a> | English</div>
 
-# Hexagon Deployment Guide
+# Hexagon Deployment Configuration
 
-## Quick Start
+This directory contains two kinds of configuration:
 
-### Docker Compose (Recommended for New Users)
+- `docker-compose.yml`: starts only the local Qdrant, Redis, and PostgreSQL infrastructure.
+- `helm/hexagon/`: a Helm template for integrating a custom Hexagon application image with Kubernetes.
 
-Start all services in one command, including Qdrant, Redis, PostgreSQL, and other infrastructure:
+The Hexagon repository is a Go library. It does not currently include an application Dockerfile or provide directly deployable application or DevUI executables. The current release workflow creates GitHub Releases only; it does not build or publish container images.
+
+## Docker Compose: Local Infrastructure
+
+### Start
 
 ```bash
 cd deploy
-
-# 1. Configure environment variables
 cp .env.example .env
-# Edit .env and fill in your LLM API Key
 
-# 2. Start
-make up
-
-# 3. Access
-# Main app:     http://localhost:8000
-# Dev UI:       http://localhost:8080
-# Redis Insight: http://localhost:8001
+# Adjust ports, the Redis password, and PostgreSQL credentials as needed
+docker compose up -d
+docker compose ps
 ```
 
-### Docker Compose (Development Mode)
+The current Compose file starts only these services:
 
-For team developers who have already started their infrastructure via [docker-dev-env](https://github.com/hexagon-codes/docker-dev-env):
+| Service | Container Ports | Default Host Ports | Data Volume |
+|---------|-----------------|--------------------|-------------|
+| Qdrant | 6333 / 6334 | 6333 / 6334 | `qdrant-data` |
+| Redis Stack | 6379 / 8001 | 6379 / 8001 | `redis-data` |
+| PostgreSQL + pgvector | 5432 | 5432 | `postgres-data` |
 
-```bash
-cd deploy
+It does not start a Hexagon application or DevUI. Run the application separately on the host, in another container, or in the target environment, and connect it to this infrastructure.
 
-# 1. Ensure the dev-net network and middleware are ready
-# docker network create dev-net  (already provided by docker-dev-env)
-
-# 2. Configure environment variables
-cp env.dev.example .env
-
-# 3. Start (application services only, connecting to external middleware)
-make dev-up
-```
-
-### Kubernetes / Helm
-
-```bash
-cd deploy
-
-# Self-contained mode (with bundled middleware)
-make helm-install
-
-# Using external infrastructure
-helm install hexagon helm/hexagon/ \
-  -n hexagon --create-namespace \
-  --set qdrant.enabled=false \
-  --set redis.enabled=false \
-  --set postgres.enabled=false \
-  --set external.qdrant.url=http://my-qdrant:6333 \
-  --set external.redis.url=my-redis:6379 \
-  --set external.postgres.dsn="postgres://user:pass@my-pg:5432/hexagon?sslmode=disable"
-```
-
-## Deployment Options Comparison
-
-| Option | Use Case | Command |
-|--------|----------|---------|
-| `docker compose up` | Quick evaluation, demos, single-node deployment | `make up` |
-| `docker compose -f docker-compose.dev.yml up` | Team development (reusing docker-dev-env) | `make dev-up` |
-| `helm install` | Kubernetes cluster, production environment | `make helm-install` |
-
-## Directory Structure
-
-```
-deploy/
-├── docker-compose.yml          # Infrastructure services (Qdrant / Redis / PostgreSQL)
-├── .env.example                # Environment variable template for full mode
-├── env.dev.example             # Environment variable template for development mode
-├── Makefile                    # Shortcut commands
-└── helm/hexagon/               # Helm Chart
-    ├── Chart.yaml
-    ├── values.yaml             # Switchable between bundled/external
-    ├── .helmignore
-    └── templates/
-        ├── _helpers.tpl
-        ├── deployment.yaml     # App + DevUI
-        ├── statefulset.yaml    # Qdrant / Redis / PostgreSQL
-        ├── service.yaml
-        ├── ingress.yaml
-        ├── secret.yaml
-        ├── serviceaccount.yaml
-        └── NOTES.txt           # Post-install notes
-```
-
-## Configuration Reference
-
-### Environment Variables
+### Environment Variables Used by Compose
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENAI_API_KEY` | (empty) | OpenAI API Key |
-| `DEEPSEEK_API_KEY` | (empty) | DeepSeek API Key |
-| `LOG_LEVEL` | info | Log level (debug/info/warn/error) |
-| `QDRANT_URL` | http://qdrant:6333 | Qdrant connection URL |
-| `REDIS_URL` | redis:6379 | Redis connection URL |
-| `REDIS_PASSWORD` | (empty) | Redis password |
-| `POSTGRES_DSN` | postgres://hexagon:hexagon@postgres:5432/hexagon?sslmode=disable | PostgreSQL DSN |
+| `QDRANT_HTTP_PORT` | `6333` | Qdrant HTTP host port |
+| `QDRANT_GRPC_PORT` | `6334` | Qdrant gRPC host port |
+| `REDIS_PORT` | `6379` | Redis host port |
+| `REDIS_INSIGHT_PORT` | `8001` | Redis Insight host port |
+| `REDIS_PASSWORD` | empty | Redis password |
+| `POSTGRES_PORT` | `5432` | PostgreSQL host port |
+| `POSTGRES_USER` | `hexagon` | PostgreSQL username |
+| `POSTGRES_PASSWORD` | `hexagon` | PostgreSQL password |
+| `POSTGRES_DB` | `hexagon` | PostgreSQL database name |
 
-### Helm Bundled/External Switching
+The LLM, application, and DevUI variables in `.env.example` are not consumed by the current `docker-compose.yml`; configure them in the actual application's runtime environment.
 
-In `values.yaml`, each middleware component has an `enabled` toggle:
-
-```yaml
-# Use bundled component (default)
-qdrant:
-  enabled: true
-
-# Use external component
-qdrant:
-  enabled: false
-external:
-  qdrant:
-    url: "http://my-qdrant:6333"
-```
-
-## Common Commands
+### Common Commands
 
 ```bash
-# Docker Compose
-make up              # Start all services
-make down            # Stop services
-make logs            # View logs
-make status          # Check status
-make restart         # Restart application
-make clean           # Stop and delete data
+cd deploy
 
-# Development mode
-make dev-up          # Start (connecting to docker-dev-env)
-make dev-down        # Stop
-make dev-logs        # View logs
-
-# Helm
-make helm-install    # Install
-make helm-upgrade    # Upgrade
-make helm-uninstall  # Uninstall
-make helm-template   # Preview rendered output
+docker compose up -d                       # Start the infrastructure
+docker compose ps                          # Show service status
+docker compose logs -f                     # Follow all infrastructure logs
+docker compose logs -f qdrant redis postgres
+docker compose down                        # Stop and retain data volumes
 ```
 
-## Troubleshooting
-
-### Application Fails to Start
+The deployment Makefile shortcuts that match the current Compose configuration are:
 
 ```bash
-# View container logs
-docker compose logs hexagon-app
+make up       # Start the infrastructure
+make status   # Show status
+make down     # Stop and retain data volumes
+make clean    # Stop and delete data volumes
+```
 
-# Check health status
+> `make clean` and `docker compose down -v` permanently delete the local Qdrant, Redis, and PostgreSQL data volumes. Confirm that the data is no longer needed first.
+
+### Infrastructure Troubleshooting
+
+```bash
+cd deploy
+
+docker compose config --services
 docker compose ps
+docker compose logs qdrant
+docker compose logs redis
+docker compose logs postgres
 
-# Enter container for debugging
-docker compose exec hexagon-app sh
+# Check Qdrant on the default port
+curl -f http://localhost:6333/healthz
+
+# Check PostgreSQL
+docker compose exec postgres pg_isready -U hexagon
+
+# Check Redis when no password is configured
+docker compose exec redis redis-cli ping
 ```
 
-### Cannot Connect to Infrastructure
+Adjust the commands if you changed ports, users, or passwords.
+
+## Helm: Application-Integration Template
+
+`helm/hexagon/` can generate the following Kubernetes resources:
+
+- a Hexagon application Deployment and Service;
+- an optional DevUI Deployment and Service;
+- optional Qdrant, Redis, and PostgreSQL StatefulSets and Services;
+- an optional Ingress, ServiceAccount, and LLM API key Secret managed by this chart.
+
+### Usage Boundary
+
+The chart's default image values do not identify a runtime image published or verified by this repository. Before installation, replace `app.image.repository` and `app.image.tag`. When DevUI is enabled, also replace `devui.image.repository` and `devui.image.tag`.
+
+The custom images must satisfy the fixed runtime contract in the templates:
+
+| Component | Required Entry Point | Fixed Container Port | Health Check | Writable Paths |
+|-----------|----------------------|----------------------|--------------|----------------|
+| Application | `/app/hexagon serve` | 8000 | `GET /health` | `/tmp`, `/app/data` |
+| DevUI, when enabled | `/app/hexagon devui` | 8080 | `GET /health` | `/tmp` |
+
+The images must also:
+
+- run as non-root UID/GID `10001`;
+- support a read-only root filesystem;
+- read `QDRANT_URL`, `REDIS_URL`, `REDIS_PASSWORD`, and `POSTGRES_DSN` from environment variables;
+- read `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` when the corresponding provider is required.
+
+The DevUI template sets `DEVUI_ADDR=:8080` and uses `HEXAGON_APP_URL` to point to the application Service in the same Release. If an image does not meet these requirements, adjust the Helm templates or the custom image before deployment; do not use the default installation as-is.
+
+### Image and Infrastructure Configuration Examples
+
+The following command shows only the required configuration. Replace the image coordinates with your own verified artifact:
 
 ```bash
-# Verify infrastructure health
-docker compose ps qdrant redis postgres
+cd deploy
 
-# Test network connectivity
-docker compose exec hexagon-app wget -q -O- http://qdrant:6333/healthz
+helm install hexagon helm/hexagon \
+  -n hexagon --create-namespace \
+  --set app.image.repository=registry.example.com/agent-runtime \
+  --set app.image.tag=1.0.0 \
+  --set devui.enabled=false
 ```
 
-### Insufficient Disk Space
+When enabling DevUI, provide an image that satisfies the DevUI entry-point contract:
 
 ```bash
-# Clean up unused Docker resources
-docker system prune -f
-
-# Clean up data volumes (Warning: this will delete data)
-docker compose down -v
+helm install hexagon helm/hexagon \
+  -n hexagon --create-namespace \
+  --set app.image.repository=registry.example.com/agent-runtime \
+  --set app.image.tag=1.0.0 \
+  --set devui.enabled=true \
+  --set devui.image.repository=registry.example.com/devui-runtime \
+  --set devui.image.tag=1.0.0
 ```
+
+The chart creates Qdrant, Redis, and PostgreSQL by default. To use external services, set each corresponding `enabled` value to `false` and fully configure `external.qdrant.url`, `external.redis.*`, and `external.postgres.dsn`.
+
+### Current Secret Behavior
+
+When `secrets.openaiApiKey` or `secrets.deepseekApiKey` is non-empty, the chart creates and references a Kubernetes Secret managed by this chart. The chart currently has no option for referencing an existing Secret and no External Secrets integration. Evaluate this behavior against the target environment's secret-management requirements before deployment, and never commit real secrets to the repository.
+
+### Verification Responsibility
+
+The current CI validates only Go dependency consistency and race tests. It does not render, install, or publish the Helm chart. In an environment with Helm installed and access to the target Kubernetes cluster, inspect the rendered manifests and verify the image contract before installing or upgrading the Release.

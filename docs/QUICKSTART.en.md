@@ -6,7 +6,7 @@ This guide helps you get started with the Hexagon AI Agent framework in 30 minut
 
 ## Project Overview
 
-**Hexagon** is named after the Chinese internet term "hexagonal warrior" (六边形战士), symbolizing balanced strength with no weak points. The framework focuses on six core dimensions — **ease of use, performance, extensibility, task orchestration, observability, and security** — providing Go developers with a production-ready AI Agent development foundation.
+**Hexagon** is named after the Chinese internet term "hexagonal warrior" (六边形战士), referring to balanced coverage across multiple capabilities. The framework focuses on six core dimensions — **ease of use, performance, extensibility, task orchestration, observability, and security** — and provides Go developers with an AI Agent framework.
 
 ### Ecosystem
 
@@ -37,7 +37,7 @@ Hexagon is a complete AI Agent development ecosystem:
 
 ### System Requirements
 
-- Go 1.25.7 or higher
+- Go 1.25.12 or higher
 - Network access (to reach LLM APIs)
 
 ### Environment Variables
@@ -177,37 +177,54 @@ package main
 import (
     "context"
     "fmt"
-    "github.com/hexagon-codes/hexagon"
+    "os"
+
+    "github.com/hexagon-codes/ai-core/llm/openai"
+    "github.com/hexagon-codes/ai-core/store/vector"
+    "github.com/hexagon-codes/hexagon/rag"
+    "github.com/hexagon-codes/hexagon/rag/embedder"
 )
 
 func main() {
     ctx := context.Background()
 
-    // Create an in-memory vector store
-    store := hexagon.NewMemoryVectorStore()
+    // Provider 同时提供 LLM 与嵌入能力。
+    provider := openai.New(os.Getenv("OPENAI_API_KEY"))
+    model := "text-embedding-3-small"
+    dimension := openai.EmbeddingDimension(model)
 
-    // Create an embedder
-    embedder := hexagon.NewOpenAIEmbedder()
+    // 存储维度必须与嵌入模型一致。
+    store := vector.NewMemoryStore(dimension)
+    embeddingEngine := embedder.NewOpenAIEmbedder(
+        provider,
+        embedder.WithModel(model),
+        embedder.WithDimension(dimension),
+    )
 
     // Create the RAG engine
-    engine := hexagon.NewRAGEngine(
-        hexagon.WithRAGStore(store),
-        hexagon.WithRAGEmbedder(embedder),
+    engine := rag.NewEngine(
+        rag.WithStore(store),
+        rag.WithEngineEmbedder(embeddingEngine),
     )
 
     // Index documents
-    docs := []hexagon.Document{
+    docs := []rag.Document{
         {ID: "1", Content: "Go is a statically typed, compiled language developed by Google."},
         {ID: "2", Content: "Go supports concurrent programming through goroutines and channels."},
         {ID: "3", Content: "Go's standard library is extensive, covering HTTP, JSON, cryptography, and more."},
     }
-    engine.Index(ctx, docs)
+    if err := engine.Index(ctx, docs); err != nil {
+        panic(err)
+    }
 
     // Retrieve relevant documents
-    results, _ := engine.Retrieve(ctx, "Go's concurrency features",
-        hexagon.WithTopK(2),
-        hexagon.WithMinScore(0.5),
+    results, err := engine.Retrieve(ctx, "Go's concurrency features",
+        rag.WithTopK(2),
+        rag.WithMinScore(0.5),
     )
+    if err != nil {
+        panic(err)
+    }
 
     for _, doc := range results {
         fmt.Printf("[%.2f] %s\n", doc.Score, doc.Content)
@@ -220,15 +237,70 @@ func main() {
 For production environments, Qdrant is recommended:
 
 ```go
-// Create a Qdrant store
-store, _ := hexagon.NewQdrantStore(hexagon.QdrantConfig{
-    Host:             "localhost",
-    Port:             6333,
-    Collection:       "my-docs",
-    Dimension:        1536,
-    CreateCollection: true,
-})
+package main
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/hexagon-codes/ai-core/store/vector"
+    "github.com/hexagon-codes/ai-core/store/vector/qdrant"
+)
+
+func migrateKnownDocuments(ctx context.Context, legacy, current *qdrant.Store, ids []string) error {
+    for _, id := range ids {
+        doc, err := legacy.Get(ctx, id)
+        if err != nil {
+            return fmt.Errorf("read legacy document %q: %w", id, err)
+        }
+        if doc == nil {
+            continue
+        }
+        if err := current.Add(ctx, []vector.Document{*doc}); err != nil {
+            return fmt.Errorf("write UUIDv8 document %q: %w", id, err)
+        }
+    }
+    return nil
+}
+
+func main() {
+    ctx := context.Background()
+
+    // 旧策略仅用于读取迁移数据，禁止继续通过它写入。
+    legacyStore, err := qdrant.New(qdrant.Config{
+        Host:            "localhost",
+        Port:            6333,
+        Collection:      "my-docs-legacy",
+        Dimension:       1536,
+        PointIDStrategy: qdrant.PointIDLegacyHash31,
+    })
+    if err != nil {
+        panic(err)
+    }
+    defer legacyStore.Close()
+
+    // 新集合使用 UUIDv8；省略 PointIDStrategy 时默认值相同。
+    currentStore, err := qdrant.New(qdrant.Config{
+        Host:             "localhost",
+        Port:             6333,
+        Collection:       "my-docs-v2",
+        Dimension:        1536,
+        CreateCollection: true,
+        PointIDStrategy:  qdrant.PointIDUUIDv8,
+    })
+    if err != nil {
+        panic(err)
+    }
+    defer currentStore.Close()
+
+    // 生产迁移应从权威清单分批处理 ID，并在切流前记录检查点。
+    if err := migrateKnownDocuments(ctx, legacyStore, currentStore, []string{"doc-1", "doc-2"}); err != nil {
+        panic(err)
+    }
+}
 ```
+
+Starting with ai-core v0.2.7, new collections use SHA-256-derived UUIDv8 point IDs by default. Migrate an old collection into a differently named new collection. Use `PointIDLegacyHash31` only to read the old mapping during the migration window; do not add data through the legacy strategy or mix both ID strategies in one collection.
 
 ---
 
@@ -242,7 +314,6 @@ package main
 import (
     "context"
     "fmt"
-    "github.com/hexagon-codes/hexagon"
     "github.com/hexagon-codes/hexagon/orchestration/graph"
 )
 
@@ -262,7 +333,7 @@ func main() {
     ctx := context.Background()
 
     // Build the graph
-    g, _ := hexagon.NewGraph[MyState]("example-graph").
+    g, _ := graph.NewGraph[MyState]("example-graph").
         AddNode("analyze", func(ctx context.Context, s MyState) (MyState, error) {
             s.Step1 = "Analyzed: " + s.Input
             return s, nil
@@ -275,10 +346,10 @@ func main() {
             s.Final = "Summary: " + s.Step2
             return s, nil
         }).
-        AddEdge(hexagon.START, "analyze").
+        AddEdge(graph.START, "analyze").
         AddEdge("analyze", "process").
         AddEdge("process", "summarize").
-        AddEdge("summarize", hexagon.END).
+        AddEdge("summarize", graph.END).
         Build()
 
     // Execute
@@ -290,23 +361,58 @@ func main() {
 ### Conditional Branching
 
 ```go
-g, _ := hexagon.NewGraph[MyState]("conditional-graph").
-    AddNode("check", checkHandler).
-    AddNode("path_a", pathAHandler).
-    AddNode("path_b", pathBHandler).
-    AddEdge(hexagon.START, "check").
-    AddConditionalEdge("check", func(s MyState) string {
-        if s.ShouldUsePathA {
-            return "a"
-        }
-        return "b"
-    }, map[string]string{
-        "a": "path_a",
-        "b": "path_b",
-    }).
-    AddEdge("path_a", hexagon.END).
-    AddEdge("path_b", hexagon.END).
-    Build()
+package main
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/hexagon-codes/hexagon/orchestration/graph"
+)
+
+type ConditionalState struct {
+    ShouldUsePathA bool
+    Result         string
+}
+
+func (s ConditionalState) Clone() graph.State { return s }
+
+func main() {
+    g, err := graph.NewGraph[ConditionalState]("conditional-graph").
+        AddNode("check", func(_ context.Context, s ConditionalState) (ConditionalState, error) {
+            return s, nil
+        }).
+        AddNode("path_a", func(_ context.Context, s ConditionalState) (ConditionalState, error) {
+            s.Result = "A"
+            return s, nil
+        }).
+        AddNode("path_b", func(_ context.Context, s ConditionalState) (ConditionalState, error) {
+            s.Result = "B"
+            return s, nil
+        }).
+        AddEdge(graph.START, "check").
+        AddConditionalEdge("check", func(s ConditionalState) string {
+            if s.ShouldUsePathA {
+                return "a"
+            }
+            return "b"
+        }, map[string]string{
+            "a": "path_a",
+            "b": "path_b",
+        }).
+        AddEdge("path_a", graph.END).
+        AddEdge("path_b", graph.END).
+        Build()
+    if err != nil {
+        panic(err)
+    }
+
+    result, err := g.Run(context.Background(), ConditionalState{ShouldUsePathA: true})
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println(result.Result)
+}
 ```
 
 ---
@@ -321,30 +427,41 @@ package main
 import (
     "context"
     "fmt"
-    "github.com/hexagon-codes/hexagon"
+    "os"
+
+    "github.com/hexagon-codes/ai-core/llm/openai"
+    "github.com/hexagon-codes/hexagon/agent"
 )
 
 func main() {
     ctx := context.Background()
+    provider := openai.New(os.Getenv("OPENAI_API_KEY"))
 
     // Create agents
-    researcher := hexagon.QuickStart(
-        hexagon.WithSystemPrompt("You are a researcher responsible for gathering information"),
+    researcher := agent.NewReAct(
+        agent.WithLLM(provider),
+        agent.WithName("researcher"),
+        agent.WithSystemPrompt("You are a researcher responsible for gathering information"),
     )
-    writer := hexagon.QuickStart(
-        hexagon.WithSystemPrompt("You are a writer responsible for creating content"),
+    writer := agent.NewReAct(
+        agent.WithLLM(provider),
+        agent.WithName("writer"),
+        agent.WithSystemPrompt("You are a writer responsible for creating content"),
     )
 
     // Create a team (sequential execution)
-    team := hexagon.NewTeam("content-team",
-        hexagon.WithAgents(researcher, writer),
-        hexagon.WithMode(hexagon.TeamModeSequential),
+    team := agent.NewTeam("content-team",
+        agent.WithAgents(researcher, writer),
+        agent.WithMode(agent.TeamModeSequential),
     )
 
     // Execute
-    output, _ := team.Run(ctx, hexagon.Input{
+    output, err := team.Run(ctx, agent.Input{
         Query: "Write an introduction to the Go programming language",
     })
+    if err != nil {
+        panic(err)
+    }
 
     fmt.Println(output.Content)
 }
@@ -353,29 +470,45 @@ func main() {
 ### Agent Handoff (Swarm Mode)
 
 ```go
-// Create agents
-salesAgent := hexagon.QuickStart(
-    hexagon.WithSystemPrompt("You are a sales representative"),
-    hexagon.WithTools(
-        hexagon.TransferTo(supportAgent), // handoff tool
-    ),
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+
+    "github.com/hexagon-codes/ai-core/llm/openai"
+    "github.com/hexagon-codes/hexagon/agent"
 )
 
-supportAgent := hexagon.QuickStart(
-    hexagon.WithSystemPrompt("You are technical support"),
-    hexagon.WithTools(
-        hexagon.TransferTo(salesAgent),
-    ),
-)
+func main() {
+    ctx := context.Background()
+    provider := openai.New(os.Getenv("OPENAI_API_KEY"))
 
-// Create Swarm runner
-runner := agent.NewSwarmRunner(salesAgent)
-runner.MaxHandoffs = 5
+    // 先创建目标 Agent，避免局部变量前向引用。
+    supportAgent := agent.NewReAct(
+        agent.WithLLM(provider),
+        agent.WithName("support"),
+        agent.WithSystemPrompt("You are technical support"),
+    )
+    salesAgent := agent.NewReAct(
+        agent.WithLLM(provider),
+        agent.WithName("sales"),
+        agent.WithSystemPrompt("You are a sales representative"),
+        agent.WithTools(agent.TransferTo(supportAgent)),
+    )
 
-// Run
-output, _ := runner.Run(ctx, hexagon.Input{
-    Query: "I'd like to know about pricing, and I also have some technical questions",
-})
+    runner := agent.NewSwarmRunner(salesAgent)
+    runner.MaxHandoffs = 5
+
+    output, err := runner.Run(ctx, agent.Input{
+        Query: "I'd like to know about pricing, and I also have some technical questions",
+    })
+    if err != nil {
+        panic(err)
+    }
+    fmt.Println(output.Content)
+}
 ```
 
 ---
@@ -385,21 +518,71 @@ output, _ := runner.Run(ctx, hexagon.Input{
 ### Prompt Injection Detection
 
 ```go
-guard := hexagon.NewPromptInjectionGuard()
-result, _ := guard.Check(ctx, userInput)
+package main
 
-if !result.Passed {
-    fmt.Printf("Potential injection attack detected: %s\n", result.Reason)
+import (
+    "context"
+    "fmt"
+
+    "github.com/hexagon-codes/hexagon/security/guard"
+)
+
+func checkPrompt(ctx context.Context, userInput string) error {
+    promptGuard := guard.NewPromptInjectionGuard()
+    result, err := promptGuard.Check(ctx, userInput)
+    if err != nil {
+        return err
+    }
+
+    if !result.Passed {
+        return fmt.Errorf("prompt rejected: %s", result.Reason)
+    }
+    return nil
 }
 ```
 
 ### Cost Control
 
 ```go
-controller := hexagon.NewCostController(
-    hexagon.WithBudget(10.0),           // $10 budget
-    hexagon.WithMaxTokensTotal(100000), // total token limit
+package main
+
+import (
+    "context"
+
+    "github.com/hexagon-codes/ai-core/llm"
+    "github.com/hexagon-codes/hexagon/agent"
+    "github.com/hexagon-codes/hexagon/runtime/middleware"
+    "github.com/hexagon-codes/hexagon/security/cost"
 )
+
+func runWithBudget(ctx context.Context, provider llm.Provider, query string, estimatedTokens int64) (agent.Output, error) {
+    controller, err := cost.NewController(
+        cost.WithBudget(10.0),
+        cost.WithMaxTokensTotal(100_000),
+        cost.WithRequestsPerMinute(60),
+    )
+    if err != nil {
+        return agent.Output{}, err
+    }
+
+    budgetedAgent := agent.NewReAct(
+        agent.WithLLM(provider),
+        agent.WithMiddleware(middleware.NewBudgetControl(middleware.BudgetControlConfig{
+            Limits: middleware.BudgetLimits{
+                MaxTokens:  100_000,
+                MaxCostUSD: 10.0,
+            },
+            Cost:   controller.BudgetCostFunc(),
+            Record: controller.RecordUsageFunc(),
+        })),
+    )
+
+    // 每次 Agent 请求前检查累计 token 与请求速率。
+    if err := controller.CheckRequest(ctx, estimatedTokens); err != nil {
+        return agent.Output{}, err
+    }
+    return budgetedAgent.Run(ctx, agent.Input{Query: query})
+}
 ```
 
 ---
@@ -409,21 +592,38 @@ controller := hexagon.NewCostController(
 ### Tracing
 
 ```go
-tracer := hexagon.NewTracer()
-ctx := hexagon.ContextWithTracer(ctx, tracer)
+package main
 
-span := hexagon.StartSpan(ctx, "my_operation")
-defer span.End()
+import (
+    "context"
 
-span.SetAttribute("user_id", "123")
+    "github.com/hexagon-codes/hexagon/observe/tracer"
+)
+
+func tracedOperation(ctx context.Context) {
+    traceStore := tracer.NewMemoryTracer()
+    ctx = tracer.ContextWithTracer(ctx, traceStore)
+
+    ctx, span := tracer.StartSpan(ctx, "my_operation")
+    defer span.End()
+
+    span.SetAttribute("user_id", "123")
+    _ = ctx
+}
 ```
 
 ### Metrics
 
 ```go
-metrics := hexagon.NewMetrics()
-metrics.Counter("agent_calls", "agent", "react").Inc()
-metrics.Histogram("latency_ms").Observe(123.5)
+package main
+
+import "github.com/hexagon-codes/hexagon/observe/metrics"
+
+func main() {
+    collector := metrics.NewMemoryMetrics()
+    collector.Counter("agent_calls", "agent", "react").Inc()
+    collector.Histogram("latency_ms").Observe(123.5)
+}
 ```
 
 ---
@@ -433,25 +633,61 @@ metrics.Histogram("latency_ms").Observe(123.5)
 A built-in development and debugging interface for real-time inspection of agent execution.
 
 ```go
-import "github.com/hexagon-codes/hexagon/observe/devui"
+package main
 
-// Create DevUI
-ui := devui.New(
-    devui.WithAddr(":8080"),
-    devui.WithMaxEvents(1000),
+import (
+    "context"
+    "log"
+    "os"
+    "os/signal"
+    "syscall"
+    "time"
+
+    "github.com/hexagon-codes/hexagon/observe/devui"
 )
 
-// Start the server
-go ui.Start()
+func main() {
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+    defer stop()
 
-// Visit http://localhost:8080
+    // 仅绑定回环地址，避免将调试 API 暴露到局域网或互联网。
+    ui := devui.New(
+        devui.WithAddr("127.0.0.1:8080"),
+        devui.WithMaxEvents(1000),
+    )
+
+    errCh := make(chan error, 1)
+    go func() {
+        errCh <- ui.Start()
+    }()
+
+    select {
+    case err := <-errCh:
+        if err != nil {
+            log.Fatal(err)
+        }
+        return
+    case <-ctx.Done():
+    }
+
+    shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    if err := ui.Stop(shutdownCtx); err != nil {
+        log.Fatal(err)
+    }
+    if err := <-errCh; err != nil {
+        log.Fatal(err)
+    }
+}
+
+// 访问 http://127.0.0.1:8080
 ```
 
 **Running the example:**
 
 ```bash
-# Start the backend
-go run examples/devui/main.go
+# Run the Dev UI program above
+go run main.go
 
 # Start the frontend (hexagon-ui)
 cd ../hexagon-ui
@@ -468,28 +704,27 @@ npm run dev
 
 ---
 
-## Deployment
+## Local Infrastructure and Deployment Templates
 
-Hexagon supports three deployment options:
+The repository's `deploy/` directory provides local infrastructure orchestration and Helm templates only. It does not start a Hexagon application or Dev UI.
 
-### Docker Quick Start
+### Start Local Infrastructure with Docker Compose
 
 ```bash
 cd deploy
 cp .env.example .env
-# Edit .env and fill in your LLM API key
 make up
-# Main app: http://localhost:8000  Dev UI: http://localhost:8080
+# Starts Qdrant, Redis/Redis Insight, and PostgreSQL
 ```
 
-### Kubernetes / Helm
+### Render Kubernetes / Helm Templates
 
 ```bash
 cd deploy
-make helm-install
+make helm-template
 ```
 
-See the [Deployment Guide](../deploy/README.md) for details.
+`helm-template` renders manifests locally and does not modify a cluster. Review the generated manifests before deploying them through your release process. See the [Deployment Guide](../deploy/README.en.md) for details.
 
 ---
 
@@ -498,7 +733,7 @@ See the [Deployment Guide](../deploy/README.md) for details.
 - Read the [API Reference](API.en.md) for the complete API
 - Read the [Architecture Design](DESIGN.en.md) to understand the framework in depth
 - Read the [Framework Comparison](comparison.en.md) to see how Hexagon differs from alternatives
-- Read the [Deployment Guide](../deploy/README.md) for deployment configuration
+- Read the [Deployment Guide](../deploy/README.en.md) for deployment configuration
 - Browse the [Example Code](../examples/) for more use cases
 - Visit [GitHub](https://github.com/hexagon-codes/hexagon) to contribute
 
@@ -507,22 +742,41 @@ See the [Deployment Guide](../deploy/README.md) for details.
 ### Q: How do I switch LLM providers?
 
 ```go
-import "github.com/hexagon-codes/ai-core/llm/deepseek"
+package main
 
-provider := deepseek.New(os.Getenv("DEEPSEEK_API_KEY"))
-agent := hexagon.QuickStart(
-    hexagon.WithProvider(provider),
+import (
+    "os"
+
+    "github.com/hexagon-codes/ai-core/llm/deepseek"
+    "github.com/hexagon-codes/hexagon/agent"
 )
+
+func main() {
+    provider := deepseek.New(os.Getenv("DEEPSEEK_API_KEY"))
+    myAgent := agent.NewReAct(agent.WithLLM(provider))
+    _ = myAgent
+}
 ```
 
 ### Q: How do I customize Memory?
 
 ```go
-// Use a larger buffer
-memory := hexagon.NewBufferMemory(1000)
-agent := hexagon.QuickStart(
-    hexagon.WithMemory(memory),
+package main
+
+import (
+    "github.com/hexagon-codes/ai-core/llm"
+    "github.com/hexagon-codes/ai-core/memory"
+    "github.com/hexagon-codes/hexagon/agent"
 )
+
+func newAgentWithMemory(provider llm.Provider) *agent.ReActAgent {
+    // 使用更大的缓冲区。
+    conversationMemory := memory.NewBuffer(1000)
+    return agent.NewReAct(
+        agent.WithLLM(provider),
+        agent.WithMemory(conversationMemory),
+    )
+}
 ```
 
 ### Q: How do I debug an Agent?
@@ -530,10 +784,17 @@ agent := hexagon.QuickStart(
 `WithVerbose` is an Agent option in the `agent` package; use it when constructing an Agent directly:
 
 ```go
-import "github.com/hexagon-codes/hexagon/agent"
+package main
 
-myAgent := agent.NewReAct(
-    agent.WithLLM(provider),
-    agent.WithVerbose(true), // enable verbose logging
+import (
+    "github.com/hexagon-codes/ai-core/llm"
+    "github.com/hexagon-codes/hexagon/agent"
 )
+
+func newVerboseAgent(provider llm.Provider) *agent.ReActAgent {
+    return agent.NewReAct(
+        agent.WithLLM(provider),
+        agent.WithVerbose(true), // enable verbose logging
+    )
+}
 ```

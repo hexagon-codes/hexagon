@@ -32,7 +32,7 @@ func main() {
 
     // Run the Agent
     ctx := context.Background()
-    result, err := myAgent.Run(ctx, agent.Input{
+    result, err := myAgent.Invoke(ctx, agent.Input{
         Query: "Hello!",
     })
 
@@ -100,12 +100,12 @@ import (
 )
 
 // File operation tools
-fileTools := file.Tools()
+fileTools := file.New(file.DefaultConfig()).All()
 
 // Shell execution tool
-shellTool := shell.NewShellTool()
+shellTool := shell.New(shell.DefaultConfig()).ExecuteTool()
 
-agent := agent.NewBaseAgent(
+myAgent := agent.NewBaseAgent(
     agent.WithTools(append(fileTools, shellTool)...),
 )
 ```
@@ -166,38 +166,40 @@ myAgent := agent.NewBaseAgent(
 ```yaml
 # agent.yaml
 name: my-agent
+type: react
 role:
   name: Assistant
   goal: Help users solve problems
   backstory: You are an experienced AI assistant
 llm:
   provider: openai
-  model: gpt-4
+  model: gpt-4o
+  api_key: ${OPENAI_API_KEY}
   temperature: 0.7
-tools:
-  - type: file
-    config:
-      allowed_paths: ["/tmp"]
-  - type: shell
-    config:
-      timeout: 30s
+max_iterations: 5
+verbose: false
 memory:
   type: buffer
-  config:
-    max_messages: 10
+  max_size: 10
 ```
 
 ```go
-import "github.com/hexagon-codes/hexagon/config"
+import (
+    "github.com/hexagon-codes/hexagon/agent"
+    "github.com/hexagon-codes/hexagon/config"
+)
 
-// Load from a configuration file
-cfg, err := config.LoadAgentConfig("agent.yaml")
-if err != nil {
-    panic(err)
+func buildAgentFromConfig(path string) (agent.Agent, error) {
+    cfg, err := config.LoadAgentConfig(path)
+    if err != nil {
+        return nil, err
+    }
+
+    return config.NewBuilder().BuildAgent(cfg)
 }
-
-agent, err := cfg.Build()
 ```
+
+`LoadAgentConfig` only parses the file and expands environment variables; `AgentConfig` has no `Build` method. Construct the Agent explicitly with `config.Builder.BuildAgent`. The default tool factory does not create file or shell tools from YAML automatically. If you need those tools, construct and inject them explicitly as shown in “Using Built-in Tools,” or provide a custom `ToolFactory`.
 
 ## Best Practices
 
@@ -230,7 +232,7 @@ You are an assistant, answer questions.
 ### 3. Error Handling
 
 ```go
-result, err := myAgent.Run(ctx, input)
+result, err := myAgent.Invoke(ctx, input)
 if err != nil {
     switch {
     case errors.Is(err, context.DeadlineExceeded):
@@ -298,17 +300,37 @@ myAgent := agent.NewReAct(
 ### Using Dev UI
 
 ```go
-import "github.com/hexagon-codes/hexagon/observe/devui"
+import (
+    "context"
+    "log"
+    "time"
 
-// Start the Dev UI (the listen address is set via WithAddr; Start() takes no args)
-ui := devui.New(devui.WithAddr(":8080"))
-go ui.Start()
+    "github.com/hexagon-codes/hexagon/hooks"
+    "github.com/hexagon-codes/hexagon/observe/devui"
+)
 
-// Register ui.HookManager() with the Agent's hooks to push events to the Dev UI
+ui := devui.New(devui.WithAddr("127.0.0.1:8080"))
+ctx = hooks.ContextWithManager(ctx, ui.HookManager())
+
+go func() {
+    if err := ui.Start(); err != nil {
+        log.Printf("Dev UI stopped with error: %v", err)
+    }
+}()
+
+defer func() {
+    shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    if err := ui.Stop(shutdownCtx); err != nil {
+        log.Printf("Failed to stop Dev UI: %v", err)
+    }
+}()
 ```
+
+Both the default configuration and this example bind Dev UI only to the local loopback interface. If you switch to a non-loopback address, configure a token containing at least 32 non-whitespace bytes with `devui.WithAuthToken`; otherwise the server refuses to start.
 
 ## Next Steps
 
-- Learn about [Multi-Agent Collaboration](./multi-agent.md)
-- Explore [RAG System Integration](./rag-integration.md)
-- Master [Graph Orchestration](./graph-orchestration.md)
+- Learn about [Multi-Agent Collaboration](./multi-agent.en.md)
+- Explore [RAG System Integration](./rag-integration.en.md)
+- Master [Graph Orchestration](./graph-orchestration.en.md)

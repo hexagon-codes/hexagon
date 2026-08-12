@@ -2,575 +2,404 @@
 
 # 多 Agent 协作指南
 
-Hexagon 提供强大的多 Agent 协作能力，支持团队协作、Agent 交接和网络通信。
+Hexagon 当前提供四类进程内多 Agent 原语：`Team` 负责固定编排，`ParallelAgent` 负责并行扇出，`SwarmRunner` 负责由工具调用驱动的 Agent 交接，`AgentNetwork` 负责按 Agent ID 传递消息。需要对多个 Agent 的回答做投票时，使用 `ConsensusProtocol`；跨服务通信则使用 `agent/a2a` 的服务器和客户端。
 
-## 角色系统
-
-### 定义角色
+本文中的 `researcher`、`writer`、`reviewer`、`manager` 等变量均表示已经配置好 LLM 的 `agent.Agent`。例如：
 
 ```go
-import "github.com/hexagon-codes/hexagon/agent"
-
-role := agent.Role{
-    Name:      "研究员",
-    Goal:      "深入研究技术问题并提供详细分析",
-    Backstory: "你是一名经验丰富的技术研究员，擅长分析复杂的技术问题。",
-}
-
-researcher := agent.NewBaseAgent(
-    agent.WithRole(role),
+researcher := agent.NewReAct(
+    agent.WithName("researcher"),
+    agent.WithRole(agent.Role{
+        Name:      "研究员",
+        Goal:      "收集并核验事实",
+        Backstory: "你是一名严谨的技术研究员。",
+    }),
     agent.WithLLM(provider),
 )
 ```
 
-### 角色最佳实践
+## 如何选择协作原语
 
-**好的角色定义**:
+| 需求 | 原语 | 关键行为 |
+|------|------|----------|
+| 固定顺序、管理者协调、协作汇总或轮询 | `Team` | 接收一个 `agent.Input`，按配置模式执行成员 |
+| 同一输入并行交给多个 Agent | `ParallelAgent` | 并行执行并合并成功结果 |
+| 由模型决定转交给哪个 Agent | `TransferTo` + `SwarmRunner` | 模型调用转交工具后切换当前 Agent |
+| 按 ID 点对点发送或广播 | `AgentNetwork` | 消息进入注册节点的收件箱或异步路由器 |
+| 多 Agent 投票 | `ConsensusProtocol` | 并发询问在线 Agent 并计算共识结果 |
+| 跨进程或跨语言调用 | `agent/a2a` | HTTP + JSON-RPC 任务接口 |
+
+## Team：固定团队编排
+
+### 创建和执行
+
+`NewTeam` 的第一个参数是团队名称，成员和模式通过 option 配置。执行输入始终是 `agent.Input`，其中 `Query` 是任务文本，`Context` 是可选的附加数据。
+
 ```go
-role := agent.Role{
-    Name: "客服专员",
-    Goal: "快速响应客户问题，提供专业的解决方案",
-    Backstory: `你是一名经验丰富的客服专员，工作了5年。
-你了解公司所有产品和服务，能够快速定位问题并提供解决方案。
-你的沟通风格友好、专业，始终站在客户角度思考问题。`,
+team := agent.NewTeam(
+    "content-team",
+    agent.WithTeamDescription("研究、撰写和审核"),
+    agent.WithAgents(researcher, writer, reviewer),
+    agent.WithMode(agent.TeamModeSequential),
+)
+
+output, err := team.Run(ctx, agent.Input{
+    Query: "撰写一篇 RAG 技术说明",
+    Context: map[string]any{
+        "audience": "Go developers",
+    },
+})
+if err != nil {
+    return err
+}
+fmt.Println(output.Content)
+```
+
+### 四种模式
+
+| 模式 | 执行语义 | 配置 |
+|------|----------|------|
+| `TeamModeSequential` | 按成员顺序执行；前一个输出的 `Content` 成为下一个输入的 `Query`，输出 `Metadata` 成为下一个输入的 `Context` | 默认模式，或 `WithMode` |
+| `TeamModeHierarchical` | Manager 先生成指导，成员分别处理原任务，Manager 最后汇总成功结果 | `WithManager(manager)`，该 option 会自动设置模式 |
+| `TeamModeCollaborative` | 所有成员并发处理同一输入，成功输出被拼接汇总 | `WithMode` |
+| `TeamModeRoundRobin` | 成员循环执行，上一个输出成为下一个输入；当 `Metadata["done"]` 为 `true` 或达到最大轮数时停止 | `WithMode` + `WithMaxRounds` |
+
+层级模式必须同时提供 Manager 和至少一个成员：
+
+```go
+team := agent.NewTeam(
+    "review-team",
+    agent.WithAgents(researcher, writer, reviewer),
+    agent.WithManager(manager),
+)
+
+output, err := team.Run(ctx, agent.Input{Query: "评审这份技术方案"})
+```
+
+`Team` 不提供独立的并行或共识模式。只需并行扇出时使用 `ParallelAgent`；需要投票时使用 `ConsensusProtocol`。
+
+## ParallelAgent：并行扇出
+
+`ParallelAgent` 把同一个输入并行传给所有子 Agent。默认合并函数按成员顺序拼接非空 `Content`；部分子 Agent 失败时仍返回成功结果，并在 `Output.Metadata` 中记录 `failed` 和 `errors`。只有全部子 Agent 都失败时才返回错误。
+
+```go
+parallel := agent.NewParallelAgent(
+    "independent-review",
+    []agent.Agent{securityReviewer, apiReviewer, testReviewer},
+    agent.WithMaxParallel(2),
+)
+
+output, err := parallel.Run(ctx, agent.Input{
+    Query: "独立评审这次 API 变更",
+})
+if err != nil {
+    return err
+}
+
+failed, _ := output.Metadata["failed"].(int)
+fmt.Printf("failed=%d\n%s\n", failed, output.Content)
+```
+
+需要结构化合并时传入 `WithMergeFunc`：
+
+```go
+parallel := agent.NewParallelAgent(
+    "review-summary",
+    []agent.Agent{securityReviewer, apiReviewer},
+    agent.WithMergeFunc(func(outputs []agent.Output) agent.Output {
+        parts := make([]string, 0, len(outputs))
+        for _, output := range outputs {
+            if output.Content != "" {
+                parts = append(parts, output.Content)
+            }
+        }
+        return agent.Output{Content: strings.Join(parts, "\n---\n")}
+    }),
+)
+```
+
+## TransferTo 与 SwarmRunner：模型驱动交接
+
+`TransferTo(target)` 创建一个真实的 LLM 工具。把它加入当前 Agent 的工具列表后，模型可以使用 `message`、`reason` 和可选 `context` 调用该工具。`SwarmRunner` 从输出的工具调用记录中读取交接结果，将 `message` 和 `context` 作为目标 Agent 的新输入，然后继续执行。
+
+```go
+billing := agent.NewReAct(
+    agent.WithName("billing"),
+    agent.WithDescription("处理账单问题"),
+    agent.WithLLM(provider),
+)
+
+frontDesk := agent.NewReAct(
+    agent.WithName("front-desk"),
+    agent.WithDescription("识别用户诉求"),
+    agent.WithLLM(provider),
+    agent.WithTools(agent.TransferTo(billing)),
+)
+
+runner := agent.NewSwarmRunner(frontDesk)
+runner.MaxHandoffs = 4
+
+output, err := runner.Run(ctx, agent.Input{
+    Query: "请解释本月账单中的重复扣款",
+})
+if err != nil {
+    return err
+}
+fmt.Println(output.Content)
+```
+
+注册转交工具并不会自动发生交接；只有当前 Agent 的模型实际调用该工具，输出中才会出现 `Handoff`。超过 `MaxHandoffs` 会返回错误。
+
+## AgentNetwork：进程内消息传递
+
+### 注册与点对点发送
+
+先创建网络并注册 Agent。重复注册相同 Agent ID 会返回错误。
+
+```go
+network := agent.NewAgentNetwork(
+    "review-network",
+    agent.WithNetworkTopology(agent.TopologyMesh),
+    agent.WithNetworkInboxSize(128),
+)
+
+if err := network.Register(sender); err != nil {
+    return err
+}
+if err := network.Register(receiver); err != nil {
+    return err
 }
 ```
 
-**要点**:
-- Name: 清晰的角色名称
-- Goal: 具体可衡量的目标
-- Backstory: 丰富的背景故事，增强角色感
-
-## Team 协作
-
-### 工作模式
-
-#### 1. Sequential (顺序模式)
-
-Agent 按顺序执行任务。
+`RegisterHandler` 按消息 `Topic` 注册处理器。`SendTo` 创建的便捷消息使用空 topic；若希望它由处理器消费，应为 `""` 注册处理器并启动网络路由器。
 
 ```go
-team := agent.NewTeam(
-    agent.WithTeamName("research-team"),
-    agent.WithTeamMode(agent.TeamModeSequential),
-    agent.WithTeamAgents(researcher, writer, reviewer),
-)
-
-result, _ := team.Run(ctx, agent.TeamInput{
-    Task: "研究并撰写关于 RAG 的技术文章",
+network.RegisterHandler("", func(
+    ctx context.Context,
+    msg *agent.NetworkMessage,
+) (*agent.NetworkMessage, error) {
+    fmt.Printf("%s -> %s: %v\n", msg.From, msg.To, msg.Content)
+    return nil, nil
 })
+
+networkCtx, stopNetwork := context.WithCancel(context.Background())
+defer stopNetwork()
+
+if err := network.Start(networkCtx); err != nil {
+    return err
+}
+defer network.Stop()
+
+if err := network.SendTo(
+    ctx,
+    sender.ID(),
+    receiver.ID(),
+    "请审核这份结果",
+); err != nil {
+    return err
+}
 ```
 
-**适用场景**: 流水线式任务，如 研究 → 撰写 → 审核
+网络启动后，`SendTo` 成功表示消息已进入异步路由队列，并不表示处理器已经执行完成。网络未启动时，消息会直接投递到目标节点的 `Inbox`，不会调用已注册处理器。
 
-#### 2. Hierarchical (层级模式)
+### 广播
 
-有一个 Manager Agent 协调其他 Agent。
+`Broadcast` 把消息副本直接投递给除发送者外的所有已注册节点：
 
 ```go
-manager := agent.NewBaseAgent(
-    agent.WithRole(agent.Role{
-        Name: "项目经理",
-        Goal: "协调团队完成项目",
-    }),
-)
-
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.TeamModeHierarchical),
-    agent.WithTeamManager(manager),
-    agent.WithTeamAgents(researcher, developer, tester),
-)
+if err := network.Broadcast(
+    ctx,
+    sender.ID(),
+    "开始新一轮审核",
+); err != nil {
+    return err
+}
 ```
 
-**适用场景**: 需要动态任务分配和协调
+广播走节点收件箱，不经过 `RegisterHandler`。收件箱已满、已关闭、节点离线或 context 取消时，发送可能返回错误。
 
-#### 3. Consensus (共识模式)
+## ConsensusProtocol：投票共识
 
-所有 Agent 投票达成共识。
-
-```go
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.TeamModeConsensus),
-    agent.WithTeamAgents(expert1, expert2, expert3),
-    agent.WithConsensusThreshold(0.67), // 67% 同意即通过
-)
-```
-
-**适用场景**: 决策类任务，需要多个专家意见
-
-#### 4. Parallel (并行模式)
-
-Agent 并行执行，最后合并结果。
+`ConsensusProtocol` 使用网络中注册且在线的 Agent 作为投票者。`Propose` 会并发调用这些 Agent；它不依赖 `AgentNetwork.Start`，因为投票直接调用注册的 Agent。
 
 ```go
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.TeamModeParallel),
-    agent.WithTeamAgents(agent1, agent2, agent3),
-)
-```
-
-**适用场景**: 独立子任务可并行处理
-
-### 完整示例
-
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-
-    "github.com/hexagon-codes/hexagon/agent"
-    "github.com/hexagon-codes/ai-core/llm/openai"
-)
-
-func main() {
-    provider := openai.New("your-api-key")
-
-    // 定义 Agent
-    researcher := agent.NewBaseAgent(
-        agent.WithName("researcher"),
-        agent.WithRole(agent.Role{
-            Name:      "研究员",
-            Goal:      "深入研究并收集信息",
-            Backstory: "你是技术研究专家",
-        }),
-        agent.WithLLM(provider),
-    )
-
-    writer := agent.NewBaseAgent(
-        agent.WithName("writer"),
-        agent.WithRole(agent.Role{
-            Name:      "作者",
-            Goal:      "将研究内容整理成文章",
-            Backstory: "你是专业技术作家",
-        }),
-        agent.WithLLM(provider),
-    )
-
-    reviewer := agent.NewBaseAgent(
-        agent.WithName("reviewer"),
-        agent.WithRole(agent.Role{
-            Name:      "审核员",
-            Goal:      "审核文章质量",
-            Backstory: "你是资深编辑",
-        }),
-        agent.WithLLM(provider),
-    )
-
-    // 创建团队
-    team := agent.NewTeam(
-        agent.WithTeamName("content-team"),
-        agent.WithTeamMode(agent.TeamModeSequential),
-        agent.WithTeamAgents(researcher, writer, reviewer),
-    )
-
-    // 执行任务
-    ctx := context.Background()
-    result, err := team.Run(ctx, agent.TeamInput{
-        Task: "撰写一篇关于 AI Agent 的技术文章",
-    })
-
-    if err != nil {
-        panic(err)
+network := agent.NewAgentNetwork("architecture-vote")
+for _, voter := range []agent.Agent{expertA, expertB, expertC} {
+    if err := network.Register(voter); err != nil {
+        return err
     }
+}
 
-    fmt.Println(result.Output)
+protocol := agent.NewConsensusProtocol(
+    network,
+    agent.WithConsensusStrategy(agent.ConsensusMajority),
+    agent.WithConsensusThreshold(2.0/3.0),
+    agent.WithMinParticipation(2.0/3.0),
+    agent.WithConsensusTimeout(15*time.Second),
+)
+
+result, err := protocol.Propose(
+    ctx,
+    "是否接受这份架构方案？",
+    []any{"accept", "reject"},
+)
+if err != nil {
+    return err
+}
+
+if !result.Reached {
+    fmt.Printf("no consensus: %s\n", result.Reason)
+} else {
+    fmt.Printf("decision=%v confidence=%.2f\n", result.Decision, result.Confidence)
 }
 ```
 
-## Agent Handoff (交接)
+投票值通过 Agent 回复与候选项的精确或子字符串匹配得到。超时或单个 Agent 失败会减少参与票数；这时应同时检查 `Reached`、`Participation` 和 `Reason`，不能只读取 `Decision`。
 
-Agent 之间可以相互交接任务。
+## StateManager：四层状态
 
-### 基本交接
-
-```go
-// Agent A 执行任务并交接给 Agent B
-handoff := agent.NewHandoff(
-    agent.WithHandoffFrom(agentA),
-    agent.WithHandoffTo(agentB),
-    agent.WithHandoffCondition(func(result agent.Output) bool {
-        // 当满足条件时交接
-        return result.Status == "need_review"
-    }),
-)
-
-result, _ := handoff.Execute(ctx, input)
-```
-
-### 路由交接
-
-根据结果动态选择交接目标。
+`StateManager` 提供 Turn、Session、Agent 和 Global 四层状态。它与 `agent.Input.Context` 不同：`Input.Context` 只随一次调用传入，而状态管理器可以跨轮次保存值、创建快照并恢复。
 
 ```go
-router := agent.NewRouter(
-    agent.WithRoutes(map[string]agent.Agent{
-        "technical": techAgent,
-        "business":  bizAgent,
-        "general":   generalAgent,
-    }),
-    agent.WithRouteDecision(func(ctx context.Context, input agent.Input) (string, error) {
-        // 使用 LLM 决定路由
-        // 返回 "technical", "business" 或 "general"
-    }),
-)
-```
+global := agent.NewGlobalState()
+state := agent.NewStateManager("session-42", global)
 
-### 循环交接
+state.Turn().Set("draft", "v1")
+state.Session().Set("user_id", "u-123")
+state.Agent().Set("preferred_style", "concise")
+state.Global().Set("release", "v0.6.0")
 
-多个 Agent 循环协作直到完成。
+if userID, ok := state.Session().Get("user_id"); ok {
+    fmt.Println(userID)
+}
 
-```go
-loop := agent.NewHandoffLoop(
-    agent.WithLoopAgents(coder, reviewer, tester),
-    agent.WithMaxIterations(5),
-    agent.WithStopCondition(func(result agent.Output) bool {
-        return result.Metadata["tests_passed"] == true
-    }),
-)
-```
+snapshot := state.Snapshot()
+state.NewTurn()
 
-## Agent 网络通信
+if err := state.Restore(snapshot); err != nil {
+    return err
+}
 
-### 点对点通信
-
-```go
-// Agent A 发送消息给 Agent B
-agentA.Send(ctx, agentB, agent.Message{
-    Type:    "request",
-    Content: "请帮我分析这个问题",
-    Data: map[string]any{
-        "problem": problem,
-    },
-})
-
-// Agent B 接收消息
-msgChan := agentB.Receive(ctx)
-for msg := range msgChan {
-    // 处理消息
-    response := processMessage(msg)
-
-    // 回复
-    agentB.Send(ctx, agentA, response)
+ctx = agent.ContextWithStateManager(ctx, state)
+current := agent.StateManagerFromContext(ctx)
+if current == nil {
+    return errors.New("state manager missing")
 }
 ```
 
-### 广播通信
+多个状态管理器需要共享应用级数据时，应显式复用同一个 `GlobalState`。`NewTurn` 会重置 Turn 状态并增加 Session 的轮次计数。
+
+## 超时与取消
+
+`Team`、`ParallelAgent`、`SwarmRunner`、网络发送和 A2A 客户端都接收调用方提供的 `context.Context`。在入口统一设置截止时间，并保留 `context` 原始错误判定：
 
 ```go
-network := agent.NewNetwork(
-    agent.WithNetworkAgents(agent1, agent2, agent3),
-)
+runCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+defer cancel()
 
-// 广播消息给所有 Agent
-network.Broadcast(ctx, agent.Message{
-    Type:    "announcement",
-    Content: "开始新任务",
+output, err := team.Run(runCtx, agent.Input{Query: "完成本轮评审"})
+if err != nil {
+    switch {
+    case errors.Is(err, context.DeadlineExceeded):
+        return fmt.Errorf("team timed out: %w", err)
+    case errors.Is(err, context.Canceled):
+        return fmt.Errorf("team canceled: %w", err)
+    default:
+        return err
+    }
+}
+_ = output
+```
+
+底层 Agent 或 Provider 也必须遵守传入的 context，超时才能及时终止实际工作。`WithConsensusTimeout` 另外限制投票收集时间，但投票超时通常体现为参与率不足的结果，而不是 `Propose` 错误。
+
+## A2A：跨服务任务调用
+
+`agent/a2a` 提供独立的服务器和客户端。A2A 客户端不是 `agent.Agent` 适配器，不能直接放入 `Team`；应用应通过 `a2a.Client` 查询 Agent Card、提交任务和查询任务状态。
+
+### 启动服务器
+
+```go
+card := &a2a.AgentCard{
+    Name:               "remote-reviewer",
+    Description:        "远程审核服务",
+    URL:                "http://localhost:8080",
+    Version:            "0.1.0",
+    DefaultInputModes:  []string{"text"},
+    DefaultOutputModes: []string{"text"},
+}
+
+server := a2a.NewServer(card, a2a.NewEchoHandler())
+if err := server.Start(":8080"); err != nil {
+    log.Fatal(err)
+}
+```
+
+`Start` 会阻塞直到服务器关闭或监听失败。需要由应用的生命周期管理代码在单独 goroutine 中启动时，应在退出阶段使用带截止时间的 `server.Stop(ctx)`。
+
+### 查询与提交任务
+
+```go
+client := a2a.NewClient(
+    "http://localhost:8080",
+    a2a.WithTimeout(10*time.Second),
+)
+defer client.Close()
+
+queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+defer cancel()
+
+card, err := client.GetAgentCard(queryCtx)
+if err != nil {
+    return err
+}
+fmt.Println(card.Name)
+
+task, err := client.SendMessage(queryCtx, &a2a.SendMessageRequest{
+    Message: a2a.NewUserMessage("请审核这份方案"),
 })
+if err != nil {
+    return err
+}
+
+stored, err := client.GetTask(queryCtx, task.ID)
+if err != nil {
+    return err
+}
+fmt.Println(stored.Status.State)
 ```
 
-### 订阅模式
+### 错误处理
+
+A2A 的 JSON-RPC 错误实现了 `error`，可以使用 `GetA2AError` 读取协议错误码；网络错误和 context 错误保持普通 Go error 链：
 
 ```go
-// Agent 订阅特定主题
-network.Subscribe(agent1, "data_updated")
-network.Subscribe(agent2, "data_updated")
-
-// 发布消息
-network.Publish(ctx, "data_updated", agent.Message{
-    Content: "数据已更新",
-    Data: map[string]any{
-        "version": "1.2",
-    },
-})
+_, err := client.GetTask(queryCtx, "missing-task")
+if err != nil {
+    if protocolErr := a2a.GetA2AError(err); protocolErr != nil {
+        if protocolErr.Code == a2a.CodeTaskNotFound {
+            return fmt.Errorf("remote task not found: %w", err)
+        }
+        return fmt.Errorf("A2A error %d: %w", protocolErr.Code, err)
+    }
+    if errors.Is(err, context.DeadlineExceeded) {
+        return fmt.Errorf("A2A query timed out: %w", err)
+    }
+    return err
+}
 ```
 
-## 共识机制
-
-多个 Agent 协商达成共识。
-
-### 投票共识
-
-```go
-consensus := agent.NewConsensus(
-    agent.WithConsensusAgents(agent1, agent2, agent3),
-    agent.WithConsensusStrategy(agent.ConsensusStrategyVoting),
-    agent.WithConsensusThreshold(0.67), // 需要67%同意
-)
-
-decision, _ := consensus.Decide(ctx, agent.ConsensusInput{
-    Proposal: "是否采用新的技术方案",
-    Options:  []string{"同意", "拒绝", "需要更多信息"},
-})
-
-fmt.Println(decision.Result) // "同意" / "拒绝" / "需要更多信息"
-```
-
-### 加权投票
-
-```go
-consensus := agent.NewConsensus(
-    agent.WithConsensusWeights(map[string]float64{
-        "senior_expert": 2.0, // 资深专家权重2
-        "junior_expert": 1.0, // 初级专家权重1
-    }),
-)
-```
-
-## 状态管理
-
-### 共享状态
-
-```go
-// 全局状态
-globalState := agent.NewGlobalState()
-globalState.Set("project_status", "in_progress")
-
-// Agent 访问全局状态
-status := globalState.Get("project_status")
-```
-
-### Session 状态
-
-```go
-// 会话级状态
-session := agent.NewSession()
-session.Set("user_id", "123")
-session.Set("conversation_history", []string{})
-
-// Agent 使用 Session
-result, _ := agentA.RunWithSession(ctx, input, session)
-```
-
-## 最佳实践
-
-### 1. 角色分工明确
-
-```go
-// ✅ 好的做法
-researcher := agent.NewBaseAgent(
-    agent.WithRole(agent.Role{
-        Name: "数据分析师",
-        Goal: "分析数据并生成报告",
-    }),
-)
-
-writer := agent.NewBaseAgent(
-    agent.WithRole(agent.Role{
-        Name: "技术作家",
-        Goal: "将分析结果写成易懂的文章",
-    }),
-)
-
-// ❌ 不好的做法
-generic := agent.NewBaseAgent(
-    agent.WithRole(agent.Role{
-        Name: "助手",
-        Goal: "做各种事情",
-    }),
-)
-```
-
-### 2. 合理的团队规模
-
-- 2-5 个 Agent: 最佳规模
-- 5-10 个: 需要更强的协调
-- 10+ 个: 考虑分层或分组
-
-### 3. 避免循环依赖
-
-```go
-// ❌ 不好的做法
-agentA → agentB → agentC → agentA // 循环
-
-// ✅ 好的做法
-agentA → agentB → agentC // 单向
-```
-
-### 4. 超时和重试
-
-```go
-team := agent.NewTeam(
-    agent.WithTeamTimeout(5 * time.Minute),
-    agent.WithTeamRetryPolicy(&agent.RetryPolicy{
-        MaxRetries: 3,
-        BackoffStrategy: agent.ExponentialBackoff,
-    }),
-)
-```
-
-### 5. 监控和可观测
-
-```go
-import "github.com/hexagon-codes/hexagon/observe"
-
-// 为团队添加观察者
-team.OnAgentStart(func(agentName string) {
-    fmt.Printf("Agent %s 开始工作\n", agentName)
-})
-
-team.OnAgentComplete(func(agentName string, result agent.Output) {
-    fmt.Printf("Agent %s 完成工作\n", agentName)
-})
-
-team.OnAgentError(func(agentName string, err error) {
-    fmt.Printf("Agent %s 出错: %v\n", agentName, err)
-})
-```
-
-## 实战案例
-
-### 案例1: 内容创作团队
-
-```go
-// 研究员 → 作家 → 审核员 → 发布员
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.TeamModeSequential),
-    agent.WithTeamAgents(
-        newResearcher(),
-        newWriter(),
-        newReviewer(),
-        newPublisher(),
-    ),
-)
-```
-
-### 案例2: 客服系统
-
-```go
-// 路由 Agent 根据问题类型分发给专业 Agent
-router := agent.NewRouter(
-    agent.WithRoutes(map[string]agent.Agent{
-        "technical_support": techAgent,
-        "billing":           billingAgent,
-        "general":           generalAgent,
-    }),
-)
-```
-
-### 案例3: 代码审核
-
-```go
-// 多个审核员并行审核，达成共识
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.TeamModeConsensus),
-    agent.WithTeamAgents(
-        seniorReviewer1,
-        seniorReviewer2,
-        juniorReviewer,
-    ),
-    agent.WithConsensusThreshold(0.67),
-)
-```
-
-## 调试技巧
-
-```go
-// 启用团队调试模式
-team.SetDebug(true)
-
-// 查看 Agent 交互
-team.OnMessage(func(from, to string, msg agent.Message) {
-    fmt.Printf("%s → %s: %s\n", from, to, msg.Content)
-})
-
-// 查看决策过程
-consensus.OnVote(func(agent string, vote string) {
-    fmt.Printf("%s 投票: %s\n", agent, vote)
-})
-```
-
-## A2A 协议：跨框架 Agent 协作
-
-Hexagon 支持 Google A2A (Agent-to-Agent) 协议，使你的 Agent 能够与其他框架、其他语言实现的 Agent 进行标准化通信。
-
-### 什么是 A2A 协议
-
-A2A 是一个开放协议，定义了 AI Agent 之间通信的标准方式：
-
-- **Agent Card**: Agent 能力描述 (`.well-known/agent-card.json`)
-- **Task**: 任务生命周期管理 (提交 → 执行 → 完成)
-- **Message**: 多模态消息 (文本、文件、数据)
-- **Streaming**: 实时流式响应
-- **Push Notification**: 任务状态推送
-
-### A2A 与 Hexagon 多 Agent 的关系
-
-| 场景 | 使用方式 |
-|------|---------|
-| 同进程 Agent 协作 | 使用 Team、Network、Handoff |
-| 跨服务 Agent 协作 | 使用 A2A 协议 |
-| 混合场景 | 两者结合使用 |
-
-### 暴露 Agent 为 A2A 服务
-
-```go
-import (
-    "github.com/hexagon-codes/hexagon/agent"
-    "github.com/hexagon-codes/hexagon/agent/a2a"
-)
-
-// 创建 Hexagon Agent
-myAgent := agent.NewBaseAgent(
-    agent.WithName("assistant"),
-    agent.WithRole(agent.Role{
-        Name: "助手",
-        Goal: "帮助用户解决问题",
-    }),
-    agent.WithLLM(provider),
-)
-
-// 暴露为 A2A 服务
-server := a2a.ExposeAgent(myAgent, ":8080")
-defer server.Stop(ctx)
-```
-
-### 连接远程 A2A Agent
-
-```go
-// 连接远程 A2A Agent
-remoteAgent := a2a.ConnectToA2AAgent("http://remote-agent:8080")
-
-// 像使用本地 Agent 一样使用
-result, _ := remoteAgent.Run(ctx, agent.Input{
-    Messages: []llm.Message{{Role: "user", Content: "你好"}},
-})
-```
-
-### 混合团队：本地 + 远程 Agent
-
-```go
-// 本地 Agent
-localAgent := agent.NewBaseAgent(...)
-
-// 远程 A2A Agent
-remoteAgent1 := a2a.ConnectToA2AAgent("http://python-agent:8080")
-remoteAgent2 := a2a.ConnectToA2AAgent("http://nodejs-agent:8080")
-
-// 组成混合团队
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.TeamModeSequential),
-    agent.WithTeamAgents(localAgent, remoteAgent1, remoteAgent2),
-)
-
-// 执行任务
-result, _ := team.Run(ctx, agent.TeamInput{
-    Task: "分析数据并生成报告",
-})
-```
-
-### A2A 适用场景
-
-1. **跨语言协作**: Go Agent 与 Python/Node.js Agent 协作
-2. **微服务架构**: Agent 作为独立服务部署
-3. **多团队协作**: 不同团队开发的 Agent 集成
-4. **第三方 Agent**: 接入外部 A2A 兼容服务
-
-> 📖 详细信息请参阅 [A2A 协议指南](./a2a-protocol.md)
+## 使用边界
+
+- 使用 `TeamModeRoundRobin` 时通过 `WithMaxRounds` 限制轮数；为 `ParallelAgent` 设置与资源容量匹配的 `WithMaxParallel`，并限制 `SwarmRunner.MaxHandoffs`。
+- 对 `ParallelAgent` 的部分失败检查 `Output.Metadata`；对共识结果检查 `Reached` 和 `Participation`。
+- 注册网络节点后再发送消息；异步发送成功不等于业务处理完成。
+- 通过 context 统一传递取消和截止时间，不在各层创建无法由调用方取消的后台任务。
+- 跨服务边界显式处理 A2A 协议错误、HTTP/网络错误和 context 错误。
 
 ## 下一步
 
-- 学习 [图编排中的多 Agent](./graph-orchestration.md#多-agent-节点)
-- 了解 [性能优化](./performance-optimization.md#多-agent-优化)
-- 掌握 [可观测性](./observability.md)
+- 阅读 [A2A 协议指南](./a2a-protocol.md)
+- 阅读 [图编排最佳实践](./graph-orchestration.md)
+- 阅读 [性能优化指南](./performance-optimization.md)
+- 阅读 [可观测性集成指南](./observability.md)

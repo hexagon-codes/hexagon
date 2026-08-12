@@ -2,572 +2,568 @@
 
 # A2A (Agent-to-Agent) 协议指南
 
-Hexagon 实现了 Google A2A 协议，使 AI Agent 能够安全地相互通信、协调任务、共享上下文。
+Hexagon 的 `agent/a2a` 包提供 Agent Card、Task、JSON-RPC、SSE、认证、推送和 Agent 桥接。本文以当前仓库源码为准；`ProtocolVersion` 当前为 `1.0`。
 
-## 概述
+## 能力边界
 
-A2A (Agent-to-Agent) 是一个开放协议，定义了 AI Agent 之间标准化的通信方式。通过 A2A 协议，您可以：
+- 普通请求使用 JSON-RPC 2.0，流式请求使用 Server-Sent Events (SSE)。
+- `Server` 内置内存 Task 存储和可选推送，但不会自动安装认证中间件。
+- `Client` 支持同步 Task API 和 SSE 事件流；关闭后的请求返回 `ErrClientClosed`。
+- `AgentCard.Capabilities` 同时是能力声明和服务端门禁。只声明已经配置的能力。
+- 默认存储、异步推送队列和订阅者都在进程内，不是持久化或可靠消息保证。
 
-- 将 Hexagon Agent 暴露为标准 A2A 服务
-- 连接任意符合 A2A 规范的远程 Agent
-- 实现跨平台、跨框架的 Agent 互操作
-
-## 快速开始
-
-### 创建 A2A 服务器
-
-```go
-import (
-    "github.com/hexagon-codes/hexagon/agent"
-    "github.com/hexagon-codes/hexagon/agent/a2a"
-)
-
-// 创建 Hexagon Agent
-myAgent := agent.NewBaseAgent(
-    agent.WithName("assistant"),
-    agent.WithLLM(llmProvider),
-)
-
-// 一键暴露为 A2A 服务
-server := a2a.ExposeAgent(myAgent, "http://localhost:8080")
-server.Start(":8080")
-```
-
-### 连接 A2A Agent
-
-```go
-// 连接远程 A2A Agent
-client := a2a.NewClient("http://localhost:8080")
-
-// 获取 Agent Card
-card, _ := client.GetAgentCard(ctx)
-fmt.Printf("Agent: %s - %s\n", card.Name, card.Description)
-
-// 发送消息
-task, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    Message: a2a.NewUserMessage("你好"),
-})
-
-fmt.Printf("Task ID: %s, Status: %s\n", task.ID, task.Status.State)
-```
-
-## 核心概念
+## 核心模型
 
 ### Agent Card
 
-Agent Card 是 A2A 协议的核心概念，描述了 Agent 的基本信息、能力和技能。
+Agent Card 由 `GET /.well-known/agent-card.json` 公布。名称、URL 和版本是最基本的字段；能力、认证方式和技能应与实际服务一致。
 
 ```go
-card := &a2a.AgentCard{
-    Name:        "assistant",
-    Description: "通用助手 Agent",
-    URL:         "http://localhost:8080",
-    Version:     "1.0.0",
-    Provider: &a2a.AgentProvider{
-        Organization: "My Company",
-        URL:          "https://example.com",
-    },
-    Capabilities: a2a.AgentCapabilities{
-        Streaming:         true,  // 支持流式响应
-        PushNotifications: true,  // 支持推送通知
-    },
-    Skills: []a2a.AgentSkill{
-        {ID: "search", Name: "搜索", Description: "网络搜索"},
-        {ID: "code", Name: "编程", Description: "代码生成"},
-    },
+card := a2a.NewAgentCard("assistant", "http://localhost:8080", "1.0.0")
+card.Description = "Text assistant"
+card.Capabilities = a2a.AgentCapabilities{
+	Streaming:         true,
+	PushNotifications: false,
 }
+card.Authentication = &a2a.AuthConfig{
+	Schemes: []a2a.AuthScheme{{Type: "bearer", BearerFormat: "JWT"}},
+}
+card.Skills = []a2a.AgentSkill{{
+	ID:          "answer",
+	Name:        "Answer questions",
+	Tags:        []string{"text", "qa"},
+	InputModes:  []string{"text"},
+	OutputModes: []string{"text"},
+}}
 ```
 
-Agent Card 通过 `/.well-known/agent-card.json` 路径提供。
+`NewAgentCard` 默认将 `Streaming` 设为 `true`。若不提供 SSE，应显式改为 `false`。
 
-### Task 生命周期
+### Task 与状态
 
-Task 是 A2A 中的核心工作单元，表示一次 Agent 交互的完整生命周期。
+Task 是一次交互的持久身份，包含 `ID`、可选 `SessionID`、当前 `Status`、`History`、`Artifacts` 和元数据。
 
+典型流程如下：
+
+```text
+submitted → working → input-required → working
+                    └→ completed | failed | canceled
 ```
-submitted → working → input-required → completed
-                  ↘                 ↗
-                   → failed/canceled
-```
 
-状态说明：
-- `submitted`: 任务已创建，等待处理
-- `working`: Agent 正在处理任务
-- `input-required`: 等待用户提供更多信息
-- `completed`: 任务成功完成
-- `failed`: 任务执行失败
-- `canceled`: 任务被取消
+`completed`、`failed` 和 `canceled` 是终态，可用 `TaskState.IsTerminal()` 判断。在 `SendMessageRequest.TaskID` 中传入已存在的 ID 会继续该 Task；传入未知 ID 会返回 Task-not-found 错误。`SessionID` 用于关联多个 Task，不代替 `TaskID`。
 
-### Message
+### Message、Part 与 Artifact
 
-Message 是 Agent 与用户之间的通信单元，支持多模态内容。
+Message 的角色为 `user` 或 `agent`，内容由 `TextPart`、`FilePart` 或 `DataPart` 组成。Artifact 使用同样的 Part 模型表达产物。
 
 ```go
-// 文本消息
-msg := a2a.NewUserMessage("Hello")
-
-// 多模态消息
-msg := a2a.Message{
-    Role: a2a.RoleUser,
-    Parts: []a2a.Part{
-        &a2a.TextPart{Text: "请分析这张图片"},
-        &a2a.FilePart{
-            File: a2a.FileContent{
-                Name:     "image.png",
-                MimeType: "image/png",
-                Bytes:    base64EncodedData,
-            },
-        },
-    },
-}
-```
-
-### Artifact
-
-Artifact 是任务执行过程中生成的输出产物。
-
-```go
-artifact := a2a.Artifact{
-    Name:        "analysis_result",
-    Description: "分析结果",
-    Parts: []a2a.Part{
-        &a2a.TextPart{Text: "分析完成..."},
-        &a2a.DataPart{
-            Data: map[string]any{
-                "score": 0.95,
-                "tags":  []string{"positive", "technical"},
-            },
-        },
-    },
-}
-```
-
-## 服务端开发
-
-### 自定义 TaskHandler
-
-```go
-type MyHandler struct {
-    llm llm.Provider
-}
-
-func (h *MyHandler) HandleTask(ctx context.Context, task *a2a.Task, msg *a2a.Message) (*a2a.TaskUpdate, error) {
-    // 获取用户消息
-    userText := msg.GetTextContent()
-
-    // 调用 LLM 处理
-    resp, err := h.llm.Complete(ctx, llm.CompletionRequest{
-        Messages: []llm.Message{
-            {Role: "user", Content: userText},
-        },
-    })
-    if err != nil {
-        return a2a.NewFailedUpdate(err.Error()), nil
-    }
-
-    // 返回完成状态
-    return a2a.NewCompletedUpdate(&a2a.Message{
-        Role: a2a.RoleAgent,
-        Parts: []a2a.Part{
-            &a2a.TextPart{Text: resp.Content},
-        },
-    }), nil
-}
-```
-
-### 流式处理
-
-```go
-func (h *MyHandler) HandleTaskStream(ctx context.Context, task *a2a.Task, msg *a2a.Message) (<-chan *a2a.TaskUpdate, error) {
-    updates := make(chan *a2a.TaskUpdate)
-
-    go func() {
-        defer close(updates)
-
-        // 流式生成内容
-        stream, _ := h.llm.Stream(ctx, req)
-
-        for chunk := range stream {
-            updates <- &a2a.TaskUpdate{
-                Artifact: &a2a.Artifact{
-                    Name:   "response",
-                    Append: true,
-                    Parts: []a2a.Part{
-                        &a2a.TextPart{Text: chunk.Content},
-                    },
-                },
-            }
-        }
-
-        // 发送完成状态
-        updates <- a2a.NewCompletedUpdate(...)
-    }()
-
-    return updates, nil
-}
-```
-
-### 创建完整服务器
-
-```go
-card := &a2a.AgentCard{
-    Name:    "my-agent",
-    URL:     "http://localhost:8080",
-    Version: "1.0.0",
-    Capabilities: a2a.AgentCapabilities{
-        Streaming:         true,
-        PushNotifications: true,
-    },
-}
-
-handler := &MyHandler{llm: llmProvider}
-server := a2a.NewServer(card, handler,
-    a2a.WithStore(a2a.NewMemoryTaskStore()),
-    a2a.WithPushService(a2a.NewDefaultPushService()),
-    a2a.WithCORS(true, "*"),
-)
-
-server.Start(":8080")
-```
-
-## 客户端开发
-
-### 基本使用
-
-```go
-client := a2a.NewClient("http://localhost:8080",
-    a2a.WithTimeout(30 * time.Second),
-    a2a.WithAuth(&a2a.BearerAuth{Token: "my-token"}),
-)
-defer client.Close()
-
-// 发送消息并获取结果
-task, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    Message: a2a.NewUserMessage("Hello"),
+msg := a2a.NewUserMessage("Summarize this document")
+msg.Parts = append(msg.Parts, &a2a.DataPart{
+	Data: map[string]any{"language": "zh-CN"},
 })
 
-// 检查任务状态
-if task.Status.State == a2a.TaskStateCompleted {
-    // 获取 Agent 响应
-    for _, msg := range task.History {
-        if msg.Role == a2a.RoleAgent {
-            fmt.Println(msg.GetTextContent())
-        }
-    }
+artifact := a2a.NewTextArtifact("summary", "Summary content")
+artifact.LastChunk = true
+```
+
+`Message.GetTextContent()` 和 `Artifact.GetTextContent()` 只汇总文本 Part。服务端收到 `Artifact.Append=true` 时，会将 Part 追加到最后一个已存在产物；否则创建新产物并由服务端分配 `Index`。
+
+## Server 与 Handler
+
+### 最小 Server
+
+`TaskHandler` 的完整签名是：
+
+```go
+type TaskHandler interface {
+	HandleTask(
+		ctx context.Context,
+		task *a2a.Task,
+		msg *a2a.Message,
+	) (*a2a.TaskUpdate, error)
 }
 ```
 
-### 流式交互
+可用 `NewFuncHandler` 包装函数。`Server.Start` 是阻塞调用并返回 `error`，不能忽略。
 
 ```go
-events, _ := client.SendMessageStream(ctx, &a2a.SendMessageRequest{
-    Message: a2a.NewUserMessage("写一首诗"),
-})
+func main() {
+	card := a2a.NewAgentCard("assistant", "http://localhost:8080", "1.0.0")
+	card.Capabilities.Streaming = false
 
-for event := range events {
-    switch e := event.(type) {
-    case *a2a.TaskStatusEvent:
-        fmt.Printf("Status: %s\n", e.Status.State)
+	handler := a2a.NewFuncHandler(func(
+		ctx context.Context,
+		task *a2a.Task,
+		msg *a2a.Message,
+	) (*a2a.TaskUpdate, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return a2a.NewCompletedUpdate(
+			a2aMessage("Echo: " + msg.GetTextContent()),
+		), nil
+	})
 
-    case *a2a.ArtifactEvent:
-        fmt.Print(e.Artifact.GetTextContent())
+	server := a2a.NewServer(card, handler, a2a.WithCORS(false))
+	if err := server.Start(":8080"); err != nil {
+		log.Fatal(err)
+	}
+}
 
-    case *a2a.DoneEvent:
-        fmt.Println("\n完成!")
-    }
+func a2aMessage(text string) *a2a.Message {
+	msg := a2a.NewAgentMessage(text)
+	return &msg
 }
 ```
 
-### 多轮对话
+若需要信号处理、自定义超时或中间件，使用 `server.Handler()` 作为自建 `http.Server` 的 Handler，并检查 `ListenAndServe` 和 `Shutdown` 的错误。直接使用 `Start` 时，优雅停止由 `server.Stop(ctx)` 提供，其错误也必须处理。
+
+`NewServer` 默认使用 `MemoryTaskStore`。生产环境要持久化 Task 时，通过 `WithStore` 注入自己的 `TaskStore`；需要推送配置时，自定义 Store 还应实现 `PushConfigStore`。
+
+### 处理结果和错误
+
+`TaskUpdate` 可同时携带 `Status`、`Message`、`Artifact`、`Metadata` 和 `Final`。常用构造器有：
+
+- `NewStatusUpdate`
+- `NewMessageUpdate`
+- `NewArtifactUpdate`
+- `NewCompletedUpdate`
+- `NewFailedUpdate`
+- `NewInputRequiredUpdate`
+
+普通 `HandleTask` 返回非空 `error` 时，服务端会将 Task 记为 `failed` 并返回 JSON-RPC/SSE 错误。`HandleTaskStream` 在建立流时直接返回错误，当前只会写出 SSE `error` 事件，不会自动持久化 `failed` 终态。若要把“业务失败”作为可查询的 Task 终态返回，普通 Handler 返回 `NewFailedUpdate(message), nil`，流式 Handler 则把该 update 发入通道。
+
+### 流式 Handler
 
 ```go
-// 第一轮
-task1, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    Message: a2a.NewUserMessage("你好"),
-})
-
-// 第二轮 - 继续同一任务
-task2, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    TaskID:  task1.ID,  // 继续现有任务
-    Message: a2a.NewUserMessage("请继续"),
-})
+type StreamingTaskHandler interface {
+	a2a.TaskHandler
+	HandleTaskStream(
+		ctx context.Context,
+		task *a2a.Task,
+		msg *a2a.Message,
+	) (<-chan *a2a.TaskUpdate, error)
+}
 ```
 
-## 认证和安全
-
-### 服务端认证
+`NewStreamingFuncHandler` 必须同时接收普通函数和流式函数：
 
 ```go
-// Bearer Token 认证
-validator := a2a.NewBearerTokenValidator()
-validator.AddToken("secret-token", "client-1")
+normal := func(
+	ctx context.Context,
+	task *a2a.Task,
+	msg *a2a.Message,
+) (*a2a.TaskUpdate, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	reply := a2a.NewAgentMessage(msg.GetTextContent())
+	return a2a.NewCompletedUpdate(&reply), nil
+}
 
-// API Key 认证
-validator := a2a.NewAPIKeyValidator("X-API-Key", "header")
-validator.AddKey("my-api-key", "client-1")
+stream := func(
+	ctx context.Context,
+	task *a2a.Task,
+	msg *a2a.Message,
+) (<-chan *a2a.TaskUpdate, error) {
+	updates := make(chan *a2a.TaskUpdate)
+	go func() {
+		defer close(updates)
+		chunk := a2a.NewTextArtifact("response", msg.GetTextContent())
+		select {
+		case updates <- a2a.NewArtifactUpdate(&chunk):
+		case <-ctx.Done():
+			return
+		}
+		reply := a2a.NewAgentMessage("done")
+		select {
+		case updates <- a2a.NewCompletedUpdate(&reply):
+		case <-ctx.Done():
+		}
+	}()
+	return updates, nil
+}
 
-// RBAC 权限控制
-rbac := a2a.NewRBACValidator(validator)
-rbac.SetPermissions("client-1",
-    a2a.PermissionRead,
-    a2a.PermissionSendMessage,
-)
-
-// 应用认证中间件
-mux := http.NewServeMux()
-handler := a2a.AuthMiddleware(validator)(server.Handler())
+handler := a2a.NewStreamingFuncHandler(normal, stream)
 ```
 
-### 客户端认证
+流式 Handler 应在关闭通道前发送终态且 `Final=true` 的 update；若直接关闭，Server 仍会发送 `done`，但最终 Task 可能仍是 `working`。
+
+只有 `AgentCard.Capabilities.Streaming=true` 时服务端才接受流式端点。若 Card 声明支持流式、但 Handler 只实现 `TaskHandler`，服务端会同步调用 `HandleTask`，然后以最终 Task 状态和 `done` 事件结束 SSE，不会产生真正的中间分块。
+
+## Client
+
+### 普通请求
 
 ```go
-// Bearer Token
-client := a2a.NewClient(url,
-    a2a.WithAuth(&a2a.BearerAuth{Token: "my-token"}),
-)
+func call(ctx context.Context) (_ *a2a.Task, err error) {
+	client := a2a.NewClient(
+		"http://localhost:8080",
+		a2a.WithTimeout(10*time.Second),
+	)
+	defer func() {
+		if closeErr := client.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
-// API Key
-client := a2a.NewClient(url,
-    a2a.WithAuth(&a2a.APIKeyAuth{
-        Key:   "X-API-Key",
-        Value: "my-api-key",
-        In:    "header",
-    }),
-)
+	card, err := client.GetAgentCard(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get Agent Card: %w", err)
+	}
+	if card.Name == "" {
+		return nil, fmt.Errorf("Agent Card has no name")
+	}
 
-// Basic Auth
-client := a2a.NewClient(url,
-    a2a.WithAuth(&a2a.BasicAuth{
-        Username: "user",
-        Password: "pass",
-    }),
-)
+	task, err := client.SendMessage(ctx, &a2a.SendMessageRequest{
+		SessionID: "conversation-1",
+		Message:   a2a.NewUserMessage("Hello"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("send message: %w", err)
+	}
+	return task, nil
+}
 ```
+
+继续同一 Task 时再次调用 `SendMessage` 并传入 `TaskID: task.ID`。`GetTask`、`ListTasks`、`CancelTask`、`SetPushNotification` 和 `GetPushNotification` 都返回需要处理的错误。所有网络调用都应传入带截止时间或可取消的 `context.Context`；客户端保留错误链，可用 `errors.Is(err, context.DeadlineExceeded)` 判断超时。
+
+### 消费 SSE
+
+```go
+func consume(
+	ctx context.Context,
+	client *a2a.Client,
+	onArtifact func(string),
+) error {
+	if onArtifact == nil {
+		return fmt.Errorf("onArtifact must not be nil")
+	}
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	events, err := client.SendMessageStream(streamCtx, &a2a.SendMessageRequest{
+		Message: a2a.NewUserMessage("Stream the answer"),
+	})
+	if err != nil {
+		return err
+	}
+
+	for event := range events {
+		switch value := event.(type) {
+		case *a2a.TaskStatusEvent:
+			if value.Final {
+				continue
+			}
+		case *a2a.ArtifactEvent:
+			onArtifact(value.Artifact.GetTextContent())
+		case *a2a.ErrorEvent:
+			if value.Error == nil {
+				return fmt.Errorf("empty SSE error")
+			}
+			return value.Error
+		case *a2a.DoneEvent:
+			return nil
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+```
+
+HTTP 请求建立后发生的解析或流错误会通过 `*ErrorEvent` 传递，不会再从 `SendMessageStream` 返回。因此必须消费通道直到关闭并处理 `ErrorEvent`。`Resubscribe(ctx, taskID)` 使用同样的事件模型。
+
+## 认证与授权
+
+### 服务端
+
+服务端提供 `BearerTokenValidator`、`APIKeyValidator`、`BasicAuthValidator`、`ChainValidator`、`AuthMiddleware` 和 `OptionalAuthMiddleware`。`NewServer`/`Start` 不会自动启用它们；需要把 `server.Handler()` 包装进自建 `http.Server`。
+
+```go
+func protectedHandler(server *a2a.Server) http.Handler {
+	tokens := a2a.NewBearerTokenValidator()
+	tokens.AddToken("secret", "client-1")
+
+	routes := server.Handler()
+	protected := a2a.AuthMiddleware(tokens)(routes)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == a2a.PathAgentCard {
+			routes.ServeHTTP(w, r)
+			return
+		}
+		protected.ServeHTTP(w, r)
+	})
+}
+```
+
+上例刻意让 Agent Card 保持公开。当前 `Client.GetAgentCard` 不应用 `WithAuth`，而 JSON-RPC 和 SSE 请求会应用；若连 Card 也放在认证后，标准 `Client`、`NewRemoteAgent` 和 `ConnectToA2AAgent` 将无法发现它。
+
+RBAC 的正确顺序是先用 `AuthMiddleware(rbac)` 写入 `AuthContext`，再在内层使用 `rbac.RequirePermission(...)`。认证失败返回 HTTP 401，权限不足返回 HTTP 403，响应体仍是 JSON-RPC 错误对象。
+
+### 客户端
+
+```go
+client := a2a.NewClient(
+	"https://agent.example.com",
+	a2a.WithAuth(&a2a.BearerAuth{Token: "secret"}),
+	a2a.WithTimeout(10*time.Second),
+)
+defer func() {
+	if err := client.Close(); err != nil {
+		log.Printf("close A2A client: %v", err)
+	}
+}()
+```
+
+客户端还提供 `APIKeyAuth` 和 `BasicAuth`。认证凭证不要写入 Agent Card、日志或仓库；生产环境必须使用 TLS，并在服务端限制 CORS 来源。
 
 ## 推送通知
 
-### 配置推送
+### 配置
+
+只有 Card 声明 `PushNotifications=true` 时，推送配置 API 才可用；真正交付还要求 Server 通过 `WithPushService` 注入 `PushService`。`NewDefaultPushService` 现在返回 `(*AsyncPushService, error)`，必须检查错误并在退出时调用 `Close`。
 
 ```go
-// 客户端配置推送
-client.SetPushNotification(ctx, task.ID, &a2a.PushNotificationConfig{
-    URL:   "https://my-webhook.example.com/callback",
-    Token: "callback-token",
-})
+func serveWithPush(card *a2a.AgentCard, handler a2a.TaskHandler) error {
+	push, err := a2a.NewDefaultPushService()
+	if err != nil {
+		return fmt.Errorf("create push service: %w", err)
+	}
+	defer push.Close()
 
-// 或在发送消息时配置
-task, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    Message: a2a.NewUserMessage("Hello"),
-    PushNotification: &a2a.PushNotificationConfig{
-        URL: "https://my-webhook.example.com/callback",
-    },
-})
+	card.Capabilities.PushNotifications = true
+	server := a2a.NewServer(card, handler, a2a.WithPushService(push))
+	return server.Start(":8080")
+}
 ```
 
-### 处理推送回调
+新建 Task 时可直接携带推送配置：
 
 ```go
-http.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-    var task a2a.Task
-    json.NewDecoder(r.Body).Decode(&task)
-
-    fmt.Printf("Task %s status: %s\n", task.ID, task.Status.State)
-
-    w.WriteHeader(http.StatusOK)
+task, err := client.SendMessage(ctx, &a2a.SendMessageRequest{
+	Message: a2a.NewUserMessage("Run the job"),
+	PushNotification: &a2a.PushNotificationConfig{
+		URL:   "https://consumer.example.com/a2a/events",
+		Token: "callback-token",
+	},
 })
+if err != nil {
+	return err
+}
+if task.ID == "" {
+	return fmt.Errorf("server returned an empty Task ID")
+}
 ```
+
+已存在 Task 可用 `client.SetPushNotification(ctx, task.ID, config)` 配置，并用 `GetPushNotification` 核对；两者的错误都要处理。
+
+### 不可变通知契约
+
+`PushNotification` 的字段是私有的，只能通过构造器创建。构造时会序列化一份快照；之后修改原 Task/Artifact，或修改访问器返回的副本，都不会改变通知。
+
+```go
+notification, err := a2a.NewTaskStatusNotification(task)
+if err != nil {
+	return err
+}
+snapshot, err := notification.Task()
+if err != nil {
+	return err
+}
+if snapshot == nil || notification.EventType() != a2a.EventTypeTaskStatus {
+	return fmt.Errorf("invalid Task notification")
+}
+```
+
+产物通知使用 `NewArtifactNotification(taskID, artifact)`，并通过 `Artifact()` 读取副本；构造和读取都要检查错误。`TaskID()`、`EventType()` 和 `Timestamp()` 提供元数据。`NewWebhookPushService` 和 `NewAsyncPushService` 也会返回配置校验错误。
+
+### 交付保证
+
+当前实现是 best-effort，不承诺 Webhook 自动重试或可靠交付：
+
+- `WebhookPushService.Push` 每次调用只发送一次 HTTP POST。`WithWebhookRetry` 当前只校验并保存配置，不是已执行的自动重试保证。
+- `AsyncPushService.Push` 成功只代表入队；队列满返回 `ErrPushQueueFull`，关闭后返回 `ErrPushServiceClosed`。Worker 不向调用方传递底层交付错误。
+- `Server` 在普通 `tasks/send` 结束后异步触发 Task 状态推送，不等待也不暴露推送错误；内建流式更新不会自动发送 Artifact Webhook。
+- `Close` 会停止 Worker 并释放剩余队列，不承诺刷新完成所有待发消息。
+
+需要至少一次交付时，实现自己的 `PushService` 和持久化 outbox，加入有界重试、幂等键、可观测失败与死信处理。`PushManager` 可用于任务级配置和速率限制，其构造函数 `NewPushManager` 也返回 `error`。
 
 ## Agent 发现
 
-### 静态发现
+`Discovery` 统一定义 `Discover`、`Register`、`Deregister`、`Get` 和 `Watch`，每个方法都返回需要处理的错误。
+
+| 实现 | 数据源 | 实际过滤 | `Watch` 语义 |
+| --- | --- | --- | --- |
+| `StaticDiscovery` | 进程内 Card map | Name 精确匹配或 `*`，以及 Skill ID | 立即返回已关闭通道 |
+| `RegistryDiscovery` | `agent.Registry` 事件和手工注册 | Name、Skill ID、Tag、Streaming/Push 能力 | 返回缓冲通道；当前不应用 filter/context，也没有取消订阅 API |
+| `RemoteDiscovery` | 预先添加的远端 URL 和 TTL 缓存 | 仅 Name 精确匹配或 `*` | 立即返回已关闭通道 |
+
+`AgentFilter.Name` 不是通用 glob；除了特殊值 `*`，都是精确匹配。
 
 ```go
-discovery := a2a.NewStaticDiscovery(
-    &a2a.AgentCard{Name: "agent-1", URL: "http://agent1.example.com"},
-    &a2a.AgentCard{Name: "agent-2", URL: "http://agent2.example.com"},
-)
-
-// 发现所有 Agent
-cards, _ := discovery.Discover(ctx, nil)
-
-// 按技能过滤
-cards, _ := discovery.Discover(ctx, &a2a.AgentFilter{
-    Skills: []string{"search"},
+discovery := a2a.NewStaticDiscovery(card)
+cards, err := discovery.Discover(ctx, &a2a.AgentFilter{
+	Name:   "assistant",
+	Skills: []string{"answer"},
 })
+if err != nil {
+	return err
+}
+if len(cards) == 0 {
+	return fmt.Errorf("no matching Agent")
+}
 ```
 
-### Registry 集成
+`RegistryDiscovery` 在构造后监听 Registry 的后续事件，不会回放构造前已注册的条目；应先创建 discovery 再注册，或通过 discovery 显式注册 Card。
+
+`RemoteDiscovery.Discover` 会跳过无法获取 Card 的 URL，仍可能返回 `nil` 错误；需要严格确认某个 Agent 时使用 `Get(ctx, url)` 并检查错误。该实现创建的内部 Client 不带认证选项，适用于公开 Agent Card。
+
+## Hexagon 桥接
+
+### 暴露本地 Agent
+
+`WrapAgent` 把 `agent.Agent` 转换为普通 `TaskHandler`，`WrapStreamingAgent` 转换为 `StreamingTaskHandler`。`ExposeAgent` 创建并返回 `*Server`，**不会启动它**。
 
 ```go
-// 与 Hexagon Registry 集成
-registry := agent.GlobalRegistry()
-discovery := a2a.NewRegistryDiscovery(registry, "http://localhost:8080")
-
-// Registry 中注册的 Agent 自动可发现
-cards, _ := discovery.Discover(ctx, nil)
+func expose(localAgent agent.Agent) error {
+	server := a2a.ExposeAgent(localAgent, "http://localhost:8080")
+	if err := server.Start(":8080"); err != nil {
+		return fmt.Errorf("start A2A server: %w", err)
+	}
+	return nil
+}
 ```
 
-### 远程发现
+`ExposeAgent` 声明流式能力并使用 Agent 的 `Stream` 方法。普通包装器会将 Agent 执行错误转成 `failed` Task update；流式包装器将内容块转成 Artifact，并在结束时返回合并后的完成消息。
+
+### 调用远端 Agent
+
+`NewRemoteAgent` 和 `ConnectToA2AAgent` 会在构造期间立即获取 Agent Card，因此都返回 `error`，不能忽略。构造阶段使用内部 background context，可用 `WithTimeout` 限制 HTTP 耗时。
 
 ```go
-// 远程 Agent 发现
-discovery := a2a.NewRemoteDiscovery(5 * time.Minute) // 缓存 5 分钟
-discovery.AddAgent("http://agent1.example.com")
-discovery.AddAgent("http://agent2.example.com")
+func invokeRemote(ctx context.Context, input agent.Input) (_ agent.Output, err error) {
+	remote, err := a2a.ConnectToA2AAgent(
+		"https://agent.example.com",
+		a2a.WithTimeout(10*time.Second),
+		a2a.WithAuth(&a2a.BearerAuth{Token: "secret"}),
+	)
+	if err != nil {
+		return agent.Output{}, fmt.Errorf("connect to A2A Agent: %w", err)
+	}
+	defer func() {
+		if closeErr := remote.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
-// 自动获取 Agent Card
-cards, _ := discovery.Discover(ctx, nil)
+	return remote.Run(ctx, input)
+}
 ```
 
-## 与 Hexagon 整合
+尽管类型名是 `RemoteAgent`，当前类型只提供 `ID`、`Name`、`Run`、`Card`、`Close` 和 `NewSession`，**不满足完整的 `agent.Agent`/`core.Runnable` 接口**；不要直接传给 `Team` 或 `AgentNetwork.Register`。需要完整 Agent 时，显式写一个实现缺失方法的适配器，或直接使用 `Client`。
 
-### 包装现有 Agent
+另外，`RemoteAgent.Run` 遇到非终态 Task 时会连续轮询 `GetTask`，当前没有轮询退避。对异步远端或长任务，优先直接使用 `Client`，实现带截止时间、间隔和限速的有界轮询。
+
+### AgentNetwork 桥接
+
+`NewNetworkBridge(network, taskStore)` 提供三个显式方法：
+
+- `SendToAgent`：查找目标 Agent 并直接调用 `Run`，返回转换后的 A2A Message。
+- `BroadcastMessage`：通过网络广播 Message 的纯文本内容。
+- `SendToAgentNetwork`：通过网络队列向指定 Agent 发送纯文本内容。
 
 ```go
-// 将 Hexagon Agent 包装为 A2A Handler
-myAgent := agent.NewReAct(...)
-handler := a2a.WrapAgent(myAgent)
-
-// 或使用流式包装器
-handler := a2a.WrapStreamingAgent(myAgent)
+reply, err := bridge.SendToAgent(ctx, "researcher", &message)
+if err != nil {
+	return err
+}
+if reply.GetTextContent() == "" {
+	return fmt.Errorf("Agent returned an empty response")
+}
 ```
 
-### 使用远程 A2A Agent
+当前 `NetworkBridge` 的 `taskStore` 字段未被这些方法使用，不能据此假设有 Task 追踪或持久化；后两个网络方法也只转发 `GetTextContent()`，不会保留 File/Data Part。
 
-```go
-// 连接远程 A2A Agent 作为 Hexagon Agent 使用
-remoteAgent, _ := a2a.ConnectToA2AAgent("http://remote-agent.example.com")
-defer remoteAgent.Close()
+## JSON-RPC 与端点
 
-// 像普通 Agent 一样使用
-output, _ := remoteAgent.Run(ctx, agent.Input{Query: "Hello"})
-```
+### HTTP 路径
 
-### 在 Agent 网络中使用
-
-```go
-// 创建 Agent 网络
-network := agent.NewAgentNetwork("my-network")
-
-// 添加本地 Agent
-network.Register(localAgent)
-
-// 添加远程 A2A Agent
-remoteAgent, _ := a2a.ConnectToA2AAgent("http://remote.example.com")
-network.Register(remoteAgent)
-
-// Agent 间可以正常通信
-network.SendTo(ctx, "local-agent", "remote-agent", "协作消息")
-```
-
-## API 参考
-
-### 路径
-
-| 路径 | 方法 | 说明 |
-|------|------|------|
+| 路径 | 方法 | 用途 |
+| --- | --- | --- |
 | `/.well-known/agent-card.json` | GET | 获取 Agent Card |
-| `/tasks` | POST | JSON-RPC 端点 |
-| `/tasks/sendSubscribe` | POST | 流式发送消息 |
-| `/tasks/resubscribe` | POST | 重新订阅任务 |
+| `/tasks` | POST | `Client` 的非流式 JSON-RPC 统一入口 |
+| `/tasks/send` | POST | Server 注册的非流式别名 |
+| `/tasks/sendSubscribe` | POST | `SendMessageStream` SSE |
+| `/tasks/get` | POST | Server 注册的非流式别名 |
+| `/tasks/cancel` | POST | Server 注册的非流式别名 |
+| `/tasks/resubscribe` | POST | `Resubscribe` SSE |
+| `/tasks/pushNotification/get` | POST | Server 注册的非流式别名 |
+| `/tasks/pushNotification/set` | POST | Server 注册的非流式别名 |
+
+Server 也为 send/get/cancel/push 注册了同名的分路径，但官方 `Client` 的非流式方法统一 POST 到 `/tasks`。
 
 ### JSON-RPC 方法
 
-| 方法 | 说明 |
-|------|------|
-| `tasks/send` | 发送消息 |
-| `tasks/get` | 获取任务 |
-| `tasks/list` | 列出任务 |
-| `tasks/cancel` | 取消任务 |
-| `tasks/pushNotification/set` | 设置推送配置 |
-| `tasks/pushNotification/get` | 获取推送配置 |
+| 方法 | 结果 |
+| --- | --- |
+| `tasks/send` | 创建或继续 Task，返回 Task |
+| `tasks/sendSubscribe` | 创建或继续 Task，返回 SSE |
+| `tasks/get` | 获取 Task |
+| `tasks/list` | 按 Session/状态分页列出 Task |
+| `tasks/cancel` | 取消非终态 Task |
+| `tasks/resubscribe` | 重新订阅已存在 Task |
+| `tasks/pushNotification/set` | 设置 Task 推送配置 |
+| `tasks/pushNotification/get` | 获取 Task 推送配置 |
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tasks/send",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"type": "text", "text": "Hello"}]
+    }
+  }
+}
+```
+
+### SSE 事件
+
+事件名固定为 `task-status`、`artifact`、`error` 和 `done`。`task-status` 携带状态和 `final`，`artifact` 携带产物，`error` 携带 `*a2a.Error`，`done` 可携带最终 Task。
 
 ### 错误码
 
 | 代码 | 含义 |
-|------|------|
-| -32700 | JSON 解析错误 |
-| -32600 | 无效请求 |
-| -32601 | 方法不存在 |
-| -32602 | 无效参数 |
-| -32603 | 内部错误 |
-| -32001 | 任务不存在 |
-| -32002 | 任务不可取消 |
-| -32003 | 不支持推送通知 |
-| -32010 | 需要认证 |
-| -32011 | 认证失败 |
-| -32012 | 权限不足 |
+| --- | --- |
+| `-32700` | Parse error |
+| `-32600` | Invalid request |
+| `-32601` | Method not found |
+| `-32602` | Invalid params |
+| `-32603` | Internal error |
+| `-32001` | Task not found |
+| `-32002` | Task not cancelable |
+| `-32003` | Push notification not supported |
+| `-32004` | Unsupported operation |
+| `-32005` | Content type not supported |
+| `-32010` | Authentication required |
+| `-32011` | Authentication failed |
+| `-32012` | Permission denied |
 
-## 最佳实践
+普通协议错误可能在 HTTP 200 响应的 JSON-RPC `error` 字段中返回；不能只检查 HTTP 状态码。官方 `Client` 会将该字段返回为 `*a2a.Error`，可用 `a2a.GetA2AError(err)` 获取 `Code`。
 
-### 1. 设计清晰的 Agent Card
+## 上线前检查
 
-```go
-card := &a2a.AgentCard{
-    Name:        "customer-service",  // 简洁明确的名称
-    Description: "企业客服 Agent，提供产品咨询和技术支持",  // 详细描述
-    Version:     "1.2.0",  // 语义化版本
-    Skills: []a2a.AgentSkill{
-        {
-            ID:          "product-qa",
-            Name:        "产品咨询",
-            Description: "回答产品功能、价格、使用方法等问题",
-            Examples:    []string{"这个产品有什么功能？", "价格是多少？"},
-        },
-        {
-            ID:          "tech-support",
-            Name:        "技术支持",
-            Description: "解决技术问题和故障排查",
-            Examples:    []string{"无法登录怎么办？", "为什么显示错误？"},
-        },
-    },
-}
-```
+- Agent Card 的 URL、能力、技能、输入/输出模式和认证声明与运行时一致。
+- 每个 Client/Discovery/Bridge 调用都有截止时间、取消和错误分类；所有 Stream 都被消费至关闭。
+- 认证中间件实际包装了 Task/SSE 路由，Agent Card 的公开策略与 Client 行为一致。
+- 生产任务使用持久化 `TaskStore`；依赖回调的业务使用可靠 outbox，不把内建 Webhook 当作自动重试队列。
+- 服务关闭时检查 `Stop`/`Shutdown` 错误，关闭 Client 和已创建的异步推送服务。
 
-### 2. 优雅处理错误
+## 相关文档
 
-```go
-func (h *MyHandler) HandleTask(ctx context.Context, task *a2a.Task, msg *a2a.Message) (*a2a.TaskUpdate, error) {
-    // 业务错误应返回 TaskUpdate，不要返回 error
-    if !isValid(msg) {
-        return a2a.NewFailedUpdate("消息格式不正确，请重试"), nil
-    }
-
-    result, err := h.process(ctx, msg)
-    if err != nil {
-        // 区分可重试和不可重试错误
-        if isRetryable(err) {
-            return a2a.NewFailedUpdate("服务暂时不可用，请稍后重试"), nil
-        }
-        return a2a.NewFailedUpdate("处理失败: " + err.Error()), nil
-    }
-
-    return a2a.NewCompletedUpdate(result), nil
-}
-```
-
-### 3. 使用会话管理多轮对话
-
-```go
-// 通过 SessionID 关联多个任务
-task1, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    SessionID: "user-session-123",
-    Message:   a2a.NewUserMessage("第一轮"),
-})
-
-task2, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    SessionID: "user-session-123",  // 同一会话
-    Message:   a2a.NewUserMessage("第二轮"),
-})
-
-// 查询会话中的所有任务
-tasks, _ := client.ListTasks(ctx, &a2a.ListTasksRequest{
-    SessionID: "user-session-123",
-})
-```
-
-## 参考资料
-
-- [Google A2A Protocol Specification](https://google.github.io/A2A/)
-- [JSON-RPC 2.0 Specification](https://www.jsonrpc.org/specification)
-- [Server-Sent Events (SSE)](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
+- [API 参考](../API.md)
+- [多 Agent 编排](multi-agent.md)
+- [`agent/a2a` 源码](../../agent/a2a/a2a.go)

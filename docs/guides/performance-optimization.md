@@ -2,43 +2,50 @@
 
 # 性能优化指南
 
-本指南提供 Hexagon 应用的性能优化最佳实践。
+本指南提供 Hexagon 应用的性能优化建议。示例使用当前公开 API；批量大小、并发数、缓存容量和超时都只是起点，应以实际压测结果和上游限额为准。
 
 ## Agent 优化
 
-### 1. 流式输出
+### 1. 消费流接口
 
 ```go
-// 使用流式输出减少首字节时间
-reader, _ := myAgent.Stream(ctx, input)
+reader, err := myAgent.Stream(ctx, input)
+if err != nil {
+    return err
+}
 defer reader.Close()
+
 for {
-    chunk, err := reader.Recv()
+    output, err := reader.Recv()
     if errors.Is(err, io.EOF) {
-        break
+        return nil
     }
     if err != nil {
-        break
+        return err
     }
-    fmt.Print(chunk.Content)
+    fmt.Print(output.Content)
 }
 ```
+
+`Stream` 返回 `StreamReader[agent.Output]`，但不要假定每种 Agent 实现都会按 token 增量输出。是否能降低首字节时间取决于具体实现，应通过基准测试确认。
 
 ### 2. 批量处理
 
 ```go
-// 批量处理多个请求
 inputs := []agent.Input{input1, input2, input3}
-results, _ := agent.Batch(ctx, inputs)
+results, err := myAgent.Batch(ctx, inputs)
+if err != nil {
+    return err
+}
 ```
+
+`Batch` 是统一批量接口，不保证每种 Agent 实现都会并发执行；例如当前 `BaseAgent` 和 `ReActAgent` 会顺序处理输入。
 
 ### 3. 合理的记忆窗口
 
 ```go
-// 避免记忆窗口过大
-memory := memory.NewBufferMemory(
-    memory.WithMaxMessages(10), // 只保留最近10条
-)
+// 最多保留最近 10 个记忆条目
+chatMemory := memory.NewBuffer(10)
 ```
 
 ### 4. 工具执行限制
@@ -55,67 +62,117 @@ myAgent := agent.NewReAct(
 ### 1. 向量缓存
 
 ```go
-embedder := embedder.NewCachedEmbedder(
+cachedEmbedder := embedder.NewCachedEmbedder(
     baseEmbedder,
-    embedder.WithCacheSize(1000),
+    embedder.WithMaxCacheSize(1000),
 )
 ```
 
 ### 2. 批量索引
 
 ```go
-indexer.IndexBatch(ctx, docs,
-    indexer.WithBatchSize(100),
+concurrentIndexer := indexer.NewConcurrentIndexer(
+    vectorStore,
+    baseEmbedder,
+    indexer.WithConcurrentBatchSize(100),
     indexer.WithConcurrency(4),
 )
+
+if err := concurrentIndexer.Index(ctx, docs); err != nil {
+    return err
+}
 ```
+
+并发数应同时受嵌入服务限流和向量存储连接容量约束；提高并发数不一定提高吞吐。
 
 ### 3. 查询缓存
 
+Hexagon 当前没有通用的 `CachedRetriever`。下面由应用使用 `github.com/hexagon-codes/toolkit/cache/local` 建立有界缓存；缓存实例应在应用启动时创建并跨请求复用。
+
 ```go
-// 缓存相似查询的结果
-retriever := retriever.NewCachedRetriever(
-    baseRetriever,
-    cache.NewLRU(100),
+// Hexagon 不提供通用 CachedRetriever；缓存由应用按业务边界建立。
+queryCache := local.NewCache(1000)
+defer queryCache.Stop() // 仅在应用退出时停止
+
+const topK = 5
+// key 必须包含租户、知识库版本、查询和所有检索参数。
+keySource := fmt.Sprintf("%q|%q|%q|%d", tenantID, knowledgeBaseVersion, query, topK)
+cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(keySource)))
+
+var documents []rag.Document
+err := queryCache.GetOrLoad(
+    ctx,
+    cacheKey,
+    5*time.Minute,
+    &documents,
+    func(loadCtx context.Context) (any, error) {
+        return baseRetriever.Retrieve(loadCtx, query, rag.WithTopK(topK))
+    },
 )
+if err != nil {
+    return err
+}
 ```
+
+只缓存可复用的无副作用结果，并设置容量、TTL 和失效策略。权限范围或知识库版本变化时必须生成不同的 key。
 
 ## 多 Agent 优化
 
 ### 1. 并行执行
 
 ```go
-// 使用并行模式加速独立任务
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.TeamModeParallel),
+parallelAgent := agent.NewParallelAgent(
+    "analysis-team",
+    []agent.Agent{researcher, writer, reviewer},
+    agent.WithMaxParallel(3),
 )
+
+result, err := parallelAgent.Invoke(ctx, input)
+if err != nil {
+    return err
+}
 ```
+
+仅将彼此独立、可安全并行的子任务放入 `ParallelAgent`。
 
 ### 2. 超时控制
 
 ```go
-team := agent.NewTeam(
-    agent.WithTeamTimeout(5 * time.Minute),
-)
+runCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+defer cancel()
+
+result, err := parallelAgent.Invoke(runCtx, input)
+if ctxErr := runCtx.Err(); ctxErr != nil {
+    return ctxErr
+}
+if err != nil {
+    return err
+}
 ```
 
-### 3. 结果缓存
-
-```go
-// 缓存 Agent 结果避免重复计算
-agent := agent.NewCachedAgent(baseAgent, cache.NewLRU(50))
-```
+超时通过 `context` 传递；子 Agent 和其调用的 Provider、工具也必须遵守取消信号，才能及时停止。
 
 ## 系统优化
 
 ### 1. 连接池
 
 ```go
-// LLM 客户端使用连接池
-provider := openai.New(apiKey,
-    openai.WithMaxConnections(100),
+transport := http.DefaultTransport.(*http.Transport).Clone()
+transport.MaxIdleConns = 100
+transport.MaxIdleConnsPerHost = 20
+transport.IdleConnTimeout = 90 * time.Second
+
+httpClient := &http.Client{Transport: transport}
+provider := openai.New(
+    apiKey,
+    openai.WithHTTPClient(httpClient),
 )
+
+// 应用退出时调用。
+defer transport.CloseIdleConnections()
 ```
+
+长流式请求通常由调用方 `context` 控制总时长；不要为整个 `http.Client` 随意设置过短的 `Timeout`。
 
 ### 2. 对象复用
 
@@ -146,13 +203,13 @@ for _, task := range tasks {
 
 ```bash
 # 运行基准测试
-go test -bench=. -benchmem ./bench/...
+go test -run '^$' -bench=. -benchmem ./bench/...
 
 # 生成 CPU profile
-go test -cpuprofile=cpu.prof -bench=.
+go test -run '^$' -bench=. -cpuprofile=cpu.prof ./bench
 
 # 生成内存 profile
-go test -memprofile=mem.prof -bench=.
+go test -run '^$' -bench=. -memprofile=mem.prof ./bench
 
 # 分析 profile
 go tool pprof cpu.prof

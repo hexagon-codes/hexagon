@@ -1,222 +1,70 @@
 <div align="right">Language: <a href="comparison.md">中文</a> | English</div>
 
-# AI Agent Framework Comprehensive Comparison
+# AI Agent Framework Selection Reference
 
-This document compares Hexagon against mainstream AI Agent frameworks to help developers choose the right tool.
+This document provides an objective starting point for evaluating Hexagon, LangChain, LangGraph, LlamaIndex, Eino, Semantic Kernel, and Spring AI. It does not rank them or replace validation against a real workload.
 
-## Framework Overview
+## Scope and Limitations
 
-| Dimension | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **Language** | **Go** | Python/JS | Python/JS | Python | **Go** | C#/Python | Java |
-| **Developer** | hexagon-codes | LangChain Inc. | LangChain Inc. | LlamaIndex Inc. | ByteDance | Microsoft | VMware |
-| **License** | Apache 2.0 | MIT | MIT | MIT | Apache 2.0 | MIT | Apache 2.0 |
-| **Focus** | All-around Agent framework | LLM application framework | Graph orchestration engine | RAG data framework | Streaming AI framework | Enterprise AI orchestration | Spring ecosystem AI |
-| **Ecosystem** | hexagon + ai-core + toolkit | LangSmith + LangServe | LangSmith | LlamaHub | Standalone | Azure ecosystem | Spring ecosystem |
+- Project positioning, primary implementation languages, and licenses come from each project's official repository.
+- Hexagon capabilities are listed only when supported by the current source tree and documentation. The presence of an implementation does not prove that it meets a particular workload's performance, security, or reliability requirements.
+- This repository has no unified benchmark covering these frameworks. There are no comparable measurements for image size, startup time, throughput, latency, memory, cost, or learning time, so this document provides no numbers or rankings for them.
+- External projects change their features, versions, and support scope. Recheck their official documentation and release notes when selecting or upgrading a framework.
 
-## Six-Dimension Capability Scores
+> **Current Hexagon status**: The project remains in the v0.x phase, with stability defined per module. See the [API Stability Policy](STABILITY.en.md) for the applicable guarantees.
 
-Hexagon focuses on six core dimensions: **ease of use, performance, extensibility, task orchestration, observability, and security**:
+## Project Metadata
 
-| Dimension | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| ⚡ **Performance** | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| 🧩 **Ease of Use** | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ |
-| 🛡️ **Security** | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| 🔧 **Extensibility** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| 🛠️ **Orchestration** | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ |
-| 🔍 **Observability** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
+| Project | Primary implementation / runtime | Concise official positioning | License | Primary sources |
+|---------|----------------------------------|------------------------------|---------|-----------------|
+| Hexagon | Go | This repository provides Agent, orchestration, RAG, runtime, observability, and security-related modules | Apache-2.0 | [Official repository](https://github.com/hexagon-codes/hexagon) · [License](https://github.com/hexagon-codes/hexagon/blob/main/LICENSE) |
+| LangChain | Python; JS/TS is a separate implementation | A framework for building agents and LLM-powered applications | MIT | [Official repository](https://github.com/langchain-ai/langchain) · [License](https://github.com/langchain-ai/langchain/blob/master/LICENSE) |
+| LangGraph | Python; JS/TS is a separate implementation | A low-level orchestration framework for long-running, stateful agents | MIT | [Official repository](https://github.com/langchain-ai/langgraph) · [License](https://github.com/langchain-ai/langgraph/blob/main/LICENSE) |
+| LlamaIndex | Python | A data and document framework for building agentic applications | MIT | [Official repository](https://github.com/run-llama/llama_index) · [License](https://github.com/run-llama/llama_index/blob/main/LICENSE) |
+| Eino | Go | A Go-conventional LLM application framework with components, an Agent development kit, and composition | Apache-2.0 | [Official repository](https://github.com/cloudwego/eino) · [License](https://github.com/cloudwego/eino/blob/main/LICENSE-APACHE) |
+| Semantic Kernel | .NET, Python, Java | A model-agnostic SDK for building and orchestrating agents and multi-agent systems | MIT | [Official repository](https://github.com/microsoft/semantic-kernel) · [License](https://github.com/microsoft/semantic-kernel/blob/main/LICENSE) |
+| Spring AI | Java / Spring | Spring-friendly APIs and abstractions for developing AI applications | Apache-2.0 | [Official repository](https://github.com/spring-projects/spring-ai) · [License](https://github.com/spring-projects/spring-ai/blob/main/LICENSE.txt) |
 
-> **Design Goal**: Hexagon strives for balanced excellence across all capability dimensions, providing Go developers with a production-ready AI Agent development foundation.
->
-> **Current Status**: v0.5.0; some features are still being refined. Ecosystem and community maturity are still behind established frameworks like LangChain and LlamaIndex.
+The “Concise official positioning” column paraphrases each project's own description. It is not an endorsement of quality, maturity, or fitness for a particular use case.
 
-## Core Feature Comparison
+## Source-Verified Hexagon Surface
 
-| Feature | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **Unified component interface** | ✅ Component[I,O] | ✅ Runnable | ✅ | ✅ Component | ✅ Runnable | ✅ Kernel | ✅ |
-| **Native streaming** | ✅ Stream[T] | ✅ | ✅ | ⚠️ Partial | ✅ Core capability | ✅ | ✅ |
-| **Compile-time type safety** | ✅ Generics | ❌ Runtime | ❌ Runtime | ❌ Runtime | ✅ | ✅ | ✅ |
-| **Graph orchestration engine** | ✅ Full | ⚠️ Basic | ✅ Core capability | ❌ | ✅ Graph | ✅ | ❌ |
-| **Checkpoint / resume** | ⚠️ Basic | ❌ | ✅ | ❌ | ⚠️ | ✅ | ❌ |
-| **Human-in-the-loop** | ✅ | ⚠️ Manual | ✅ | ❌ | ⚠️ | ✅ | ⚠️ |
+| Dimension | Current implementation | Source evidence |
+|-----------|------------------------|-----------------|
+| Execution abstractions | Generic `Runnable[I,O]` covers Invoke, Stream, Batch, Collect, Transform, and BatchStream; `Component[I,O]` is a compatibility interface | [`core/runnable.go`](../core/runnable.go) |
+| Agents | ReAct, Team, Swarm, Handoff, sequential/parallel/loop Agent primitives, and team shared memory | [`agent/`](../agent/) |
+| Orchestration | Graph and Workflow; the Graph package includes streaming execution, checkpoint/resume, barriers, and distributed execution-related implementations | [`orchestration/graph/`](../orchestration/graph/) · [`orchestration/workflow/`](../orchestration/workflow/) |
+| RAG | Document, loading, splitting, indexing, retrieval, embedding, and vector-store interfaces plus related subpackages | [`rag/`](../rag/) |
+| Providers and foundations | LLM, Tool, Memory, Schema, streaming, Qdrant, and related capabilities come from the pinned ai-core version; general-purpose primitives come from toolkit | [`go.mod`](../go.mod) · [Dependency topology](STABILITY.en.md#dependency-stability) |
+| Observability | Hook Manager, tracing, metrics, OpenTelemetry, Prometheus, and Dev UI-related implementations | [`hooks/`](../hooks/) · [`observe/`](../observe/) |
+| Security and budgets | Guards, PII handling, RBAC, cost control, permission middleware, and tool sandbox-related implementations | [`security/`](../security/) · [`runtime/middleware/`](../runtime/middleware/) · [`tool/sandbox/`](../tool/sandbox/) |
+| Deployment assets | Docker Compose and Helm configurations | [`deploy/`](../deploy/) |
 
-## LLM Provider Support
+This table describes the available code surface only. Before adoption, validate it with the target models, data, tools, permission boundaries, and deployment environment.
 
-| Provider | Hexagon (ai-core) | LangChain | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|----------|:-----------------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **OpenAI** | ✅ GPT-4/4o/o1/o3 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **DeepSeek** | ✅ | ✅ | ⚠️ | ✅ | ⚠️ | ⚠️ |
-| **Anthropic** | ✅ Claude | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Google Gemini** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Qwen (Tongyi)** | ✅ | ✅ | ⚠️ | ✅ | ⚠️ | ⚠️ |
-| **Doubao (Ark)** | ✅ | ⚠️ | ❌ | ✅ | ❌ | ❌ |
-| **Ollama** | ✅ Local models | ✅ | ✅ | ✅ | ✅ | ✅ |
+## Objective Evaluation Dimensions
 
-## RAG Capability Comparison
+| Dimension | Questions to answer | Suggested evidence |
+|-----------|---------------------|--------------------|
+| Team and runtime | Which languages and runtimes does the team operate? Can the existing service, build, and operations stack integrate directly? | Minimal integration branch, build records, dependency inventory |
+| Agent and orchestration model | Does the workload need a single Agent, deterministic workflows, dynamic Agents, or multi-agent collaboration? How are state and control flow represented? | Critical-user-journey prototype, state-machine and failure-path tests |
+| Persistence and recovery | Are long-running work, checkpoints, human input, idempotent recovery, or cross-process execution required? | Interrupt/resume, duplicate execution, process restart, and network fault tests |
+| Data and RAG | What are the contracts for data sources, parsing, splitting, retrieval, reranking, and vector storage? | Recall, correctness, migration, and isolation tests on representative data |
+| Models and tools | Do required models, structured output, streaming protocols, Tools, MCP, or custom providers have maintainable integration seams? | API and protocol contract tests against pinned versions |
+| Observability and evaluation | Can one request correlate Agent, model, tool, retrieval, and cost activity? | Traces, metrics, logs, evaluation samples, and troubleshooting exercises |
+| Security boundaries | Which layer owns credentials, tenancy, tool permissions, network access, sandboxing, PII, and audit records? | Threat model, permission matrix, malicious-input and fail-closed tests |
+| Deployment and operations | How will the target environment build, scale, upgrade, roll back, and troubleshoot the application? | Real artifacts, startup/shutdown, rolling-upgrade, and rollback exercises |
+| API stability and governance | Do versioning, deprecation periods, upgrade guidance, ownership, and dependency cadence fit the team? | Release history, compatibility tests, maintenance process, and upgrade rehearsal |
+| Performance and cost | What are the required concurrency, latency, throughput, memory, and model-cost budgets? | A benchmark run in the same environment with the same model and workload |
 
-| Capability | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **Document loaders** | ✅ 10+ formats (incl. XLSX/PPTX/OCR) | ✅ Rich | - | ✅ Most extensive | ⚠️ Basic | ⚠️ | ✅ |
-| **Semantic splitting** | ✅ 7 splitters | ✅ | - | ✅ Most advanced | ⚠️ | ⚠️ | ⚠️ |
-| **Vector stores** | ✅ 8 options (Qdrant/FAISS/PgVector/Redis/...) | ✅ | - | ✅ | ✅ | ✅ | ✅ |
-| **Hybrid retrieval** | ✅ Vector+Keyword+HyDE+Adaptive | ✅ | - | ✅ | ⚠️ | ⚠️ | ⚠️ |
-| **Reranking** | ✅ | ✅ | - | ✅ | ⚠️ | ❌ | ❌ |
-| **Response synthesis** | ✅ Refine/Compact/Tree | ⚠️ Basic | - | ✅ Most extensive | ⚠️ | ⚠️ | ⚠️ |
+## Comparable POC Baseline
 
-> **Note**: The Milvus vector store is currently an experimental in-memory simulation. For production use, Qdrant or Chroma is recommended.
+To avoid confusing framework differences with model, network, or data differences, evaluate candidates under the same conditions:
 
-## Multi-Agent Capability Comparison
+1. Pin the model and version, API endpoint, dataset, tool set, concurrency model, and timeout budget.
+2. Implement the same critical journeys, including normal calls, streaming, tool failures, cancellation, retries, and recovery.
+3. Record correctness, P50/P95/P99 latency, throughput, peak memory, model-call volume, and recovery outcomes.
+4. Add contract tests for required RAG, permissions, observability, and deployment paths; do not use demo code as acceptance evidence.
+5. Pin dependencies and record the hardware, operating system, configuration, and raw results needed to reproduce the experiment.
 
-| Capability | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **Role system** | ✅ Role | ❌ | ❌ | ❌ | ❌ | ✅ Persona | ❌ |
-| **Team collaboration** | ✅ 4 modes | ❌ | ⚠️ Manual | ❌ | ⚠️ | ⚠️ | ❌ |
-| **Agent communication** | ✅ A2A protocol | ❌ | ✅ Message passing | ❌ | ⚠️ | ⚠️ | ❌ |
-| **Handoff** | ✅ | ❌ | ✅ | ❌ | ❌ | ⚠️ | ❌ |
-| **Consensus mechanism** | ✅ | ❌ | ⚠️ | ❌ | ❌ | ❌ | ❌ |
-
-**Hexagon Team Collaboration Modes:**
-- Sequential
-- Hierarchical
-- Collaborative
-- RoundRobin
-
-## Observability Comparison
-
-| Capability | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **OpenTelemetry** | ✅ Native integration | ⚠️ Integration | ⚠️ Integration | ⚠️ | ✅ | ✅ | ✅ |
-| **Prometheus** | ✅ Native | ❌ | ❌ | ❌ | ⚠️ | ⚠️ | ✅ Micrometer |
-| **Hooks / Callbacks** | ✅ 4-layer hooks | ✅ Callbacks | ✅ | ⚠️ | ✅ Callbacks | ✅ Filters | ⚠️ |
-| **Dev UI** | ✅ Built-in, free | ✅ LangSmith💰 | ✅ LangSmith💰 | ❌ | ❌ | ❌ | ❌ |
-| **End-to-end tracing** | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ | ✅ | ✅ |
-
-**Hexagon Hook System:**
-- RunHook (Agent execution)
-- ToolHook (tool invocation)
-- LLMHook (LLM call)
-- RetrieverHook (retrieval call)
-
-## Security Comparison
-
-| Capability | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **Prompt injection detection** | ✅ Guard Chain | ⚠️ Third-party | ⚠️ | ⚠️ | ❌ | ✅ | ⚠️ |
-| **PII redaction** | ✅ Luhn validation | ⚠️ Third-party | ⚠️ | ❌ | ❌ | ✅ | ❌ |
-| **RBAC** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ Spring |
-| **Cost control** | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ | ❌ |
-| **Sandbox isolation** | ✅ | ⚠️ | ⚠️ | ❌ | ❌ | ⚠️ | ❌ |
-| **Audit logging** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
-
-## Deployment & Operations Comparison
-
-| Feature | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **Image size** | ~20MB | ~500MB+ | ~500MB+ | ~500MB+ | ~30MB | ~200MB+ | ~200MB+ |
-| **Startup time** | <100ms | 2-5s | 2-5s | 2-5s | <100ms | 5-15s | 5-15s |
-| **Concurrency** | 100k+ agents | GIL-limited | GIL-limited | GIL-limited | 100k+ | Thread pool | Thread pool |
-| **Single binary deployment** | ✅ (incl. Docker/Helm) | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
-| **Memory footprint** | Low | High | High | High | Low | Medium | Medium |
-
-## Developer Experience Comparison
-
-| Feature | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **Minimal code** | 3 lines | 15 lines | 30 lines | 10 lines | 10 lines | 20 lines | 15 lines |
-| **Learning curve** | <1 hour | 4-8 hours | 8-16 hours | 2-4 hours | 2-4 hours | 4-8 hours | 2-4 hours |
-| **Type hints** | ✅ Compile-time | ⚠️ Runtime | ⚠️ Runtime | ⚠️ Runtime | ✅ Compile-time | ✅ Compile-time | ✅ Compile-time |
-| **Documentation quality** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| **Chinese documentation** | ✅ Native | ⚠️ Community | ⚠️ Community | ⚠️ Community | ✅ Native | ⚠️ Community | ⚠️ Community |
-| **Ecosystem richness** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-
-## Legend
-
-| Symbol | Meaning |
-|:----:|------|
-| ✅ | Full support |
-| ⚠️ | Partial support |
-| ❌ | Not supported |
-| 💰 | Paid feature |
-| - | Not applicable |
-
-## Use Case Recommendations
-
-| Scenario | First Choice | Alternative |
-|------|------|------|
-| **Go tech stack** | Hexagon | Eino |
-| **Java/Spring tech stack** | Spring AI | - |
-| **.NET enterprise apps** | Semantic Kernel | - |
-| **Complex RAG applications** | LlamaIndex | Hexagon |
-| **Complex workflow orchestration** | LangGraph | Hexagon |
-| **High-performance streaming** | Eino | Hexagon |
-| **Rapid prototyping / learning** | LangChain | Eino |
-| **High-concurrency production** | Eino | Hexagon |
-| **Enterprise-grade security requirements** | Semantic Kernel | Hexagon |
-
-> **Note**: Hexagon is still in beta. Please conduct thorough testing before using it in production. For mission-critical scenarios, consider more mature community solutions first.
-
-## Hexagon vs Eino — Detailed Comparison
-
-Since both Hexagon and Eino are Go-based AI Agent frameworks, here is a more detailed side-by-side comparison:
-
-| Dimension | Hexagon | Eino |
-|------|---------|------|
-| **Design philosophy** | Hexagonal balance, all-around | Streaming-first, component-based |
-| **Core interface** | `Component[I,O]` generic interface | `Runnable` interface |
-| **Backing** | Open-source community project | Validated internally at ByteDance |
-| **Maturity** | Beta stage | Production-grade |
-| **Ecosystem** | hexagon + ai-core + toolkit + hexagon-ui | Standalone repository |
-| **Graph orchestration** | ✅ Supported (basic checkpoint) | ✅ Full support |
-| **Multi-Agent** | ✅ Role/Team/Communication/Handoff/Consensus | ⚠️ Basic support |
-| **RAG capability** | ✅ Full pipeline (load/split/retrieve/rerank/synthesize) | ⚠️ Basic retrieval |
-| **Security** | ✅ Injection detection/PII/RBAC/Cost control | ❌ Must implement manually |
-| **Observability** | ✅ OTel + Prometheus + Dev UI | ✅ OTel + Callbacks |
-| **Domestic LLMs** | ✅ Qwen/Doubao/DeepSeek | ✅ Qwen/Doubao/DeepSeek |
-| **Production validation** | ⚠️ Pending validation | ✅ Large-scale internal use at ByteDance |
-
-**Recommendation:**
-- Need full Agent capabilities (multi-agent, RAG, security, observability) → **Hexagon** (please test thoroughly)
-- Focus on streaming performance and production stability → **Eino**
-- High-stability production environments → Evaluate **Eino** first
-
-## Hexagon's Differentiating Strengths
-
-### Core Features
-
-* ⚡ **High Performance** | Native Go concurrency, supports 100k+ active agents
-* 🧩 **Ease of Use** | Declarative API design, build a basic prototype in 3 lines of code
-* 🛡️ **Security** | Enterprise-grade sandbox isolation with built-in access control and protection
-* 🔧 **Extensibility** | Plugin-based architecture for seamless custom component integration
-* 🛠️ **Orchestration** | Powerful graph orchestration engine for complex multi-level task pipelines
-* 🔍 **Observability** | Deep OpenTelemetry integration for full end-to-end transparent tracing
-
-### Design Philosophy
-
-1. **Progressive complexity** - 3 lines to get started, declarative config for intermediate use, graph orchestration for experts
-2. **Convention over configuration** - Sensible defaults, zero-config out of the box
-3. **Composition over inheritance** - Small, focused components that compose flexibly
-4. **Explicit over implicit** - Type-safe, compile-time verified
-5. **Production-first** - Built-in observability, graceful degradation
-
-### Complete Ecosystem
-
-| Repository | Description |
-|-----|------|
-| **hexagon** | AI Agent framework core (orchestration, RAG, Graph, Hooks) |
-| **ai-core** | AI capability library (LLM/Tool/Memory/Schema) |
-| **toolkit** | Go general-purpose toolkit (lang/crypto/net/cache/util) |
-| **hexagon-ui** | Dev UI frontend (Vue 3 + TypeScript) |
-
-## Technical Benchmarks
-
-| Dimension | Hexagon Implementation | Reference |
-|------|-------------|---------|
-| Ease of use | 3-line entry + progressive API | OpenAI Swarm minimalist style |
-| Performance | Native Go concurrency + zero-allocation streaming | ByteDance Eino streaming architecture |
-| Extensibility | `Component[I,O]` unified interface | LangChain Runnable |
-| Orchestration | Graph orchestration + multi-agent collaboration | LangGraph |
-| Observability | Hooks + OTel + Prometheus + Dev UI | LangChain Callbacks |
-| Security | Guard Chain + RBAC + cost control | Semantic Kernel Filters |
-| RAG | Full pipeline + multi-strategy synthesis | LlamaIndex |
+Performance measurements and selection conclusions are comparable only when these conditions are held constant.

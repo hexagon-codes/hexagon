@@ -2,133 +2,74 @@
 
 # Hexagon 使用指南
 
-欢迎使用 Hexagon AI Agent 框架！本目录包含详细的使用指南和最佳实践。
+本目录汇总 Hexagon 的入门、Agent、RAG、编排、协作、插件和运维指南。指南用于说明常见用法；导出 API、依赖版本和实际行为分别以当前源码、[`go.mod`](../../go.mod) 和测试为准。
 
-## 📦 生态系统
+## 生态与当前基线
 
-Hexagon 是一个完整的 AI Agent 开发生态：
+| 模块 | 定位 | 根模块当前声明 |
+|------|------|----------------|
+| **hexagon** | AI Agent 框架核心 | Go `1.25.12` |
+| [**ai-core**](https://github.com/hexagon-codes/ai-core) | AI 基础能力库 | `v0.2.7` |
+| [**toolkit**](https://github.com/hexagon-codes/toolkit) | Go 通用工具库 | `v0.3.4` |
 
-| 仓库 | 说明 |
-|-----|------|
-| **hexagon** | AI Agent 框架核心 (编排、RAG、Graph、Hooks) |
-| **ai-core** | AI 基础能力库 (LLM/Tool/Memory/Schema) |
-| **toolkit** | Go 通用工具库 (lang/crypto/net/cache/util) |
-| **hexagon-ui** | Dev UI 前端 (Vue 3 + TypeScript) |
+上表是当前根模块的依赖快照，后续更新以 [`go.mod`](../../go.mod) 为唯一准确信息源。
 
-## 📚 指南列表
+### `examples` 模块边界
 
-### 入门指南
+[`examples/`](../../examples/) 有独立的 [`examples/go.mod`](../../examples/go.mod)，不属于根模块的发布表面。根目录执行的 `go build ./...` 或 `go test ./...` 不会自动覆盖这个嵌套模块；示例应在其目录中独立解析依赖和验证：
 
-1. [**Agent 开发指南**](./agent-development.md)
-   - 创建第一个 Agent
-   - Agent 类型选择
-   - 添加工具和记忆
-   - 配置管理
-   - 最佳实践
+```bash
+cd examples
+GOWORK=off go test ./...
+```
 
-2. [**RAG 系统使用指南**](./rag-integration.md)
-   - 文档加载和分割
-   - 向量生成和存储
-   - 检索策略
-   - 答案合成
-   - 性能优化
+`examples/go.mod` 独立管理依赖版本，可能与根模块基线不同；升级根模块依赖时，需要单独决定是否同步并验证示例。
 
-### 进阶指南
+## 指南索引
 
-3. [**多 Agent 协作指南**](./multi-agent.md)
-   - 角色系统
-   - Team 工作模式
-   - Agent 交接 (Handoff)
-   - 网络通信
-   - 共识机制
+### 入门与核心能力
 
-4. [**图编排最佳实践**](./graph-orchestration.md)
-   - 基本图结构
-   - 条件分支和循环
-   - 并行执行
-   - 中断和恢复
-   - 检查点机制
+- [**快速入门指南**](./getting-started.md)：安装、最简示例和核心概念。
+- [**Agent 开发指南**](./agent-development.md)：创建 Agent、接入工具与记忆、配置和调试。
+- [**Agent 能力指南**](./agent-guide.md)：Agent 类型、中间件、状态、团队与流式输出主题。
+- [**RAG 集成指南**](./rag-integration.md)：加载、分割、向量存储、检索、重排序与合成流程。
+- [**RAG 使用指南**](./rag-guide.md)：RAG 组件和完整管道的补充参考。
 
-### 部署运维
+### 编排、协作与扩展
 
-5. [**部署指南**](../../deploy/README.md)
-   - Docker Compose 完整模式（一键启动）
-   - Docker Compose 开发模式（连接 docker-dev-env）
-   - Kubernetes / Helm Chart
-   - 基础设施切换（内置/外部）
+- [**图编排最佳实践**](./graph-orchestration.md)：条件分支、并行、中断恢复与检查点。
+- [**多 Agent 协作指南**](./multi-agent.md)：角色、Team、Handoff、网络与共识。
+- [**A2A 协议指南**](./a2a-protocol.md)：A2A 客户端、服务端、认证和 Agent 发现。
+- [**插件开发指南**](./plugin-guide.md)：插件注册、生命周期、依赖解析和健康检查。
 
-### 运维指南
+### 运维与质量
 
-6. [**可观测性集成指南**](./observability.md)
-   - 分布式追踪 (OpenTelemetry)
-   - 指标监控 (Prometheus)
-   - 日志记录
-   - Dev UI 使用
+- [**可观测性集成指南**](./observability.md)：Hook 接入、OpenTelemetry、Prometheus、日志与 Dev UI。
+- [**安全防护配置指南**](./security.md)：输入防护、PII、RBAC、成本控制和审计。
+- [**性能优化指南**](./performance-optimization.md)：Agent、RAG、多 Agent 和运行时优化建议。
 
-7. [**安全防护配置指南**](./security.md)
-   - 输入验证和 Prompt 注入检测
-   - PII 检测和脱敏
-   - RBAC 访问控制
-   - 成本控制
-   - 审计日志
+## 部署配置边界
 
-8. [**性能优化指南**](./performance-optimization.md)
-   - Agent 优化
-   - RAG 优化
-   - 多 Agent 优化
-   - 系统优化
-   - 基准测试
+[部署配置说明](../../deploy/README.md)只覆盖两类配置，不代表三种可直接运行的应用部署模式：
 
-## 🚀 快速导航
+- **Docker Compose 本地基础设施**：只启动 Qdrant、Redis 和 PostgreSQL，不启动 Hexagon 应用或 Dev UI。
+- **Helm 应用接入模板**：用于把使用者自行构建并验证的应用镜像接入 Kubernetes；安装前必须替换镜像并核对模板约定的入口、端口、健康检查和安全上下文。
 
-### 我想要...
+本仓库当前不包含应用 Dockerfile，也不发布可直接部署的应用或 Dev UI 容器镜像。需要部署应用时，请先基于 Hexagon 库实现运行程序并生成自己的镜像。
 
-- **创建一个简单的对话 Agent** → [Agent 开发指南](./agent-development.md#快速开始)
-- **构建知识问答系统** → [RAG 系统使用指南](./rag-integration.md#快速开始)
-- **多个 Agent 协作完成任务** → [多 Agent 协作指南](./multi-agent.md#team-协作)
-- **实现复杂的工作流** → [图编排最佳实践](./graph-orchestration.md)
-- **监控 Agent 性能** → [可观测性集成指南](./observability.md)
-- **部署到 Docker/K8s** → [部署指南](../../deploy/README.md)
-- **保护系统安全** → [安全防护配置指南](./security.md)
-- **提升系统性能** → [性能优化指南](./performance-optimization.md)
+## 其他资源
 
-## 📖 其他资源
+- [快速开始](../QUICKSTART.md)
+- [API 文档](../API.md)
+- [设计文档](../DESIGN.md)
+- [稳定性说明](../STABILITY.md)
+- [框架对比](../comparison.md)
+- [示例代码](../../examples/)
 
-- [快速开始](../QUICKSTART.md) - 5分钟快速入门
-- [API 文档](../API.md) - 完整 API 参考
-- [设计文档](../DESIGN.md) - 架构和设计理念
-- [框架对比](../comparison.md) - 与主流框架的对比分析
-- [示例代码](../../examples/) - 可运行的示例
+## 获取帮助
 
-## 💡 学习路径
+- [GitHub Issues](https://github.com/hexagon-codes/hexagon/issues)
 
-### 初学者路径
-
-1. 阅读 [快速开始](../QUICKSTART.md)
-2. 学习 [Agent 开发指南](./agent-development.md)
-3. 尝试 [examples/quickstart](../../examples/quickstart/)
-4. 深入 [RAG 系统使用指南](./rag-integration.md)
-
-### 进阶路径
-
-1. 掌握 [多 Agent 协作指南](./multi-agent.md)
-2. 学习 [图编排最佳实践](./graph-orchestration.md)
-3. 配置 [可观测性](./observability.md)
-4. 应用 [性能优化](./performance-optimization.md)
-
-### 生产就绪路径
-
-1. 实施 [安全防护](./security.md)
-2. 配置 [可观测性](./observability.md)
-3. 优化 [性能](./performance-optimization.md)
-4. 建立监控和告警
-
-## 🤝 获取帮助
-
-- 📝 [GitHub Issues](https://github.com/hexagon-codes/hexagon/issues)
-- 💬 [Discussions](https://github.com/hexagon-codes/hexagon/discussions)
-- 📧 Email: support@hexagon-codes.com
-
-## 📄 许可证
+## 许可证
 
 Hexagon 采用 Apache License 2.0 许可证开源。

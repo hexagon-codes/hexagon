@@ -100,12 +100,15 @@ func SetDefaultProvider(p llm.Provider)
 
 ```go
 type Agent interface {
-    core.Component[Input, Output]
+    core.Runnable[Input, Output]
     ID() string
     Role() Role
     Tools() []tool.Tool
     Memory() memory.Memory
     LLM() llm.Provider
+
+    // Deprecated: 请使用 Invoke。
+    Run(ctx context.Context, input Input) (Output, error)
 }
 ```
 
@@ -122,10 +125,12 @@ type Input struct {
 
 ```go
 type Output struct {
-    Content   string           `json:"content"`              // 最终回复
-    ToolCalls []ToolCallRecord `json:"tool_calls,omitempty"` // 工具调用记录
-    Usage     llm.Usage        `json:"usage,omitempty"`      // Token 使用统计
-    Metadata  map[string]any   `json:"metadata,omitempty"`   // 额外元数据
+    Content    string             `json:"content"`               // 最终回复
+    ToolCalls  []ToolCallRecord   `json:"tool_calls,omitempty"`  // 工具调用记录
+    Blocks     template.Blocks    `json:"blocks,omitempty"`      // 有序内容块流
+    Usage      llm.Usage          `json:"usage,omitempty"`       // Token 使用统计
+    StopReason runtime.StopReason `json:"stop_reason,omitempty"` // end_turn / max_turns
+    Metadata   map[string]any     `json:"metadata,omitempty"`    // 额外元数据
 }
 ```
 
@@ -156,11 +161,16 @@ var NewReActAgent = agent.NewReAct
 
 ```go
 type Role struct {
-    Name         string   // 角色名称
-    Goal         string   // 角色目标
-    Backstory    string   // 背景故事
-    Constraints  []string // 约束条件
-    Capabilities []string // 能力列表
+    Name            string   `yaml:"name" json:"name"`
+    Title           string   `yaml:"title" json:"title"`
+    Goal            string   `yaml:"goal" json:"goal"`
+    Backstory       string   `yaml:"backstory" json:"backstory"`
+    Expertise       []string `yaml:"expertise" json:"expertise"`
+    Tools           []string `yaml:"tools" json:"tools"`
+    Personality     string   `yaml:"personality" json:"personality"`
+    Constraints     []string `yaml:"constraints" json:"constraints"`
+    AllowDelegation bool     `yaml:"allow_delegation" json:"allow_delegation"`
+    DelegateTo      []string `yaml:"delegate_to" json:"delegate_to"`
 }
 ```
 
@@ -168,15 +178,20 @@ type Role struct {
 
 ```go
 type StateManager interface {
-    Turn() State    // 轮次状态
-    Session() State // 会话状态
-    Agent() State   // Agent 状态
-    Global() State  // 全局状态
+    Turn() agent.TurnState
+    Session() agent.SessionState
+    Agent() agent.AgentState
+    Global() agent.GlobalState
+    NewTurn() agent.TurnState
+    Snapshot() agent.StateSnapshot
+    Restore(snapshot agent.StateSnapshot) error
 }
 
 var NewStateManager = agent.NewStateManager
 var NewGlobalState = agent.NewGlobalState
 ```
+
+`TurnState`、`SessionState`、`AgentState`、`GlobalState` 和 `StateSnapshot` 定义在 `agent` 子包中，根包不重新导出这些类型。
 
 ---
 
@@ -331,34 +346,43 @@ var NewMemoryVectorStore = vector.NewMemoryStore
 
 ```go
 var NewQdrantStore = qdrant.New
+type QdrantConfig = qdrant.Config
 ```
 
-**配置：**
-```go
-type QdrantConfig struct {
-    Host             string // 主机地址
-    Port             int    // 端口
-    Collection       string // 集合名称
-    Dimension        int    // 向量维度
-    APIKey           string // API Key（可选）
-    HTTPS            bool   // 是否使用 HTTPS
-    Timeout          time.Duration
-    Distance         DistanceType // 距离度量
-    OnDisk           bool         // 是否存储在磁盘
-    CreateCollection bool         // 是否自动创建集合
-}
-```
+`QdrantConfig` 是 `github.com/hexagon-codes/ai-core/store/vector/qdrant.Config` 的类型别名，其当前字段如下：
 
-**选项式创建：**
+| 字段 | 类型 | 说明 |
+|-----|------|------|
+| `Host` | `string` | 主机地址；零值使用 `localhost` |
+| `Port` | `int` | 端口；零值使用 `6333` |
+| `Collection` | `string` | 集合名称 |
+| `Dimension` | `int` | 向量维度 |
+| `APIKey` | `string` | API Key（可选） |
+| `HTTPS` | `bool` | 是否使用 HTTPS |
+| `Timeout` | `time.Duration` | 请求超时；零值使用 30 秒 |
+| `Distance` | `qdrant.Distance` | 距离度量；零值使用 `DistanceCosine` |
+| `OnDisk` | `bool` | 是否存储在磁盘 |
+| `CreateCollection` | `bool` | 是否自动创建集合 |
+| `PointIDStrategy` | `qdrant.PointIDStrategy` | point ID 持久化策略；零值使用 `PointIDUUIDv8` |
+| `MaxResponseBytes` | `int64` | HTTP 响应体上限；零值使用 32 MiB |
+
+根包的 Qdrant 构造器、配置和选项仅为过渡性弃用重导出。新增代码应直接导入 ai-core 的 Qdrant 子包；只有直接子包提供新增的 ID 策略和响应体上限选项：
+
 ```go
-store, err := hexagon.NewQdrantStoreWithOptions(
-    hexagon.QdrantWithHost("localhost"),
-    hexagon.QdrantWithPort(6333),
-    hexagon.QdrantWithCollection("docs"),
-    hexagon.QdrantWithDimension(1536),
-    hexagon.QdrantWithCreateCollection(true),
+import "github.com/hexagon-codes/ai-core/store/vector/qdrant"
+
+store, err := qdrant.NewWithOptions(
+    qdrant.WithHost("localhost"),
+    qdrant.WithPort(6333),
+    qdrant.WithCollection("docs"),
+    qdrant.WithDimension(1536),
+    qdrant.WithCreateCollection(true),
+    qdrant.WithPointIDStrategy(qdrant.PointIDUUIDv8),
+    qdrant.WithMaxResponseBytes(64<<20),
 )
 ```
+
+> **旧集合迁移：** ai-core v0.2.7 将新集合的默认 point ID 从 legacy hash31 改为 SHA-256 派生 UUIDv8。只在读取并重建旧集合的迁移窗口中使用 `qdrant.WithPointIDStrategy(qdrant.PointIDLegacyHash31)`；该策略已弃用，不得继续写入新数据。将数据重建到使用 `PointIDUUIDv8` 的新集合，且不要在同一集合中混用两种策略。
 
 #### 更多向量存储
 
@@ -583,10 +607,18 @@ type CheckResult struct {
 
 #### NewCostController
 
-创建成本控制器。
+创建成本控制器。构造器会集中校验最终配置，并返回 `(*cost.Controller, error)`。
 
 ```go
 var NewCostController = cost.NewController
+
+controller, err := hexagon.NewCostController(
+    hexagon.WithBudget(10.0),
+    hexagon.WithMaxTokensTotal(100_000),
+)
+if err != nil {
+    return err
+}
 ```
 
 **选项：**
@@ -594,10 +626,24 @@ var NewCostController = cost.NewController
 | 选项 | 说明 |
 |-----|------|
 | `WithBudget(amount float64)` | 设置预算 |
-| `WithMaxTokensPerRequest(n int)` | 单次请求 token 限制 |
-| `WithMaxTokensPerSession(n int)` | 会话 token 限制 |
-| `WithMaxTokensTotal(n int)` | 总 token 限制 |
+| `WithMaxTokensPerRequest(n int64)` | 单次请求 token 限制；设为 0 表示不限制 |
+| `WithMaxTokensTotal(n int64)` | 总 token 限制；设为 0 表示不限制 |
 | `WithRequestsPerMinute(n int)` | RPM 限制 |
+
+根包只过渡性重导出以上四个选项。完整 API 位于 `github.com/hexagon-codes/hexagon/security/cost`，还包括自定义定价和超限回调等选项。配置无效时，构造器返回可由 `errors.Is(err, cost.ErrInvalidControllerConfig)` 识别的错误。
+
+```go
+pricing := cost.DefaultPricing()
+```
+
+`cost.DefaultPricing()` 每次返回独立快照；修改返回的 map 不会改变后续控制器的默认定价。
+
+**预算与用量语义：**
+
+- `Controller.BudgetCostFunc()` 只读取一次运行的 `runtime.State.Usage` 并估算成本，可注入 `runtime/middleware.Budget` 做单次运行检查，不写累计账。
+- `Controller.RecordUsageFunc()` 可注入 `runtime/middleware.CostControl`，把每次 LLM 用量写入跨运行累计账；超过总 token 或预算时返回错误且不记账。
+- `TokenUsage.TotalTokens` 为 0 且存在 prompt/completion 分量时，按两者之和记账；只有总量时可单独使用 `TotalTokens`；总量与非零分量同时提供时必须相等。
+- `RecordUsage` 的最终限额校验与记账在同一临界区完成。用户回调在控制器解锁后执行。
 
 ---
 
@@ -644,7 +690,62 @@ span.RecordError(err error)
 span.End()
 ```
 
-### Metrics
+### OpenTelemetry（`observe/otel`）
+
+`observe/otel` 直接复用 toolkit 的 OpenTelemetry 实现，并提供 Hexagon Hook 适配器。注意：`otel.NewTracer` 是 OpenTelemetry 追踪器，而根包的 `hexagon.NewTracer` 是内存追踪器。
+
+```go
+manager := hooks.NewManager()
+tracing, err := otel.SetupTracing(manager, otel.WithTracerServiceName("my-agent"))
+if err != nil {
+    return err
+}
+
+exporter, err := otel.NewOTLPExporter(
+    "https://otel.example.com/v1/traces",
+    otel.WithOTLPBatchSize(512),
+    otel.WithOTLPBatchTimeout(time.Second),
+    otel.WithOTLPMaxQueueSize(4096),
+)
+if err != nil {
+    return err
+}
+if err := tracing.SetExporter(ctx, exporter); err != nil {
+    return err
+}
+defer tracing.Shutdown(context.Background())
+
+ctx = hooks.ContextWithManager(ctx, manager)
+```
+
+`SetExporter` 从调用开始即接管导出器所有权，即使返回错误，调用方也不得再使用或关闭该导出器。
+
+**toolkit 重导出类型：**
+
+| 类别 | 类型 |
+|-----|------|
+| 追踪 | `Tracer`、`Config`、`Option`、`Span`、`SpanData`、`SpanEvent` |
+| 导出 | `Exporter`、`ConsoleExporter`、`OTLPExporter`、`OTLPExporterOption`、`JaegerExporter`、`ZipkinExporter`、`MultiExporter` |
+| 采样 | `Sampler`、`AlwaysSampler`、`NeverSampler`、`ProbabilitySampler`、`RateLimitingSampler` |
+| 传播 | `Propagator`、`Carrier`、`MapCarrier`、`W3CTraceContextPropagator`、`B3Propagator`、`CompositePropagator` |
+
+**主要重导出函数：**
+
+| 函数 | 说明 |
+|-----|------|
+| `NewTracer(opts ...Option) *Tracer` | 创建 OpenTelemetry 追踪器 |
+| `DefaultConfig() Config` | 返回默认配置 |
+| `WithServiceName` / `WithServiceVersion` / `WithEnvironment` / `WithSamplingRate` | 配置追踪器 |
+| `NewConsoleExporter(w io.Writer) *ConsoleExporter` | 创建控制台导出器 |
+| `NewOTLPExporter(endpoint string, opts ...OTLPExporterOption) (*OTLPExporter, error)` | 创建并校验 OTLP 导出器 |
+| `WithOTLPHeaders` / `WithOTLPBatchSize` / `WithOTLPBatchTimeout` / `WithOTLPMaxQueueSize` | 配置 OTLP 导出器 |
+| `NewJaegerExporter` / `NewZipkinExporter` / `NewMultiExporter` | 创建其他导出器 |
+| `NewProbabilitySampler` / `NewRateLimitingSampler` | 创建采样器 |
+| `NewW3CTraceContextPropagator` / `NewB3Propagator` / `NewCompositePropagator` | 创建传播器 |
+
+错误哨兵为 `ErrTracerShutdown`、`ErrExporterShutdown`、`ErrExporterQueueFull`、`ErrInvalidExporterConfig` 和 `ErrInvalidSpan`。旧名称 `NewOTelTracer`、`DefaultOTelConfig`、`WithEndpoint`、`WithBatchConfig` 已不在当前 wrapper API 中。
+
+### 内存指标
 
 #### NewMetrics
 
@@ -669,25 +770,64 @@ m.Gauge(name string, labels ...string).Inc()
 m.Gauge(name string, labels ...string).Dec()
 ```
 
+### Prometheus（`observe/prometheus`）
+
+`observe/prometheus` 直接重导出 toolkit 的 Prometheus 实现：
+
+| 类型 | 说明 |
+|-----|------|
+| `Exporter`、`ExporterOption` | HTTP 指标导出器及其选项 |
+| `Registry`、`Factory` | 隔离注册表和指标工厂 |
+| `Counter`、`Gauge`、`Histogram`、`Summary` | Prometheus 指标类型 |
+| `MetricsAdapter` | toolkit `observe.Metrics` 适配器 |
+
+| 函数 | 说明 |
+|-----|------|
+| `NewExporter(opts ...ExporterOption) (*Exporter, error)` | 创建导出器，并注册官方 Go 运行时收集器 |
+| `WithNamespace(namespace string)` / `WithSubsystem(subsystem string)` | 配置指标名称前缀 |
+| `NewRegistry() *Registry` | 创建空的隔离注册表 |
+| `NewFactory(registry *Registry, namespace, subsystem string) (*Factory, error)` | 创建指标工厂 |
+| `NewMetricsAdapter(registry *Registry, namespace, subsystem string) (*MetricsAdapter, error)` | 创建 toolkit 指标接口适配器 |
+| `DefaultBuckets() []float64` / `DefaultQuantiles() map[float64]float64` | 返回默认配置的独立副本 |
+
+```go
+exporter, err := prometheus.NewExporter(
+    prometheus.WithNamespace("hexagon"),
+)
+if err != nil {
+    return err
+}
+http.Handle("/metrics", exporter.Handler())
+```
+
+`prometheus.SetupMetrics(manager, opts...)` 注册 Hexagon 的运行、工具、LLM 和检索 Hook；`SetupMetricsWithExporter(manager)` 实际返回并注册的是 `*metrics.MemoryMetrics`。
+
+> **链路边界：** 当前 `NewExporter` 的 toolkit Registry 与 `SetupMetrics` 使用的 Hexagon `observe/metrics.Metrics` 没有自动桥接。按上例创建 `/metrics` 端点时，只能保证暴露该 exporter 注册表中的指标（默认包含 Go 运行时指标）；不能宣称 Hook 产生的 Agent/LLM 指标会自动出现在该端点。需要 Prometheus 自定义指标时，应通过 exporter 的 `Registry()` / `Factory()` API 显式注册和记录。
+
 ---
 
 ## 类型定义
 
-### 重新导出类型
+### 稳定的根包类型别名
 
 ```go
-// 核心类型
 type Input = agent.Input
 type Output = agent.Output
 type Tool = tool.Tool
 type Memory = memory.Memory
 type Message = llm.Message
-type Schema = core.Schema
-type Component[I, O any] = core.Component[I, O]
-type Stream[T any] = core.Stream[T]
-
-// Agent 类型
 type Agent = agent.Agent
+type Provider = llm.Provider
+```
+
+根包没有重新导出 `core.Schema`、`core.Component` 或 `core.Stream`；需要这些类型时请直接导入 `core` 子包。
+
+### 弃用的过渡类型别名
+
+下列别名定义在根包的 `deprecated.go` 中，仅用于迁移已有调用方；请直接导入对应子包。它们计划在下一个大版本移除。
+
+```go
+// Agent
 type Role = agent.Role
 type Team = agent.Team
 type StateManager = agent.StateManager

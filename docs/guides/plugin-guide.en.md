@@ -2,364 +2,315 @@
 
 # Plugin Development Guide
 
-This guide explains how to develop and use plugins for Hexagon.
+This guide follows the current public API of `github.com/hexagon-codes/hexagon/plugin` and covers plugin definitions, registration, lifecycle management, configuration loading, dependency validation, and health checks.
 
-## Overview
+## Scope
 
-The Hexagon plugin system allows you to:
+Hexagon plugins are components compiled into a Go program and registered explicitly. The `Loader` reads YAML configuration and creates plugins through previously registered `PluginFactory` values; it does not dynamically load Go binaries from a directory.
 
-- Extend framework functionality
-- Add new LLM Providers
-- Integrate external services
-- Customize middleware
-- Dynamically load and unload components
+Values such as `PluginTypeProvider`, `PluginTypeTool`, and `PluginTypeMiddleware` are metadata classifications only. They do not automatically register Providers, Tools, or Middleware with another global registry. Wire those objects through the constructors or registries provided by their actual consumers.
 
-## Plugin Structure
+## Plugin Interface
 
-### Plugin Interface
+A plugin provides metadata, lifecycle methods, and its current health status:
 
 ```go
 type Plugin interface {
-    // Plugin metadata
-    Name() string
-    Version() string
-    Description() string
-
-    // Lifecycle
+    Info() PluginInfo
     Init(ctx context.Context, config map[string]any) error
     Start(ctx context.Context) error
     Stop(ctx context.Context) error
-
-    // Dependency declarations
-    Dependencies() []string
+    Health() HealthStatus
 }
 ```
 
-### Basic Implementation
+`Info().Name` is the unique key in a registry. `PluginInfo.Dependencies` declares dependencies on other plugins.
+
+### Using BasePlugin
+
+`BasePlugin` supplies default implementations of `Info`, `Init`, `Start`, `Stop`, `Health`, and configuration accessors. Embed it and override only the behavior your plugin needs:
 
 ```go
+package myplugin
+
+import (
+    "context"
+    "errors"
+
+    "github.com/hexagon-codes/hexagon/plugin"
+)
+
 type MyPlugin struct {
-    config map[string]any
+    *plugin.BasePlugin
+    endpoint string
 }
 
-func (p *MyPlugin) Name() string        { return "my-plugin" }
-func (p *MyPlugin) Version() string     { return "1.0.0" }
-func (p *MyPlugin) Description() string { return "My custom plugin" }
-func (p *MyPlugin) Dependencies() []string { return nil }
+func New() *MyPlugin {
+    return &MyPlugin{
+        BasePlugin: plugin.NewBasePlugin(plugin.PluginInfo{
+            Name:         "my-plugin",
+            Version:      "1.0.0",
+            Type:         plugin.PluginTypeExtension,
+            Description:  "My application extension",
+        }),
+    }
+}
 
 func (p *MyPlugin) Init(ctx context.Context, config map[string]any) error {
-    p.config = config
-    return nil
+    endpoint, _ := config["endpoint"].(string)
+    if endpoint == "" {
+        return errors.New("endpoint is required")
+    }
+    p.endpoint = endpoint
+    return p.BasePlugin.Init(ctx, config)
 }
 
-func (p *MyPlugin) Start(ctx context.Context) error {
-    // Startup logic
-    return nil
-}
-
-func (p *MyPlugin) Stop(ctx context.Context) error {
-    // Shutdown logic
-    return nil
-}
+var _ plugin.Plugin = (*MyPlugin)(nil)
 ```
+
+By default, a new `BasePlugin` reports `unknown`, reports `healthy` after `Start`, and returns to `unknown` after `Stop`. Override `Health()` and return `plugin.HealthStatus` when finer-grained status is required.
 
 ## Plugin Registration
 
-### Code-Based Registration
+### Global Registry
+
+Small programs can use the package-level registration functions:
 
 ```go
-import "github.com/hexagon-codes/hexagon/plugin"
+if err := plugin.RegisterPlugin(myplugin.New()); err != nil {
+    return err
+}
 
-// Register a plugin
-plugin.Register(&MyPlugin{})
-
-// Retrieve a plugin
-p, err := plugin.Get("my-plugin")
+p, err := plugin.GetPlugin("my-plugin")
+if err != nil {
+    return err
+}
+_ = p
 ```
 
-### Configuration File Registration
+Registering another plugin with the same name returns an error.
+
+### Isolated Registry
+
+Use an independent `Registry` to isolate instances or tests:
+
+```go
+registry := plugin.NewRegistry()
+
+if err := registry.Register(myplugin.New()); err != nil {
+    return err
+}
+
+p, err := registry.Get("my-plugin")
+if err != nil {
+    return err
+}
+_ = p
+```
+
+A registered instance starts in the `loaded` state. A running plugin cannot be unregistered directly; stop it through the lifecycle manager first.
+
+## Lifecycle Management
+
+Construct `Lifecycle` with the same `Registry` that holds the plugins. `Init` takes the plugin name and configuration, while `Start` and `Stop` also operate by name:
+
+```go
+registry := plugin.NewRegistry()
+lifecycle := plugin.NewLifecycle(
+    registry,
+    plugin.WithHealthCheckInterval(30*time.Second),
+)
+
+p := myplugin.New()
+if err := registry.Register(p); err != nil {
+    return err
+}
+if err := lifecycle.Init(ctx, p.Info().Name, map[string]any{
+    "endpoint": "https://service.example.com",
+}); err != nil {
+    return err
+}
+if err := lifecycle.Start(ctx, p.Info().Name); err != nil {
+    return err
+}
+if err := lifecycle.Stop(ctx, p.Info().Name); err != nil {
+    return err
+}
+```
+
+For batches, use `InitAll(ctx, configs)`, `StartAll(ctx)`, and `StopAll(ctx)`. `StartAll` starts plugins according to their dependencies. `StopAll` stops them in reverse start order and joins stop errors.
+
+`PluginManager` combines a registry and lifecycle and provides `Load`, `Enable`, `Disable`, and `Unload`:
+
+```go
+manager := plugin.NewPluginManager()
+if err := manager.Load(myplugin.New()); err != nil {
+    return err
+}
+if err := manager.Enable(ctx, "my-plugin", map[string]any{
+    "endpoint": "https://service.example.com",
+}); err != nil {
+    return err
+}
+defer manager.Unload(ctx, "my-plugin")
+```
+
+## Loading from Configuration
+
+Configuration loading depends on plugin factories. Register each factory with the same `Registry` before constructing a `Loader`:
+
+```go
+registry := plugin.NewRegistry()
+lifecycle := plugin.NewLifecycle(registry)
+
+if err := registry.RegisterFactory("my-plugin", func() plugin.Plugin {
+    return myplugin.New()
+}); err != nil {
+    return err
+}
+
+loader := plugin.NewLoader(
+    registry,
+    lifecycle,
+    plugin.WithSearchPaths("./plugins"),
+)
+if err := loader.LoadFromConfig(ctx, "plugins.yaml"); err != nil {
+    return err
+}
+if err := lifecycle.StartAll(ctx); err != nil {
+    return err
+}
+defer lifecycle.StopAll(ctx)
+```
+
+`plugins.yaml` maps to `PluginsConfig` and `PluginConfig`:
 
 ```yaml
-# plugins.yaml
 plugins:
   - name: my-plugin
     enabled: true
+    priority: 10
     config:
-      key1: value1
-      key2: value2
+      endpoint: https://service.example.com
 ```
 
-```go
-// Load from configuration
-loader := plugin.NewLoader()
-err := loader.LoadFromConfig("plugins.yaml")
-```
-
-## Plugin Lifecycle
-
-### Lifecycle Manager
-
-```go
-lifecycle := plugin.NewLifecycle()
-
-// Add plugins
-lifecycle.Add(plugin1)
-lifecycle.Add(plugin2)
-
-// Initialize all plugins
-err := lifecycle.InitAll(ctx)
-
-// Start all plugins
-err := lifecycle.StartAll(ctx)
-
-// Stop all plugins
-err := lifecycle.StopAll(ctx)
-```
-
-### Lifecycle Hooks
-
-```go
-lifecycle.OnInit(func(name string) {
-    log.Printf("Plugin %s initializing...", name)
-})
-
-lifecycle.OnStart(func(name string) {
-    log.Printf("Plugin %s starting...", name)
-})
-
-lifecycle.OnStop(func(name string) {
-    log.Printf("Plugin %s stopping...", name)
-})
-
-lifecycle.OnError(func(name string, err error) {
-    log.Printf("Plugin %s error: %v", name, err)
-})
-```
-
-## Dependency Management
-
-### Declaring Dependencies
-
-```go
-func (p *MyPlugin) Dependencies() []string {
-    return []string{"database-plugin", "cache-plugin"}
-}
-```
-
-### Version Constraints
-
-```go
-func (p *MyPlugin) Dependencies() []string {
-    return []string{
-        "database-plugin>=1.0.0",
-        "cache-plugin~1.2.0",
-    }
-}
-```
-
-### Dependency Resolution
-
-```go
-graph := plugin.NewDependencyGraph()
-graph.Add(plugin1)
-graph.Add(plugin2)
-
-// Check for circular dependencies
-if err := graph.CheckCycle(); err != nil {
-    log.Fatal("Circular dependency detected:", err)
-}
-
-// Topological sort
-sorted, err := graph.TopologicalSort()
-```
-
-## Hot Reload
-
-### Enabling Hot Reload
-
-```go
-reloader := plugin.NewHotReloader(lifecycle)
-
-// Watch a plugin directory
-reloader.Watch("./plugins")
-
-// Start watching
-reloader.Start(ctx)
-defer reloader.Stop()
-```
-
-### Version Rollback
-
-```go
-// Get version history
-history := reloader.GetVersionHistory("my-plugin")
-
-// Roll back to a specific version
-err := reloader.Rollback("my-plugin", "1.0.0")
-```
-
-## Health Checks
-
-### Implementing Health Checks
-
-```go
-type HealthChecker interface {
-    HealthCheck(ctx context.Context) error
-}
-
-func (p *MyPlugin) HealthCheck(ctx context.Context) error {
-    // Check database connection
-    if err := p.db.Ping(); err != nil {
-        return fmt.Errorf("database connection failed: %w", err)
-    }
-    return nil
-}
-```
-
-### Checking All Plugins
-
-```go
-results := lifecycle.HealthCheckAll(ctx)
-for name, err := range results {
-    if err != nil {
-        log.Printf("Plugin %s is unhealthy: %v", name, err)
-    }
-}
-```
-
-## Plugin Types
-
-### LLM Provider Plugin
-
-```go
-type LLMProviderPlugin struct {
-    plugin.BasePlugin
-    provider llm.Provider
-}
-
-func (p *LLMProviderPlugin) Init(ctx context.Context, config map[string]any) error {
-    // Initialize the LLM Provider
-    p.provider = newMyProvider(config)
-
-    // Register globally
-    llm.RegisterProvider("my-llm", p.provider)
-    return nil
-}
-```
-
-### Tool Plugin
-
-```go
-type ToolPlugin struct {
-    plugin.BasePlugin
-    tools []tool.Tool
-}
-
-func (p *ToolPlugin) Init(ctx context.Context, config map[string]any) error {
-    // Create tools
-    p.tools = []tool.Tool{
-        newSearchTool(),
-        newCalculatorTool(),
-    }
-
-    // Register tools
-    for _, t := range p.tools {
-        tool.Register(t)
-    }
-    return nil
-}
-```
-
-### Middleware Plugin
-
-```go
-type MiddlewarePlugin struct {
-    plugin.BasePlugin
-}
-
-func (p *MiddlewarePlugin) Init(ctx context.Context, config map[string]any) error {
-    // Register middleware
-    middleware.Register("my-middleware", func(next agent.AgentHandler) agent.AgentHandler {
-        return func(ctx context.Context, input agent.Input) (agent.Output, error) {
-            // Middleware logic
-            return next(ctx, input)
-        }
-    })
-    return nil
-}
-```
+`LoadFromConfig` processes enabled plugins by ascending `priority`, creates each one through its factory, registers it, and initializes it. Starting still requires an explicit call to `Start` or `StartAll`.
 
 ## Plugin Manifest
 
-Describe your plugin using YAML:
+The top-level YAML fields of `PluginManifest` are `info`, `config`, `config_schema`, and optional `hooks`. This minimal manifest matches the current structure:
 
 ```yaml
-# manifest.yaml
-name: my-plugin
-version: 1.0.0
-description: My custom plugin
-author: Your Name
-
-dependencies:
-  - name: database-plugin
-    version: ">=1.0.0"
+info:
+  name: my-plugin
+  version: 1.0.0
+  type: extension
+  description: My application extension
+  author: Hexagon Team
+  license: Apache-2.0
+  homepage: https://example.com/my-plugin
+  dependencies:
+    - database-plugin
+  tags:
+    - integration
 
 config:
-  schema:
-    type: object
-    properties:
-      apiKey:
-        type: string
-        required: true
-      timeout:
-        type: integer
-        default: 30
+  endpoint: https://service.example.com
 
-hooks:
-  init: scripts/init.sh
-  start: scripts/start.sh
+config_schema:
+  type: object
+  required:
+    - endpoint
+  properties:
+    endpoint:
+      type: string
 ```
 
-## Debugging Plugins
-
-### Logging
+Parse a manifest with `ParseManifest(data)` or `LoadManifest(path)`:
 
 ```go
-func (p *MyPlugin) Init(ctx context.Context, config map[string]any) error {
-    log.Printf("[%s] Initializing with config: %+v", p.Name(), config)
-    return nil
+manifest, err := plugin.LoadManifest("plugin.yaml")
+if err != nil {
+    return err
+}
+fmt.Println(manifest.Info.Name)
+```
+
+Manifest parsing only returns structured metadata; it does not register, initialize, or start a plugin.
+
+## Dependency Management
+
+### Runtime Dependencies
+
+For `Lifecycle.Start` and `StartAll`, put registered plugin names such as `database-plugin` in `PluginInfo.Dependencies`. A dependency must be in the `running` state before its dependent starts.
+
+### Dependency Graph
+
+Build a `DependencyGraph` with `AddNode`, then inspect it with `DetectCycle` and `TopologicalSort`:
+
+```go
+graph := plugin.NewDependencyGraph()
+graph.AddNode("database-plugin", "1.2.0", nil)
+graph.AddNode("my-plugin", "1.0.0", []plugin.Dependency{
+    {Name: "database-plugin", Version: ">=1.0.0"},
+})
+
+if cycle := graph.DetectCycle(); cycle != nil {
+    return fmt.Errorf("circular dependency: %v", cycle)
+}
+
+graphOrder, err := graph.TopologicalSort()
+if err != nil {
+    return err
+}
+_ = graphOrder
+```
+
+`DependencyResolver.CheckDependencies` validates the existence and version constraints of registered plugins. Constraint specifications use `name@constraint` and support `=`, `>`, `>=`, `<`, `<=`, `~>`, and `^`:
+
+```go
+dependencyRegistry := plugin.NewRegistry()
+if err := dependencyRegistry.Register(plugin.NewBasePlugin(plugin.PluginInfo{
+    Name:    "database-plugin",
+    Version: "1.2.0",
+    Type:    plugin.PluginTypeExtension,
+})); err != nil {
+    return err
+}
+
+resolver := plugin.NewDependencyResolver(dependencyRegistry)
+err := resolver.CheckDependencies(plugin.PluginInfo{
+    Name:         "my-plugin",
+    Version:      "1.0.0",
+    Dependencies: []string{"database-plugin@>=1.0.0"},
+})
+if err != nil {
+    return err
 }
 ```
 
-### Metrics
+Version validation and lifecycle startup are separate operations. The lifecycle resolves dependencies by plugin name, so the actual plugin metadata used by `Start` and `StartAll` should retain plain-name dependencies.
+
+## Health Checks
+
+Each plugin returns `HealthStatus` from the parameterless `Health()` method. `Lifecycle.HealthCheck(ctx)` aggregates all plugins; plugins that are not running report `unknown`:
 
 ```go
-import "github.com/hexagon-codes/hexagon/observe/metrics"
-
-func (p *MyPlugin) Start(ctx context.Context) error {
-    // Record startup metric
-    metrics.IncCounter("plugin_starts_total", "plugin", p.Name())
-    return nil
+statuses := lifecycle.HealthCheck(ctx)
+for name, status := range statuses {
+    if status.Status != plugin.HealthStateHealthy {
+        log.Printf("plugin %s is not healthy: %s", name, status.Message)
+    }
 }
 ```
 
-## Best Practices
+For periodic checks, pass a cancelable `context.Context` to `StartHealthChecker(ctx)` and call `StopHealthChecker()` during shutdown.
 
-1. **Single Responsibility**: Each plugin should focus on one specific function
-2. **Graceful Degradation**: Plugin failures should not affect the main application
-3. **Configuration Validation**: Validate configuration completeness during `Init`
-4. **Resource Cleanup**: Release all resources during `Stop`
-5. **Version Management**: Follow semantic versioning
-6. **Clear Documentation**: Provide clear usage instructions
+## Practices
 
-## Example Projects
-
-Full examples are available in the `examples/plugins/` directory:
-
-```
-examples/plugins/
-├── llm-provider/      # LLM Provider plugin example
-├── tool-plugin/       # Tool plugin example
-├── middleware/        # Middleware plugin example
-└── full-example/      # Complete plugin example
-```
+1. Validate configuration in `Init` and return clear, actionable errors.
+2. Respect `context.Context` cancellation and deadlines in `Start` and `Stop`.
+3. Report `healthy` only after startup succeeds, and set `HealthStatus.LastCheck` to the check time.
+4. Validate dependency existence, versions, and cycles before starting plugins.
+5. Use an isolated `Registry` in tests so global registrations cannot leak between test cases.
+6. Always stop started plugins to release connections, goroutines, and other resources.

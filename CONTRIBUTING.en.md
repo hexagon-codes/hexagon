@@ -29,44 +29,50 @@ Please be kind and respectful. We are committed to creating an open, inclusive c
 
 #### Preparation
 
-1. Fork the repository
-2. Clone it locally:
+1. Install the Go version declared in `go.mod` or newer (the current minimum is Go 1.25.12)
+2. Fork the repository
+3. Clone it locally:
    ```bash
    git clone https://github.com/YOUR_USERNAME/hexagon.git
    cd hexagon
    ```
-3. Add the upstream remote:
+4. Add the upstream remote:
    ```bash
    git remote add upstream https://github.com/hexagon-codes/hexagon.git
    ```
-4. Create a branch:
+5. Create a branch:
    ```bash
    git checkout -b feature/your-feature-name
    ```
 
 #### Development Workflow
 
-1. Make sure your code passes all checks:
+1. Run the required gates used by the `CI / Test` job:
    ```bash
-   make fmt      # format code
-   make lint     # static analysis
-   make test     # run tests
+   GOWORK=off go mod tidy -diff
+   GOWORK=off go test -count=1 -race ./...
    ```
 
-2. Write tests to cover your changes
+2. Run optional local development checks as needed. These commands are useful locally but are not current CI gates:
+   ```bash
+   make fmt      # format code
+   make lint     # static analysis (requires golangci-lint locally)
+   ```
 
-3. Commit your code:
+3. Write tests to cover your changes
+
+4. Commit your code:
    ```bash
    git add .
    git commit -m "feat: add your feature description"
    ```
 
-4. Push to your fork:
+5. Push to your fork:
    ```bash
    git push origin feature/your-feature-name
    ```
 
-5. Create a Pull Request
+6. Create a Pull Request
 
 #### Commit Message Convention
 
@@ -112,7 +118,7 @@ docs: update README with quick start guide
 
 ### Testing
 
-- Target test coverage > 80%
+- Cover normal, error, and boundary behavior affected by the change
 - Use table-driven tests
 - Mock external dependencies
 - Test file naming: `xxx_test.go`
@@ -142,7 +148,7 @@ hexagon/
 
 1. PR title should follow Conventional Commits format
 2. Fill in all required fields in the PR template
-3. Ensure all CI checks pass
+3. Ensure the `CI / Test` check passes
 4. Wait for code review
 5. Make changes based on feedback
 6. Delete your branch after merging
@@ -156,11 +162,18 @@ Version numbers follow [Semantic Versioning](https://semver.org/):
 - MINOR: backward-compatible new features
 - PATCH: backward-compatible bug fixes
 
+A Git tag matching `v*` triggers the release workflow:
+
+1. `Release / Validate` runs `go mod tidy -diff` and the full race-enabled test suite
+2. After validation passes, `Release / Publish` creates the GitHub Release and generates release notes
+3. A tag containing `-` (for example, `v0.6.0-rc.1`) is published as a prerelease
+
+See [COMPATIBILITY.md](COMPATIBILITY.md) for compatibility and BREAKING-change rules during v0.x.
+
 ## Getting Help
 
 - Read the [documentation](docs/)
 - Submit an [Issue](https://github.com/hexagon-codes/hexagon/issues)
-- Join [Discussions](https://github.com/hexagon-codes/hexagon/discussions)
 
 ## License
 

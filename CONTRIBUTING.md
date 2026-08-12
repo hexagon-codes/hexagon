@@ -29,44 +29,50 @@
 
 #### 准备工作
 
-1. Fork 仓库
-2. 克隆到本地：
+1. 安装 `go.mod` 声明的 Go 版本或更高版本（当前最低版本为 Go 1.25.12）
+2. Fork 仓库
+3. 克隆到本地：
    ```bash
    git clone https://github.com/YOUR_USERNAME/hexagon.git
    cd hexagon
    ```
-3. 添加上游仓库：
+4. 添加上游仓库：
    ```bash
    git remote add upstream https://github.com/hexagon-codes/hexagon.git
    ```
-4. 创建分支：
+5. 创建分支：
    ```bash
    git checkout -b feature/your-feature-name
    ```
 
 #### 开发流程
 
-1. 确保代码通过所有检查：
+1. 运行与 `CI / Test` 作业一致的必需门禁：
    ```bash
-   make fmt      # 格式化代码
-   make lint     # 静态检查
-   make test     # 运行测试
+   GOWORK=off go mod tidy -diff
+   GOWORK=off go test -count=1 -race ./...
    ```
 
-2. 编写测试覆盖你的更改
+2. 按需运行本地辅助检查。这些命令方便开发，但不是当前 CI 门禁：
+   ```bash
+   make fmt      # 格式化代码
+   make lint     # 静态检查（需要本地安装 golangci-lint）
+   ```
 
-3. 提交代码：
+3. 编写测试覆盖你的更改
+
+4. 提交代码：
    ```bash
    git add .
    git commit -m "feat: add your feature description"
    ```
 
-4. 推送到你的 Fork：
+5. 推送到你的 Fork：
    ```bash
    git push origin feature/your-feature-name
    ```
 
-5. 创建 Pull Request
+6. 创建 Pull Request
 
 #### Commit 规范
 
@@ -112,7 +118,7 @@ docs: update README with quick start guide
 
 ### 测试
 
-- 测试覆盖率目标 > 80%
+- 为变更覆盖正常、错误和边界行为
 - 使用表驱动测试
 - Mock 外部依赖
 - 测试文件命名：`xxx_test.go`
@@ -142,7 +148,7 @@ hexagon/
 
 1. PR 标题使用 Conventional Commits 格式
 2. 填写 PR 模板中的所有必填项
-3. 确保 CI 检查全部通过
+3. 确保 `CI / Test` 检查通过
 4. 等待代码审查
 5. 根据反馈修改
 6. 合并后删除分支
@@ -156,11 +162,18 @@ hexagon/
 - MINOR: 向后兼容的功能新增
 - PATCH: 向后兼容的 Bug 修复
 
+发布由匹配 `v*` 的 Git 标签触发：
+
+1. `Release / Validate` 执行 `go mod tidy -diff` 和全量 race 测试
+2. 验证通过后，`Release / Publish` 创建 GitHub Release 并自动生成发布说明
+3. 标签名称包含 `-`（例如 `v0.6.0-rc.1`）时发布为预发布版本
+
+v0.x 阶段的兼容性与 BREAKING 约定见 [COMPATIBILITY.md](COMPATIBILITY.md)。
+
 ## 获取帮助
 
 - 查阅 [文档](docs/)
 - 提交 [Issue](https://github.com/hexagon-codes/hexagon/issues)
-- 参与 [Discussions](https://github.com/hexagon-codes/hexagon/discussions)
 
 ## 许可证
 

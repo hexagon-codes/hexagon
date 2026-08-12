@@ -26,18 +26,18 @@
 
 ## 项目简介
 
-**Hexagon** 取名自网络热词「**六边形战士**」，寓意均衡强大、无懈可击。
+**Hexagon** 取名自网络热词「**六边形战士**」，表达对框架各项能力均衡发展的关注。
 
-我们聚焦 **易用性、性能、扩展性、任务编排、可观测性、安全性** 六大核心维度，深耕技术打磨，致力于实现各能力模块的均衡卓越，为 Go 开发者打造企业级落地首选的 AI Agent 开发基座。
+我们聚焦 **易用性、性能、扩展性、任务编排、可观测性、安全性** 六个维度，为 Go 开发者提供可组合的 AI Agent 开发框架。下列内容描述当前代码能力；性能、容量与可用性上限应由具体部署环境中的基准和压测结果确定。
 
 ### 核心特性
 
-* ⚡ **高性能** │ 原生 Go 驱动，极致并发，支持 100k+ 活跃 Agent
-* 🧩 **易用性** │ 声明式 API 设计，3 行代码极速构建基础原型
-* 🛡️ **安全性** │ 企业级沙箱隔离，内置完备的权限管控与防护
-* 🔧 **扩展性** │ 插件化架构，支持高度自定义的组件无缝集成
-* 🛠️ **编排力** │ 强大的图编排引擎，轻松驾驭复杂的多级任务链路
-* 🔍 **可观测** │ 深度集成 OpenTelemetry，实现全链路透明追踪
+* ⚡ **并发执行** │ 基于 goroutine、流式处理、批执行与协程池组织并发任务
+* 🧩 **易用性** │ 提供顶层 QuickStart API，并允许按子包直接组合底层能力
+* 🛡️ **安全性** │ 提供 Guard、PII、RBAC、凭证、沙箱与 SSRF 防护组件
+* 🔧 **扩展性** │ 通过接口、选项函数、Hooks 和插件扩展组件
+* 🛠️ **编排力** │ 提供 Graph、Chain、Workflow、Planner 与多 Agent 编排
+* 🔍 **可观测** │ 提供追踪、指标、日志，以及 OpenTelemetry、Prometheus 适配
 
 ---
 
@@ -51,8 +51,8 @@
 
 Hexagon 遵循五大设计原则：
 
-1. **渐进式复杂度**: 入门 3 行代码，进阶声明式配置，专家图编排
-2. **约定优于配置**: 合理默认值，零配置可运行，需要时可完全定制
+1. **渐进式复杂度**: 顶层便捷 API、声明式配置与图编排逐层开放
+2. **约定优于配置**: 为常见场景提供合理默认值，并允许按需定制
 3. **组合优于继承**: 小而专注的组件，灵活组合，接口驱动
 4. **显式优于隐式**: 类型安全，编译时检查，清晰的数据流
 5. **生产优先**: 内置可观测性，优雅降级，运维友好
@@ -66,20 +66,20 @@ Hexagon 遵循五大设计原则：
 | 原生并发 | goroutine + channel 实现高效并行 Agent 执行 |
 | 单二进制部署 | 无运行时依赖，容器友好，运维简单 |
 | 编译时类型检查 | 泛型支持，减少运行时错误 |
-| 高性能 | 零分配流处理，对象池优化 |
+| 高性能 | 原生并发、流式处理和对象池 |
 | 可嵌入 | 轻松嵌入其他 Go 应用 |
 
 ---
 
 ## 核心目标
 
-| 目标 | 量化指标 |
+| 目标 | 设计方向 |
 |-----|---------|
-| 极简入门 | 学习曲线 < 1 小时 |
-| 类型安全 | 0 运行时类型错误 |
-| 高性能 | 100k+ 并发 Agent |
-| 可观测 | 100% 覆盖率 |
-| 生产就绪 | 99.99% 可用性 |
+| 渐进式上手 | 顶层便捷 API 与可组合子包并存 |
+| 类型安全 | 泛型 `Runnable`、显式接口与编译期检查 |
+| 并发与流式 | 原生 Go 并发、批处理、背压与流式执行 |
+| 可观测 | 追踪、指标、日志以及标准协议导出 |
+| 运行可靠性 | Context 取消、重试、降级、安全检查与检查点能力 |
 
 ---
 
@@ -90,32 +90,20 @@ Hexagon 是一个完整的 AI Agent 开发生态，由多个仓库组成：
 | 仓库 | 说明 |
 |-----|------|
 | **hexagon** | AI Agent 框架核心 (编排、RAG、Graph、Hooks) |
-| **ai-core** | AI 基础能力库 (LLM/Tool/Memory/Schema) |
-| **toolkit** | Go 通用工具库 (lang/crypto/net/cache/util) |
-| **hexagon-ui** | Dev UI 前端 (Vue 3 + TypeScript) |
+| **ai-core** | AI 基础能力库（LLM/Tool/Memory/Schema/Stream/Vector Store） |
+| **toolkit** | Go 通用工具库（lang/crypto/net/cache/util/infra） |
+| **hexagon-ui** | 独立、可选的 Dev UI 前端；不属于 Hexagon 的 Go module 依赖 |
 
-### 生态系统依赖关系
+### Go module 依赖关系
 
 ```
-                              ┌─────────────┐
-                              │   hexagon   │
-                              │ (AI Agent)  │
-                              └──────┬──────┘
-                                     │
-                 ┌───────────────────┼───────────────────┐
-                 │                   │                   │
-                 ▼                   ▼                   ▼
-          ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-          │   ai-core   │    │   toolkit   │    │ hexagon-ui  │
-          │ (LLM/Tool/  │    │ (通用工具)   │    │  (Dev UI)   │
-          │   Memory)   │    │             │    │             │
-          └──────┬──────┘    └─────────────┘    └─────────────┘
-                 │
-                 ▼
-          ┌─────────────┐
-          │   toolkit   │
-          └─────────────┘
+hexagon
+├── ai-core v0.2.7
+│   └── toolkit v0.3.4
+└── toolkit v0.3.4
 ```
+
+`hexagon-ui` 是生态中的独立可选应用，不在上述 Go module 依赖图中。
 
 ---
 
@@ -140,8 +128,8 @@ Hexagon 是一个完整的 AI Agent 开发生态，由多个仓库组成：
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                            Capability Layer                                  │
 │  ┌──────────────┐ ┌────────────┐ ┌─────────────┐ ┌────────────┐ ┌───────┐  │
-│  │ LLM Provider │ │ RAG Engine │ │ Tool System │ │   Memory   │ │  KB   │  │
-│  │ (ai-core)    │ │            │ │  (ai-core)  │ │  (ai-core) │ │       │  │
+│  │ LLM Provider │ │ RAG Engine │ │ Tool System │ │   Memory   │ │ Vector│  │
+│  │ (ai-core)    │ │ (hexagon)  │ │  (ai-core)  │ │ (ai-core) │ │Store* │  │
 │  └──────────────┘ └────────────┘ └─────────────┘ └────────────┘ └───────┘  │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                          Infrastructure Layer                                │
@@ -175,12 +163,13 @@ Hexagon 是一个完整的 AI Agent 开发生态，由多个仓库组成：
 - 状态管理（Turn/Session/Agent/Global 四层）
 
 **Capability Layer (能力层)**
-- LLM Provider 抽象和实现
-- RAG 检索增强生成
-- 工具系统和记忆系统
+- ai-core 提供 LLM Provider、Tool、Memory、Schema、Stream 和共享向量存储契约
+- Hexagon 提供 RAG 流程、检索/索引编排和 Agent 能力组合
+- `*` Memory 与 Qdrant 向量存储由 ai-core 提供，其余后端适配器位于 Hexagon
 
 **Infrastructure Layer (基础设施层)**
-- 可观测性（追踪、日志、指标）
+- Hexagon 提供 Agent/LLM/Tool/Retriever 语义的追踪、指标、日志适配和 Hooks
+- toolkit 提供通用日志、OpenTelemetry、Prometheus 与底层 observe 实现
 - 安全防护（注入检测、PII、RBAC）
 - 配置管理、缓存、插件系统
 
@@ -188,65 +177,50 @@ Hexagon 是一个完整的 AI Agent 开发生态，由多个仓库组成：
 
 ## 核心接口
 
-### Component 接口
+### Runnable 与 Component
 
-所有组件（Agent、Tool、Chain、Graph）的统一接口：
+`core.Runnable` 是可执行组件的六范式接口；`core.Component` 为兼容旧名称而嵌入 `Runnable`。Tool、Graph 等领域对象仍各自使用对应子包的接口，不强制伪装成同一个接口。
 
 ```go
-// Component 是所有组件的统一接口
-type Component[I, O any] interface {
-    // Name 返回组件名称
+type Runnable[I, O any] interface {
+    Invoke(ctx context.Context, input I, opts ...Option) (O, error)
+    Stream(ctx context.Context, input I, opts ...Option) (*StreamReader[O], error)
+    Batch(ctx context.Context, inputs []I, opts ...Option) ([]O, error)
+    Collect(ctx context.Context, input *StreamReader[I], opts ...Option) (O, error)
+    Transform(ctx context.Context, input *StreamReader[I], opts ...Option) (*StreamReader[O], error)
+    BatchStream(ctx context.Context, inputs []I, opts ...Option) (*StreamReader[O], error)
+
     Name() string
-
-    // Description 返回组件描述
     Description() string
-
-    // Run 执行组件（非流式）
-    Run(ctx context.Context, input I) (O, error)
-
-    // Stream 执行组件（流式）
-    Stream(ctx context.Context, input I) (Stream[O], error)
-
-    // Batch 批量执行组件
-    Batch(ctx context.Context, inputs []I) ([]O, error)
-
-    // InputSchema 返回输入参数的 Schema
     InputSchema() *Schema
-
-    // OutputSchema 返回输出参数的 Schema
     OutputSchema() *Schema
+}
+
+type Component[I, O any] interface {
+    Runnable[I, O]
 }
 ```
 
 **设计要点：**
-- 泛型支持，编译时类型检查
-- 统一的执行模型（同步/流式/批量）
-- Schema 自省能力，支持动态组合
-- 所有组件可任意嵌套组合
+- 泛型输入输出与 Schema 自省提供编译期约束
+- 覆盖普通输入/输出、批处理以及流输入/输出六种执行范式
+- `BaseRunnable` 可从核心 `Invoke` 实现推导其余默认行为
+- 执行选项通过 `core.Option` 显式传入
 
-### Stream 接口
+### StreamReader
 
-流式数据处理能力：
+流类型归属 ai-core 的 `streamx` 包；Hexagon 的 `core.StreamReader` 是其别名，旧 `core.Stream` 别名已经弃用。读取结束使用 `io.EOF` 表示。
 
 ```go
-// Stream 是泛型流接口
-type Stream[T any] interface {
-    // Next 读取下一个元素
-    Next(ctx context.Context) (T, bool)
+type StreamReader[T any] = streamx.StreamReader[T]
 
-    // Err 返回流处理中发生的错误
-    Err() error
-
-    // Close 关闭流，释放资源
-    Close() error
-
-    // Collect 收集所有元素到切片
-    Collect(ctx context.Context) ([]T, error)
-
-    // ForEach 对每个元素执行操作
-    ForEach(ctx context.Context, fn func(T) error) error
-}
+item, err := reader.Recv()
+items, err := reader.Collect(ctx)
+err = reader.ForEach(ctx, func(item T) error { return nil })
+err = reader.Close()
 ```
+
+`core.Schema` 同样是 ai-core `llm.Schema` 的别名；底层数据契约由 ai-core 持有，Hexagon 负责执行编排。
 
 ---
 
@@ -255,24 +229,17 @@ type Stream[T any] interface {
 ### Agent 接口
 
 ```go
-// Agent 是 AI Agent 的核心接口
 type Agent interface {
-    Component[Input, Output]
+    core.Runnable[Input, Output]
 
-    // ID 返回 Agent 唯一标识
     ID() string
-
-    // Role 返回 Agent 的角色定义
     Role() Role
-
-    // Tools 返回 Agent 可用的工具列表
     Tools() []tool.Tool
-
-    // Memory 返回 Agent 的记忆系统
     Memory() memory.Memory
-
-    // LLM 返回 Agent 使用的 LLM Provider
     LLM() llm.Provider
+
+    // Run 是兼容旧调用方的方法；新代码使用 Invoke。
+    Run(ctx context.Context, input Input) (Output, error)
 }
 ```
 
@@ -287,23 +254,29 @@ type Input struct {
 
 // Output 是 Agent 的输出
 type Output struct {
-    Content   string           `json:"content"`            // 最终回复
+    Content   string           `json:"content"`              // 最终回复
     ToolCalls []ToolCallRecord `json:"tool_calls,omitempty"` // 工具调用记录
-    Usage     llm.Usage        `json:"usage,omitempty"`    // Token 使用统计
-    Metadata  map[string]any   `json:"metadata,omitempty"` // 额外元数据
+    Blocks    template.Blocks  `json:"blocks,omitempty"`     // 有序内容块
+    Usage     llm.Usage        `json:"usage,omitempty"`      // Token 使用统计
+    StopReason runtime.StopReason `json:"stop_reason,omitempty"`
+    Metadata  map[string]any   `json:"metadata,omitempty"`   // 额外元数据
 }
 ```
 
 ### 角色系统
 
 ```go
-// Role 角色定义
 type Role struct {
-    Name        string   // 角色名称
-    Goal        string   // 角色目标
-    Backstory   string   // 背景故事
-    Constraints []string // 约束条件
-    Capabilities []string // 能力列表
+    Name            string
+    Title           string
+    Goal            string
+    Backstory       string
+    Expertise       []string
+    Tools           []string
+    Personality     string
+    Constraints     []string
+    AllowDelegation bool
+    DelegateTo      []string
 }
 ```
 
@@ -330,25 +303,21 @@ type SwarmRunner struct {
     InitialAgent Agent
     MaxHandoffs  int
     GlobalState  GlobalState
+    Verbose      bool
 }
 ```
 
 ### 四层状态管理
 
 ```go
-// StateManager 状态管理器
 type StateManager interface {
-    // Turn 轮次状态（单次对话）
-    Turn() State
-
-    // Session 会话状态（多轮对话）
-    Session() State
-
-    // Agent Agent 持久状态
-    Agent() State
-
-    // Global 全局共享状态
-    Global() State
+    Turn() TurnState
+    Session() SessionState
+    Agent() AgentState
+    Global() GlobalState
+    NewTurn() TurnState
+    Snapshot() StateSnapshot
+    Restore(snapshot StateSnapshot) error
 }
 ```
 
@@ -359,48 +328,57 @@ type StateManager interface {
 ### 核心组件
 
 ```go
-// Document 文档
+// Document、Loader、Splitter、Indexer、Retriever 归属 Hexagon 的 rag 包。
 type Document struct {
-    ID        string         // 唯一标识
-    Content   string         // 文档内容
-    Metadata  map[string]any // 元数据
-    Embedding []float32      // 向量
-    Score     float32        // 检索分数
+    ID        string
+    Content   string
+    Metadata  map[string]any
+    Embedding []float32
+    Score     float32
+    Source    string
+    CreatedAt time.Time
 }
 
-// Loader 文档加载器
 type Loader interface {
     Load(ctx context.Context) ([]Document, error)
+    Name() string
 }
 
-// Splitter 文档分割器
 type Splitter interface {
     Split(ctx context.Context, docs []Document) ([]Document, error)
+    Name() string
 }
 
-// Indexer 索引器
 type Indexer interface {
     Index(ctx context.Context, docs []Document) error
     Delete(ctx context.Context, ids []string) error
+    Clear(ctx context.Context) error
+    Count(ctx context.Context) (int, error)
 }
 
-// Retriever 检索器
 type Retriever interface {
     Retrieve(ctx context.Context, query string, opts ...RetrieveOption) ([]Document, error)
 }
 
-// Embedder 向量生成器
+// Engine 使用的轻量 Embedder 契约。
 type Embedder interface {
     Embed(ctx context.Context, texts []string) ([][]float32, error)
     Dimension() int
 }
 
-// VectorStore 向量存储
-type VectorStore interface {
-    Add(ctx context.Context, docs []Document) error
-    Search(ctx context.Context, embedding []float32, topK int, filter map[string]any) ([]Document, error)
+// 共享向量存储契约归属 ai-core/store/vector。
+type Store interface {
+    Add(ctx context.Context, docs []vector.Document) error
+    Search(ctx context.Context, query []float32, k int, opts ...vector.SearchOption) ([]vector.Document, error)
+    Get(ctx context.Context, id string) (*vector.Document, error)
+    Delete(ctx context.Context, ids []string) error
+    Clear(ctx context.Context) error
+    Count(ctx context.Context) (int, error)
+    Close() error
 }
 ```
+
+`rag.Engine`、`rag/indexer` 和 `rag/retriever` 在流程边界把 `rag.Document` 转换为 ai-core 的 `vector.Document`。通用 `vector.Store`、`vector.Embedder`、内存存储与 Qdrant 适配器由 ai-core 持有；Hexagon 持有 RAG 编排以及其他向量后端适配器。
 
 ### RAG Pipeline
 
@@ -424,7 +402,10 @@ docs, _ := pipeline.Query(ctx, "query", rag.WithTopK(5))
 | Retriever | VectorRetriever, KeywordRetriever, HybridRetriever, MultiRetriever, HyDERetriever, AdaptiveRetriever, ParentDocRetriever |
 | Indexer | VectorIndexer, ConcurrentIndexer, IncrementalIndexer |
 | Embedder | OpenAIEmbedder, CachedEmbedder, MockEmbedder |
-| VectorStore | MemoryStore, QdrantStore, FAISSStore, PgVectorStore, RedisStore, MilvusStore, ChromaStore, PineconeStore, WeaviateStore |
+| Vector Store（ai-core） | MemoryStore、Qdrant Store |
+| Vector Store（Hexagon 适配器） | FAISS、PgVector、Redis、Milvus、Chroma、Pinecone、Weaviate |
+
+ai-core v0.2.7 起，Qdrant 新集合默认使用 SHA-256 派生的 UUIDv8 point ID。旧集合迁移时须直接使用 `github.com/hexagon-codes/ai-core/store/vector/qdrant`，显式选择 `PointIDLegacyHash31` 读取旧数据，再重建为 UUIDv8 新集合；同一集合不得混用两种 ID 策略。
 
 ---
 
@@ -501,14 +482,28 @@ for event := range events {
 
 ### 检查点
 
-```go
-// 启用检查点保存
-graph.WithCheckpointer(checkpointer).Build()
+仓库当前存在两个用途不同的检查点契约，不能混用：
 
-// 从检查点恢复
-checkpoint, _ := checkpointer.Get(ctx, threadID)
-graph.Run(ctx, checkpoint.State, graph.WithThread(checkpoint.Config))
+- `checkpoint.Checkpointer` 是框架级、字节负载的持久化端口，提供 Memory/File 后端，并由 Agent durable execution、Interrupt Handler 和 Graph StateMachine 等消费者使用。
+- `orchestration/graph.CheckpointSaver` 保存图专用快照；需要图的恢复、历史和分支能力时，使用 `EnhancedCheckpointSaver` 与 `CheckpointRunner`。
+
+```go
+// 框架级类型化值持久化
+cp := checkpoint.NewMemory()
+err := checkpoint.PutValue(ctx, cp, checkpoint.Checkpoint{
+    Namespace: "run-1",
+    ID:        "step-1",
+}, state)
+restored, _, ok, err := checkpoint.GetValue[MyState](ctx, cp, "run-1", "step-1")
+
+// 图专用的运行与恢复
+saver := graph.NewMemoryEnhancedCheckpointSaver()
+runner := graph.NewCheckpointRunner(compiledGraph, saver, nil)
+result, err := runner.Run(ctx, "thread-1", initialState)
+result, err = runner.ResumeFromLatest(ctx, "thread-1")
 ```
+
+直接调用 `Graph.Run` 不会因为构建器持有 saver 就自动完成上述恢复流程；不要使用旧的 `checkpointer.Get(ctx, threadID)` / `checkpoint.Config` 伪 API。
 
 ---
 
@@ -538,13 +533,13 @@ type CheckResult struct {
 
 ```go
 // Prompt 注入检测
-guard := hexagon.NewPromptInjectionGuard()
+injectionGuard := guard.NewPromptInjectionGuard()
 
 // PII 检测
-guard := hexagon.NewPIIGuard()
+piiGuard := guard.NewPIIGuard()
 
 // 守卫链
-chain := hexagon.NewGuardChain(hexagon.ChainModeAll,
+chain := guard.NewGuardChain(guard.ChainModeAll,
     injectionGuard,
     piiGuard,
 )
@@ -563,12 +558,31 @@ const (
 ### 成本控制
 
 ```go
-controller := hexagon.NewCostController(
-    hexagon.WithBudget(10.0),            // $10 预算
-    hexagon.WithMaxTokensTotal(100000),  // 总 token 限制
-    hexagon.WithRequestsPerMinute(60),   // RPM 限制
+controller, err := cost.NewController(
+    cost.WithBudget(10.0),
+    cost.WithMaxTokensTotal(100000),
+    cost.WithRequestsPerMinute(60),
+)
+if err != nil {
+    return err
+}
+
+agent := agent.NewReAct(
+    agent.WithLLM(provider),
+    agent.WithMiddleware(
+        middleware.Budget{
+            Limits: middleware.BudgetLimits{
+                MaxTokens:  100000,
+                MaxCostUSD: 10.0,
+            },
+            Cost: controller.BudgetCostFunc(),
+        },
+        middleware.CostControl{Record: controller.RecordUsageFunc()},
+    ),
 )
 ```
+
+`middleware.Budget` 在单次 run 内于 LLM 调用前 fail-closed；`middleware.CostControl` 在调用后把用量写入共享 Controller，补齐跨 run 的累计账和预算强制。直接调用 LLM 且需要 RPM 预检时，还应在请求前调用 `controller.CheckRequest`。
 
 ---
 
@@ -577,12 +591,12 @@ controller := hexagon.NewCostController(
 ### Tracer
 
 ```go
-// 创建追踪器
-tracer := hexagon.NewTracer()
-ctx := hexagon.ContextWithTracer(ctx, tracer)
+// 使用 Hexagon 的内存追踪实现
+t := tracer.NewMemoryTracer()
+ctx = tracer.ContextWithTracer(ctx, t)
 
-// 开始 Span
-span := hexagon.StartSpan(ctx, "operation_name")
+// StartSpan 返回派生 context 和 Span
+ctx, span := tracer.StartSpan(ctx, "operation_name")
 defer span.End()
 
 span.SetAttribute("key", "value")
@@ -593,7 +607,7 @@ span.RecordError(err)
 
 ```go
 // 创建指标收集器
-m := hexagon.NewMetrics()
+m := metrics.NewMemoryMetrics()
 
 // 计数器
 m.Counter("agent_calls", "agent", "react").Inc()
@@ -605,8 +619,16 @@ m.Histogram("latency_ms", "operation", "chat").Observe(123.5)
 m.Gauge("active_agents").Set(5)
 ```
 
----
+可观测性按职责分层：
 
+- `observe/tracer`、`observe/metrics` 与 `observe/logger` 提供 Hexagon 侧接口和内存实现。
+- `observe/otel` 复用 toolkit 的通用 OpenTelemetry/OTLP 实现，并增加 Agent、LLM、Tool、Retriever 语义的 tracer 与 Hooks。
+- `observe/prometheus` 复用 toolkit 的 Exporter、Registry 和指标适配器，并增加 Hexagon 运行时 Hooks。
+- `observe/logger` 包装 toolkit logger，以便加入 Agent、Session、Trace 和 Span 上下文。
+
+顶层 `hexagon.NewTracer()`、`hexagon.NewMetrics()` 等仅为迁移期重导出；新代码应直接 import 对应 `observe/*` 子包。
+
+---
 
 ## 目录结构
 
@@ -630,7 +652,7 @@ hexagon/
 │   └── skill/                    # 技能注册与签名
 │
 ├── core/                         # 核心接口
-│   ├── runnable.go               # Component/Runnable 统一接口 + Stream[T] + Schema 别名
+│   ├── runnable.go               # 六范式 Runnable + ai-core StreamReader/Schema 别名
 │   ├── compose.go                # 声明式组合
 │   └── fallback.go               # 弹性回退
 │
@@ -659,7 +681,7 @@ hexagon/
 │   ├── workflow/                 # 工作流引擎
 │   └── planner/                  # 规划器
 │
-├── checkpoint/                   # 统一 Checkpointer 持久化
+├── checkpoint/                   # 框架级 Checkpointer（Memory/File）
 ├── interrupt/                    # 中断恢复
 │
 ├── rag/                          # RAG 系统
@@ -694,8 +716,12 @@ hexagon/
 │   ├── metrics/                  # 指标
 │   ├── logger/                   # 日志
 │   ├── devui/                    # Dev UI 后端
-│   ├── otel/                     # OpenTelemetry + Langfuse 导出
-│   ├── prometheus/               # Prometheus 集成
+│   ├── events/                   # 结构化事件
+│   ├── eventstream/              # 事件流
+│   ├── trace/                    # slog 追踪处理
+│   ├── langfuse/                 # Langfuse 客户端
+│   ├── otel/                     # toolkit OTel 复用 + Hexagon 语义适配
+│   ├── prometheus/               # toolkit Prometheus 复用 + Hexagon Hooks
 │   └── replay/                   # 录制回放
 │
 ├── security/                     # 安全
@@ -721,8 +747,8 @@ hexagon/
 │
 ├── client/                       # 客户端
 │
-├── store/                        # 存储
-│   └── vector/                   # 向量存储
+├── store/                        # 存储适配器
+│   └── vector/                   # ai-core vector.Store 的后端适配器
 │       ├── faiss/                # FAISS
 │       ├── pgvector/             # PgVector
 │       ├── redis/                # Redis
@@ -731,7 +757,7 @@ hexagon/
 │       ├── pinecone/             # Pinecone
 │       └── weaviate/             # Weaviate
 │
-│   # 注：Qdrant 实现位于 ai-core (ai-core/store/vector/qdrant)
+│   # 注：Memory/Qdrant 位于 ai-core/store/vector
 │
 ├── plugin/                       # 插件系统
 ├── config/                       # 配置管理
@@ -745,11 +771,12 @@ hexagon/
 │
 ├── bench/                        # 基准测试
 ├── examples/                     # 示例代码 (独立 module)
-├── deploy/                       # 部署配置 (Docker Compose/Helm/CI)
+├── deploy/                       # 部署配置 (Docker Compose/Helm)
+├── .github/workflows/            # CI 与 Release 工作流
 ├── docs/                         # 公开文档
 ├── internal/                     # 内部实现
 │
-├── hexagon.go                    # 主入口包 (版本: v0.5.0)
+├── hexagon.go                    # 主入口包（版本由构建注入/build info 解析）
 ├── deprecated.go                 # 过渡性重导出 (下一大版本移除)
 ├── go.mod
 ├── Makefile
@@ -761,48 +788,52 @@ hexagon/
 ## 依赖关系
 
 ```
-hexagon (主框架)
-├── ai-core       ← AI 基础能力 (LLM/Tool/Memory/Schema)
-└── toolkit       ← 通用工具 (lang/crypto/net/cache/util)
+hexagon（Go >= 1.25.12）
+├── ai-core v0.2.7
+│   └── toolkit v0.3.4
+└── toolkit v0.3.4
 ```
 
 ### ai-core — AI 基础能力库
 
-`github.com/hexagon-codes/ai-core`
+`github.com/hexagon-codes/ai-core` `v0.2.7`（Go >= 1.25.12）
 
-提供 LLM、Tool、Memory、Schema 等核心抽象：
+提供 LLM、Tool、Memory、Schema、Stream 与向量存储等核心抽象：
 
 - `llm/` - LLM Provider 接口 + 实现 (OpenAI, DeepSeek, Anthropic, Gemini, 通义, 豆包, Ollama)
 - `tool/` - 工具系统，支持函数式定义
-- `memory/` - 记忆系统，支持向量存储
+- `memory/` - 记忆系统
 - `schema/` - JSON Schema 自动生成
 - `streamx/` - 流式响应处理
+- `store/vector/` - `Store`/`Embedder` 契约、MemoryStore 与 Qdrant 适配器
 - `template/` - Prompt 模板引擎
 
 ### toolkit — Go 通用工具库
 
-`github.com/hexagon-codes/toolkit`
+`github.com/hexagon-codes/toolkit` `v0.3.4`（Go >= 1.25.12）
 
 生产级 Go 通用工具包，提供语言增强、加密、网络、缓存、协程池等基础能力：
 
 - `lang/` - 语言增强 (conv, stringx, slicex, mapx, timex, contextx, errorx, syncx)
 - `crypto/` - 加密 (aes, rsa, sign)
-- `net/` - 网络 (httpx, sse, ip)
+- `net/` - 网络 (httpx, sse, ip, ssrf)
 - `cache/` - 缓存 (local, redis, multi)
-- `util/` - 工具 (retry, rate, idgen, logger, validator, poolx 协程池)
+- `util/` - 工具 (retry, circuit, rate, idgen, hash, logger, validator, poolx 协程池)
 - `collection/` - 数据结构 (set, list, queue, stack)
+- `infra/observe`、`infra/otel`、`infra/prometheus` - 通用可观测性底座
+
+Hexagon 同时直接依赖 toolkit，并通过 ai-core 间接使用同一版本。Hexagon 在通用底座之上实现 Agent/RAG/Graph 语义和适配层，不复制 ai-core 或 toolkit 的所有权。
 
 ---
 
 ## LLM Provider 支持
 
-| Provider | 状态 |
-|----------|:----:|
-| OpenAI (GPT-4, GPT-4o, o1, o3) | ✅ 已完成 |
-| DeepSeek | ✅ 已完成 |
-| Anthropic (Claude) | ✅ 已完成 |
-| Google Gemini | ✅ 已完成 |
-| 通义千问 (Qwen) | ✅ 已完成 |
-| 豆包 (Ark) | ✅ 已完成 |
-| Ollama (本地模型) | ✅ 已完成 |
-
+| Provider | 实现状态 |
+|----------|:--------:|
+| OpenAI | 已提供适配器 |
+| DeepSeek | 已提供适配器 |
+| Anthropic (Claude) | 已提供适配器 |
+| Google Gemini | 已提供适配器 |
+| 通义千问 (Qwen) | 已提供适配器 |
+| 豆包 (Ark) | 已提供适配器 |
+| Ollama (本地模型) | 已提供适配器 |

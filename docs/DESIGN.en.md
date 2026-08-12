@@ -26,18 +26,18 @@
 
 ## Project Overview
 
-**Hexagon** takes its name from the Chinese internet phrase "hexagonal warrior" (六边形战士), symbolizing balanced strength with no weak points.
+**Hexagon** takes its name from the Chinese internet phrase "hexagonal warrior" (六边形战士), reflecting a focus on balanced development across framework capabilities.
 
-We focus on six core dimensions — **ease of use, performance, extensibility, task orchestration, observability, and security** — striving for balanced excellence across all capability modules, building the preferred enterprise-grade AI Agent development foundation for Go developers.
+We focus on six dimensions — **ease of use, performance, extensibility, task orchestration, observability, and security** — and provide Go developers with a composable AI Agent framework. The capabilities below describe the current code; performance, capacity, and availability limits must be established by benchmarks and load tests in the target deployment environment.
 
 ### Core Features
 
-* ⚡ **High Performance** | Native Go concurrency, supporting 100k+ active Agents
-* 🧩 **Ease of Use** | Declarative API design, build basic prototypes in 3 lines of code
-* 🛡️ **Security** | Enterprise-grade sandbox isolation with comprehensive permission control
-* 🔧 **Extensibility** | Plugin-based architecture supporting seamless integration of custom components
-* 🛠️ **Orchestration** | Powerful graph orchestration engine for complex multi-level task pipelines
-* 🔍 **Observability** | Deep OpenTelemetry integration for full end-to-end transparent tracing
+* ⚡ **Concurrent Execution** | Organizes concurrent work with goroutines, streaming, batch execution, and goroutine pools
+* 🧩 **Ease of Use** | Provides a top-level QuickStart API while allowing direct composition through sub-packages
+* 🛡️ **Security** | Provides Guard, PII, RBAC, credential, sandbox, and SSRF protection components
+* 🔧 **Extensibility** | Extends components through interfaces, option functions, Hooks, and plugins
+* 🛠️ **Orchestration** | Provides Graph, Chain, Workflow, Planner, and multi-Agent orchestration
+* 🔍 **Observability** | Provides tracing, metrics, logging, and OpenTelemetry and Prometheus adapters
 
 ---
 
@@ -51,8 +51,8 @@ We focus on six core dimensions — **ease of use, performance, extensibility, t
 
 Hexagon follows five design principles:
 
-1. **Progressive Complexity**: 3 lines to get started, declarative config for intermediate use, graph orchestration for experts
-2. **Convention over Configuration**: Sensible defaults, zero-config operation, fully customizable when needed
+1. **Progressive Complexity**: Top-level convenience APIs, declarative configuration, and graph orchestration expose capabilities in layers
+2. **Convention over Configuration**: Sensible defaults for common scenarios, with customization where needed
 3. **Composition over Inheritance**: Small, focused components that compose flexibly via interfaces
 4. **Explicit over Implicit**: Type-safe, compile-time checked, with clear data flow
 5. **Production-First**: Built-in observability, graceful degradation, operations-friendly
@@ -66,20 +66,20 @@ Why Go was chosen as the implementation language:
 | Native concurrency | goroutine + channel for efficient parallel Agent execution |
 | Single-binary deployment | No runtime dependencies, container-friendly, simple operations |
 | Compile-time type checking | Generic support reduces runtime errors |
-| High performance | Zero-allocation stream processing, object pool optimization |
+| High performance | Native concurrency, streaming, and object pools |
 | Embeddable | Easily embedded into other Go applications |
 
 ---
 
 ## Core Goals
 
-| Goal | Quantified Target |
-|------|-------------------|
-| Minimal onboarding | Learning curve < 1 hour |
-| Type safety | 0 runtime type errors |
-| High performance | 100k+ concurrent Agents |
-| Observability | 100% coverage |
-| Production-ready | 99.99% availability |
+| Goal | Design Direction |
+|------|------------------|
+| Progressive onboarding | Top-level convenience APIs coexist with composable sub-packages |
+| Type safety | Generic `Runnable`, explicit interfaces, and compile-time checks |
+| Concurrency and streaming | Native Go concurrency, batching, backpressure, and streaming execution |
+| Observability | Tracing, metrics, logging, and standard-protocol export |
+| Runtime reliability | Context cancellation, retries, fallback, security checks, and checkpoint capabilities |
 
 ---
 
@@ -90,32 +90,20 @@ Hexagon is a complete AI Agent development ecosystem consisting of multiple repo
 | Repository | Description |
 |------------|-------------|
 | **hexagon** | AI Agent framework core (orchestration, RAG, Graph, Hooks) |
-| **ai-core** | AI capabilities library (LLM/Tool/Memory/Schema) |
-| **toolkit** | Go general-purpose utility library (lang/crypto/net/cache/util) |
-| **hexagon-ui** | Dev UI frontend (Vue 3 + TypeScript) |
+| **ai-core** | AI capabilities library (LLM/Tool/Memory/Schema/Stream/Vector Store) |
+| **toolkit** | Go general-purpose utility library (lang/crypto/net/cache/util/infra) |
+| **hexagon-ui** | Independent, optional Dev UI frontend; not a Go module dependency of Hexagon |
 
-### Ecosystem Dependency Graph
+### Go Module Dependency Graph
 
 ```
-                              ┌─────────────┐
-                              │   hexagon   │
-                              │ (AI Agent)  │
-                              └──────┬──────┘
-                                     │
-                 ┌───────────────────┼───────────────────┐
-                 │                   │                   │
-                 ▼                   ▼                   ▼
-          ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-          │   ai-core   │    │   toolkit   │    │ hexagon-ui  │
-          │ (LLM/Tool/  │    │  (Utilities)│    │  (Dev UI)   │
-          │   Memory)   │    │             │    │             │
-          └──────┬──────┘    └─────────────┘    └─────────────┘
-                 │
-                 ▼
-          ┌─────────────┐
-          │   toolkit   │
-          └─────────────┘
+hexagon
+├── ai-core v0.2.7
+│   └── toolkit v0.3.4
+└── toolkit v0.3.4
 ```
+
+`hexagon-ui` is an independent optional application in the ecosystem and is not part of the Go module dependency graph above.
 
 ---
 
@@ -140,8 +128,8 @@ Hexagon is a complete AI Agent development ecosystem consisting of multiple repo
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                            Capability Layer                                  │
 │  ┌──────────────┐ ┌────────────┐ ┌─────────────┐ ┌────────────┐ ┌───────┐  │
-│  │ LLM Provider │ │ RAG Engine │ │ Tool System │ │   Memory   │ │  KB   │  │
-│  │ (ai-core)    │ │            │ │  (ai-core)  │ │  (ai-core) │ │       │  │
+│  │ LLM Provider │ │ RAG Engine │ │ Tool System │ │   Memory   │ │ Vector│  │
+│  │ (ai-core)    │ │ (hexagon)  │ │  (ai-core)  │ │ (ai-core) │ │Store* │  │
 │  └──────────────┘ └────────────┘ └─────────────┘ └────────────┘ └───────┘  │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                          Infrastructure Layer                                │
@@ -175,12 +163,13 @@ Hexagon is a complete AI Agent development ecosystem consisting of multiple repo
 - State management (four layers: Turn/Session/Agent/Global)
 
 **Capability Layer**
-- LLM Provider abstraction and implementations
-- RAG retrieval-augmented generation
-- Tool system and memory system
+- ai-core provides LLM Provider, Tool, Memory, Schema, Stream, and the shared vector-store contract
+- Hexagon provides RAG flows, retrieval/indexing orchestration, and Agent capability composition
+- `*` Memory and Qdrant vector stores come from ai-core; other backend adapters live in Hexagon
 
 **Infrastructure Layer**
-- Observability (tracing, logging, metrics)
+- Hexagon provides Agent/LLM/Tool/Retriever-aware tracing, metrics, logging adapters, and Hooks
+- toolkit provides general logging, OpenTelemetry, Prometheus, and lower-level observe implementations
 - Security protection (injection detection, PII, RBAC)
 - Configuration management, caching, plugin system
 
@@ -188,65 +177,50 @@ Hexagon is a complete AI Agent development ecosystem consisting of multiple repo
 
 ## Core Interfaces
 
-### Component Interface
+### Runnable and Component
 
-Unified interface for all components (Agent, Tool, Chain, Graph):
+`core.Runnable` is the six-mode interface for executable components; `core.Component` embeds `Runnable` to retain the old name. Domain objects such as Tool and Graph still use their own sub-package interfaces and are not forced behind one artificial interface.
 
 ```go
-// Component is the unified interface for all components
-type Component[I, O any] interface {
-    // Name returns the component name
+type Runnable[I, O any] interface {
+    Invoke(ctx context.Context, input I, opts ...Option) (O, error)
+    Stream(ctx context.Context, input I, opts ...Option) (*StreamReader[O], error)
+    Batch(ctx context.Context, inputs []I, opts ...Option) ([]O, error)
+    Collect(ctx context.Context, input *StreamReader[I], opts ...Option) (O, error)
+    Transform(ctx context.Context, input *StreamReader[I], opts ...Option) (*StreamReader[O], error)
+    BatchStream(ctx context.Context, inputs []I, opts ...Option) (*StreamReader[O], error)
+
     Name() string
-
-    // Description returns the component description
     Description() string
-
-    // Run executes the component (non-streaming)
-    Run(ctx context.Context, input I) (O, error)
-
-    // Stream executes the component (streaming)
-    Stream(ctx context.Context, input I) (Stream[O], error)
-
-    // Batch executes the component in batch
-    Batch(ctx context.Context, inputs []I) ([]O, error)
-
-    // InputSchema returns the Schema for input parameters
     InputSchema() *Schema
-
-    // OutputSchema returns the Schema for output parameters
     OutputSchema() *Schema
+}
+
+type Component[I, O any] interface {
+    Runnable[I, O]
 }
 ```
 
 **Design highlights:**
-- Generic support with compile-time type checking
-- Unified execution model (synchronous/streaming/batch)
-- Schema introspection capability for dynamic composition
-- All components can be freely nested and composed
+- Generic input/output and Schema introspection provide compile-time constraints
+- Covers six modes across ordinary input/output, batching, and stream input/output
+- `BaseRunnable` can derive default behavior from the core `Invoke` implementation
+- Execution options are passed explicitly through `core.Option`
 
-### Stream Interface
+### StreamReader
 
-Streaming data processing capability:
+The stream type belongs to ai-core's `streamx` package. Hexagon's `core.StreamReader` is an alias to it, while the old `core.Stream` alias is deprecated. `io.EOF` marks the end of reading.
 
 ```go
-// Stream is the generic stream interface
-type Stream[T any] interface {
-    // Next reads the next element
-    Next(ctx context.Context) (T, bool)
+type StreamReader[T any] = streamx.StreamReader[T]
 
-    // Err returns any error that occurred during stream processing
-    Err() error
-
-    // Close closes the stream and releases resources
-    Close() error
-
-    // Collect collects all elements into a slice
-    Collect(ctx context.Context) ([]T, error)
-
-    // ForEach executes an operation on each element
-    ForEach(ctx context.Context, fn func(T) error) error
-}
+item, err := reader.Recv()
+items, err := reader.Collect(ctx)
+err = reader.ForEach(ctx, func(item T) error { return nil })
+err = reader.Close()
 ```
+
+`core.Schema` is likewise an alias to ai-core's `llm.Schema`: ai-core owns the underlying data contracts, while Hexagon owns execution orchestration.
 
 ---
 
@@ -255,24 +229,17 @@ type Stream[T any] interface {
 ### Agent Interface
 
 ```go
-// Agent is the core interface for an AI Agent
 type Agent interface {
-    Component[Input, Output]
+    core.Runnable[Input, Output]
 
-    // ID returns the Agent's unique identifier
     ID() string
-
-    // Role returns the Agent's role definition
     Role() Role
-
-    // Tools returns the list of tools available to the Agent
     Tools() []tool.Tool
-
-    // Memory returns the Agent's memory system
     Memory() memory.Memory
-
-    // LLM returns the LLM Provider used by the Agent
     LLM() llm.Provider
+
+    // 为兼容旧调用方保留 Run；新代码使用 Invoke。
+    Run(ctx context.Context, input Input) (Output, error)
 }
 ```
 
@@ -287,23 +254,29 @@ type Input struct {
 
 // Output is the Agent's output
 type Output struct {
-    Content   string           `json:"content"`            // Final response
+    Content   string           `json:"content"`              // Final response
     ToolCalls []ToolCallRecord `json:"tool_calls,omitempty"` // Tool call records
-    Usage     llm.Usage        `json:"usage,omitempty"`    // Token usage statistics
-    Metadata  map[string]any   `json:"metadata,omitempty"` // Additional metadata
+    Blocks    template.Blocks  `json:"blocks,omitempty"`     // Ordered content blocks
+    Usage     llm.Usage        `json:"usage,omitempty"`      // Token usage statistics
+    StopReason runtime.StopReason `json:"stop_reason,omitempty"`
+    Metadata  map[string]any   `json:"metadata,omitempty"`   // Additional metadata
 }
 ```
 
 ### Role System
 
 ```go
-// Role defines an Agent's role
 type Role struct {
-    Name        string   // Role name
-    Goal        string   // Role objective
-    Backstory   string   // Background story
-    Constraints []string // Constraints
-    Capabilities []string // Capability list
+    Name            string
+    Title           string
+    Goal            string
+    Backstory       string
+    Expertise       []string
+    Tools           []string
+    Personality     string
+    Constraints     []string
+    AllowDelegation bool
+    DelegateTo      []string
 }
 ```
 
@@ -330,25 +303,21 @@ type SwarmRunner struct {
     InitialAgent Agent
     MaxHandoffs  int
     GlobalState  GlobalState
+    Verbose      bool
 }
 ```
 
 ### Four-Layer State Management
 
 ```go
-// StateManager manages Agent state
 type StateManager interface {
-    // Turn is the turn-level state (single conversation turn)
-    Turn() State
-
-    // Session is the session-level state (multi-turn conversation)
-    Session() State
-
-    // Agent is the Agent's persistent state
-    Agent() State
-
-    // Global is the globally shared state
-    Global() State
+    Turn() TurnState
+    Session() SessionState
+    Agent() AgentState
+    Global() GlobalState
+    NewTurn() TurnState
+    Snapshot() StateSnapshot
+    Restore(snapshot StateSnapshot) error
 }
 ```
 
@@ -359,48 +328,57 @@ type StateManager interface {
 ### Core Components
 
 ```go
-// Document represents a document
+// Document、Loader、Splitter、Indexer 与 Retriever 归 Hexagon 的 rag 包所有。
 type Document struct {
-    ID        string         // Unique identifier
-    Content   string         // Document content
-    Metadata  map[string]any // Metadata
-    Embedding []float32      // Vector embedding
-    Score     float32        // Retrieval score
+    ID        string
+    Content   string
+    Metadata  map[string]any
+    Embedding []float32
+    Score     float32
+    Source    string
+    CreatedAt time.Time
 }
 
-// Loader is the document loader interface
 type Loader interface {
     Load(ctx context.Context) ([]Document, error)
+    Name() string
 }
 
-// Splitter is the document splitter interface
 type Splitter interface {
     Split(ctx context.Context, docs []Document) ([]Document, error)
+    Name() string
 }
 
-// Indexer is the indexer interface
 type Indexer interface {
     Index(ctx context.Context, docs []Document) error
     Delete(ctx context.Context, ids []string) error
+    Clear(ctx context.Context) error
+    Count(ctx context.Context) (int, error)
 }
 
-// Retriever is the retriever interface
 type Retriever interface {
     Retrieve(ctx context.Context, query string, opts ...RetrieveOption) ([]Document, error)
 }
 
-// Embedder is the vector embedder interface
+// Engine 使用的轻量 Embedder 合同。
 type Embedder interface {
     Embed(ctx context.Context, texts []string) ([][]float32, error)
     Dimension() int
 }
 
-// VectorStore is the vector storage interface
-type VectorStore interface {
-    Add(ctx context.Context, docs []Document) error
-    Search(ctx context.Context, embedding []float32, topK int, filter map[string]any) ([]Document, error)
+// 共享向量存储合同属于 ai-core/store/vector。
+type Store interface {
+    Add(ctx context.Context, docs []vector.Document) error
+    Search(ctx context.Context, query []float32, k int, opts ...vector.SearchOption) ([]vector.Document, error)
+    Get(ctx context.Context, id string) (*vector.Document, error)
+    Delete(ctx context.Context, ids []string) error
+    Clear(ctx context.Context) error
+    Count(ctx context.Context) (int, error)
+    Close() error
 }
 ```
+
+`rag.Engine`, `rag/indexer`, and `rag/retriever` convert `rag.Document` to ai-core's `vector.Document` at flow boundaries. ai-core owns the shared `vector.Store`, `vector.Embedder`, in-memory store, and Qdrant adapter; Hexagon owns RAG orchestration and the other vector-backend adapters.
 
 ### RAG Pipeline
 
@@ -424,7 +402,10 @@ docs, _ := pipeline.Query(ctx, "query", rag.WithTopK(5))
 | Retriever | VectorRetriever, KeywordRetriever, HybridRetriever, MultiRetriever, HyDERetriever, AdaptiveRetriever, ParentDocRetriever |
 | Indexer | VectorIndexer, ConcurrentIndexer, IncrementalIndexer |
 | Embedder | OpenAIEmbedder, CachedEmbedder, MockEmbedder |
-| VectorStore | MemoryStore, QdrantStore, FAISSStore, PgVectorStore, RedisStore, MilvusStore, ChromaStore, PineconeStore, WeaviateStore |
+| Vector Store (ai-core) | MemoryStore, Qdrant Store |
+| Vector Store (Hexagon adapters) | FAISS, PgVector, Redis, Milvus, Chroma, Pinecone, Weaviate |
+
+Starting with ai-core v0.2.7, new Qdrant collections use SHA-256-derived UUIDv8 point IDs by default. To migrate an old collection, import `github.com/hexagon-codes/ai-core/store/vector/qdrant` directly, explicitly select `PointIDLegacyHash31` to read the old data, and rebuild it into a new UUIDv8 collection. Do not mix the two ID strategies in one collection.
 
 ---
 
@@ -501,14 +482,28 @@ for event := range events {
 
 ### Checkpoints
 
-```go
-// Enable checkpoint saving
-graph.WithCheckpointer(checkpointer).Build()
+The repository currently has two checkpoint contracts for different purposes; they are not interchangeable:
 
-// Resume from a checkpoint
-checkpoint, _ := checkpointer.Get(ctx, threadID)
-graph.Run(ctx, checkpoint.State, graph.WithThread(checkpoint.Config))
+- `checkpoint.Checkpointer` is the framework-wide byte-payload persistence port. It provides Memory/File backends and is consumed by Agent durable execution, Interrupt Handler, and Graph StateMachine, among others.
+- `orchestration/graph.CheckpointSaver` stores graph-specific snapshots. Use `EnhancedCheckpointSaver` with `CheckpointRunner` when graph recovery, history, and branching are required.
+
+```go
+// 框架级类型化值持久化
+cp := checkpoint.NewMemory()
+err := checkpoint.PutValue(ctx, cp, checkpoint.Checkpoint{
+    Namespace: "run-1",
+    ID:        "step-1",
+}, state)
+restored, _, ok, err := checkpoint.GetValue[MyState](ctx, cp, "run-1", "step-1")
+
+// Graph 专用执行与恢复
+saver := graph.NewMemoryEnhancedCheckpointSaver()
+runner := graph.NewCheckpointRunner(compiledGraph, saver, nil)
+result, err := runner.Run(ctx, "thread-1", initialState)
+result, err = runner.ResumeFromLatest(ctx, "thread-1")
 ```
+
+Calling `Graph.Run` directly does not automatically perform this recovery flow merely because its builder holds a saver. Do not use the old pseudo-APIs `checkpointer.Get(ctx, threadID)` or `checkpoint.Config`.
 
 ---
 
@@ -538,13 +533,13 @@ type CheckResult struct {
 
 ```go
 // Prompt injection detection
-guard := hexagon.NewPromptInjectionGuard()
+injectionGuard := guard.NewPromptInjectionGuard()
 
 // PII detection
-guard := hexagon.NewPIIGuard()
+piiGuard := guard.NewPIIGuard()
 
 // Guard chain
-chain := hexagon.NewGuardChain(hexagon.ChainModeAll,
+chain := guard.NewGuardChain(guard.ChainModeAll,
     injectionGuard,
     piiGuard,
 )
@@ -563,12 +558,31 @@ const (
 ### Cost Control
 
 ```go
-controller := hexagon.NewCostController(
-    hexagon.WithBudget(10.0),            // $10 budget
-    hexagon.WithMaxTokensTotal(100000),  // Total token limit
-    hexagon.WithRequestsPerMinute(60),   // RPM limit
+controller, err := cost.NewController(
+    cost.WithBudget(10.0),
+    cost.WithMaxTokensTotal(100000),
+    cost.WithRequestsPerMinute(60),
+)
+if err != nil {
+    return err
+}
+
+agent := agent.NewReAct(
+    agent.WithLLM(provider),
+    agent.WithMiddleware(
+        middleware.Budget{
+            Limits: middleware.BudgetLimits{
+                MaxTokens:  100000,
+                MaxCostUSD: 10.0,
+            },
+            Cost: controller.BudgetCostFunc(),
+        },
+        middleware.CostControl{Record: controller.RecordUsageFunc()},
+    ),
 )
 ```
+
+`middleware.Budget` fails closed before an LLM call within one run; `middleware.CostControl` writes post-call usage into the shared Controller, completing the cross-run ledger and budget enforcement. Direct LLM calls that require RPM preflight must also call `controller.CheckRequest` before the request.
 
 ---
 
@@ -577,12 +591,12 @@ controller := hexagon.NewCostController(
 ### Tracer
 
 ```go
-// Create a tracer
-tracer := hexagon.NewTracer()
-ctx := hexagon.ContextWithTracer(ctx, tracer)
+// 使用 Hexagon 的内存追踪实现
+t := tracer.NewMemoryTracer()
+ctx = tracer.ContextWithTracer(ctx, t)
 
-// Start a Span
-span := hexagon.StartSpan(ctx, "operation_name")
+// StartSpan 返回派生 context 与 Span
+ctx, span := tracer.StartSpan(ctx, "operation_name")
 defer span.End()
 
 span.SetAttribute("key", "value")
@@ -593,7 +607,7 @@ span.RecordError(err)
 
 ```go
 // Create a metrics collector
-m := hexagon.NewMetrics()
+m := metrics.NewMemoryMetrics()
 
 // Counter
 m.Counter("agent_calls", "agent", "react").Inc()
@@ -605,8 +619,16 @@ m.Histogram("latency_ms", "operation", "chat").Observe(123.5)
 m.Gauge("active_agents").Set(5)
 ```
 
----
+Observability is layered by responsibility:
 
+- `observe/tracer`, `observe/metrics`, and `observe/logger` provide Hexagon-side interfaces and in-memory implementations.
+- `observe/otel` reuses toolkit's general OpenTelemetry/OTLP implementation and adds Agent-, LLM-, Tool-, and Retriever-aware tracing and Hooks.
+- `observe/prometheus` reuses toolkit's Exporter, Registry, and metrics adapter and adds Hexagon runtime Hooks.
+- `observe/logger` wraps toolkit logger to attach Agent, Session, Trace, and Span context.
+
+Top-level helpers such as `hexagon.NewTracer()` and `hexagon.NewMetrics()` are transitional re-exports. New code should import the corresponding `observe/*` sub-packages directly.
+
+---
 
 ## Directory Structure
 
@@ -630,7 +652,7 @@ hexagon/
 │   └── skill/                    # Skill registry & signing
 │
 ├── core/                         # Core interfaces
-│   ├── runnable.go               # Component/Runnable unified interface + Stream[T] + Schema alias
+│   ├── runnable.go               # Six-mode Runnable + ai-core StreamReader/Schema aliases
 │   ├── compose.go                # Declarative composition
 │   └── fallback.go               # Resilient fallback
 │
@@ -659,7 +681,7 @@ hexagon/
 │   ├── workflow/                 # Workflow engine
 │   └── planner/                  # Planner
 │
-├── checkpoint/                   # Unified Checkpointer persistence
+├── checkpoint/                   # Framework-wide Checkpointer (Memory/File)
 ├── interrupt/                    # Interrupt & resume
 │
 ├── rag/                          # RAG system
@@ -694,8 +716,12 @@ hexagon/
 │   ├── metrics/                  # Metrics
 │   ├── logger/                   # Logging
 │   ├── devui/                    # Dev UI backend
-│   ├── otel/                     # OpenTelemetry + Langfuse export
-│   ├── prometheus/               # Prometheus integration
+│   ├── events/                   # Structured events
+│   ├── eventstream/              # Event streams
+│   ├── trace/                    # slog tracing handler
+│   ├── langfuse/                 # Langfuse client
+│   ├── otel/                     # toolkit OTel reuse + Hexagon semantic adapter
+│   ├── prometheus/               # toolkit Prometheus reuse + Hexagon Hooks
 │   └── replay/                   # Record and replay
 │
 ├── security/                     # Security
@@ -721,8 +747,8 @@ hexagon/
 │
 ├── client/                       # Client
 │
-├── store/                        # Storage
-│   └── vector/                   # Vector stores
+├── store/                        # Storage adapters
+│   └── vector/                   # Backend adapters for ai-core vector.Store
 │       ├── faiss/                # FAISS
 │       ├── pgvector/             # PgVector
 │       ├── redis/                # Redis
@@ -731,7 +757,7 @@ hexagon/
 │       ├── pinecone/             # Pinecone
 │       └── weaviate/             # Weaviate
 │
-│   # Note: the Qdrant implementation lives in ai-core (ai-core/store/vector/qdrant)
+│   # Note: Memory/Qdrant live in ai-core/store/vector
 │
 ├── plugin/                       # Plugin system
 ├── config/                       # Configuration management
@@ -745,11 +771,12 @@ hexagon/
 │
 ├── bench/                        # Benchmarks
 ├── examples/                     # Example code (standalone module)
-├── deploy/                       # Deployment configs (Docker Compose/Helm/CI)
+├── deploy/                       # Deployment configs (Docker Compose/Helm)
+├── .github/workflows/            # CI and Release workflows
 ├── docs/                         # Public documentation
 ├── internal/                     # Internal implementation
 │
-├── hexagon.go                    # Main package entry (version: v0.5.0)
+├── hexagon.go                    # Main entry (version resolved from injection/build info)
 ├── deprecated.go                 # Transitional re-exports (removed in next major)
 ├── go.mod
 ├── Makefile
@@ -761,47 +788,52 @@ hexagon/
 ## Dependencies
 
 ```
-hexagon (main framework)
-├── ai-core       ← AI capabilities (LLM/Tool/Memory/Schema)
-└── toolkit       ← General utilities (lang/crypto/net/cache/util)
+hexagon (Go >= 1.25.12)
+├── ai-core v0.2.7
+│   └── toolkit v0.3.4
+└── toolkit v0.3.4
 ```
 
 ### ai-core — AI Capabilities Library
 
-`github.com/hexagon-codes/ai-core`
+`github.com/hexagon-codes/ai-core` `v0.2.7` (Go >= 1.25.12)
 
-Provides core abstractions for LLM, Tool, Memory, and Schema:
+Provides core abstractions for LLM, Tool, Memory, Schema, Stream, and vector storage:
 
 - `llm/` - LLM Provider interfaces + implementations (OpenAI, DeepSeek, Anthropic, Gemini, Qwen, Ark, Ollama)
 - `tool/` - Tool system with function-based definition support
-- `memory/` - Memory system with vector store support
+- `memory/` - Memory system
 - `schema/` - Automatic JSON Schema generation
 - `streamx/` - Streaming response processing
+- `store/vector/` - `Store`/`Embedder` contracts, MemoryStore, and the Qdrant adapter
 - `template/` - Prompt template engine
 
 ### toolkit — Go General-Purpose Utility Library
 
-`github.com/hexagon-codes/toolkit`
+`github.com/hexagon-codes/toolkit` `v0.3.4` (Go >= 1.25.12)
 
 A production-grade Go utility library providing language enhancements, cryptography, networking, caching, goroutine pools, and other foundational capabilities:
 
 - `lang/` - Language enhancements (conv, stringx, slicex, mapx, timex, contextx, errorx, syncx)
 - `crypto/` - Cryptography (aes, rsa, sign)
-- `net/` - Networking (httpx, sse, ip)
+- `net/` - Networking (httpx, sse, ip, ssrf)
 - `cache/` - Caching (local, redis, multi)
-- `util/` - Utilities (retry, rate, idgen, logger, validator, poolx goroutine pool)
+- `util/` - Utilities (retry, circuit, rate, idgen, hash, logger, validator, poolx goroutine pool)
 - `collection/` - Data structures (set, list, queue, stack)
+- `infra/observe`, `infra/otel`, `infra/prometheus` - General observability foundation
+
+Hexagon depends on toolkit both directly and transitively through ai-core at the same version. Hexagon implements Agent/RAG/Graph semantics and adapters on top of these shared foundations rather than duplicating ai-core or toolkit ownership.
 
 ---
 
 ## LLM Provider Support
 
-| Provider | Status |
-|----------|:------:|
-| OpenAI (GPT-4, GPT-4o, o1, o3) | ✅ Complete |
-| DeepSeek | ✅ Complete |
-| Anthropic (Claude) | ✅ Complete |
-| Google Gemini | ✅ Complete |
-| Qwen (通义千问) | ✅ Complete |
-| Ark (豆包) | ✅ Complete |
-| Ollama (local models) | ✅ Complete |
+| Provider | Implementation Status |
+|----------|:---------------------:|
+| OpenAI | Adapter provided |
+| DeepSeek | Adapter provided |
+| Anthropic (Claude) | Adapter provided |
+| Google Gemini | Adapter provided |
+| Qwen (通义千问) | Adapter provided |
+| Ark (豆包) | Adapter provided |
+| Ollama (local models) | Adapter provided |

@@ -2,364 +2,315 @@
 
 # 插件开发指南
 
-本指南介绍如何为 Hexagon 开发和使用插件。
+本指南基于 `github.com/hexagon-codes/hexagon/plugin` 当前公开 API，介绍插件定义、注册、生命周期、配置加载、依赖校验和健康检查。
 
-## 概述
+## 能力边界
 
-Hexagon 插件系统允许您：
+Hexagon 插件是编译进 Go 程序并显式注册的组件。`Loader` 读取 YAML 配置后，通过预先注册的 `PluginFactory` 创建插件；它不会从目录动态加载 Go 二进制。
 
-- 扩展框架功能
-- 添加新的 LLM Provider
-- 集成外部服务
-- 自定义中间件
-- 动态加载和卸载
+`PluginTypeProvider`、`PluginTypeTool`、`PluginTypeMiddleware` 等值只表示插件元数据分类，不会自动把 Provider、Tool 或 Middleware 注册到其他全局注册器。应用应通过实际使用方提供的构造参数或注册表完成这些对象的接线。
 
-## 插件结构
+## Plugin 接口
 
-### 插件接口
+插件必须提供元信息、生命周期方法和当前健康状态：
 
 ```go
 type Plugin interface {
-    // 插件元信息
-    Name() string
-    Version() string
-    Description() string
-
-    // 生命周期
+    Info() PluginInfo
     Init(ctx context.Context, config map[string]any) error
     Start(ctx context.Context) error
     Stop(ctx context.Context) error
-
-    // 依赖声明
-    Dependencies() []string
+    Health() HealthStatus
 }
 ```
 
-### 基础实现
+`Info().Name` 是注册表中的唯一标识。`PluginInfo.Dependencies` 用于声明其他插件依赖。
+
+### 使用 BasePlugin
+
+`BasePlugin` 已提供 `Info`、`Init`、`Start`、`Stop`、`Health` 和配置读取的默认实现。插件可以嵌入它，只覆盖自身需要的行为：
 
 ```go
+package myplugin
+
+import (
+    "context"
+    "errors"
+
+    "github.com/hexagon-codes/hexagon/plugin"
+)
+
 type MyPlugin struct {
-    config map[string]any
+    *plugin.BasePlugin
+    endpoint string
 }
 
-func (p *MyPlugin) Name() string        { return "my-plugin" }
-func (p *MyPlugin) Version() string     { return "1.0.0" }
-func (p *MyPlugin) Description() string { return "我的自定义插件" }
-func (p *MyPlugin) Dependencies() []string { return nil }
+func New() *MyPlugin {
+    return &MyPlugin{
+        BasePlugin: plugin.NewBasePlugin(plugin.PluginInfo{
+            Name:         "my-plugin",
+            Version:      "1.0.0",
+            Type:         plugin.PluginTypeExtension,
+            Description:  "My application extension",
+        }),
+    }
+}
 
 func (p *MyPlugin) Init(ctx context.Context, config map[string]any) error {
-    p.config = config
-    return nil
+    endpoint, _ := config["endpoint"].(string)
+    if endpoint == "" {
+        return errors.New("endpoint is required")
+    }
+    p.endpoint = endpoint
+    return p.BasePlugin.Init(ctx, config)
 }
 
-func (p *MyPlugin) Start(ctx context.Context) error {
-    // 启动逻辑
-    return nil
-}
-
-func (p *MyPlugin) Stop(ctx context.Context) error {
-    // 停止逻辑
-    return nil
-}
+var _ plugin.Plugin = (*MyPlugin)(nil)
 ```
+
+默认 `BasePlugin` 在创建后返回 `unknown`，`Start` 后返回 `healthy`，`Stop` 后恢复为 `unknown`。需要更细粒度状态时，可以覆盖 `Health()` 并返回 `plugin.HealthStatus`。
 
 ## 插件注册
 
-### 代码注册
+### 全局注册表
+
+简单程序可以使用包级注册函数：
 
 ```go
-import "github.com/hexagon-codes/hexagon/plugin"
+if err := plugin.RegisterPlugin(myplugin.New()); err != nil {
+    return err
+}
 
-// 注册插件
-plugin.Register(&MyPlugin{})
-
-// 获取插件
-p, err := plugin.Get("my-plugin")
+p, err := plugin.GetPlugin("my-plugin")
+if err != nil {
+    return err
+}
+_ = p
 ```
 
-### 配置文件注册
+同名插件重复注册会返回错误。
+
+### 独立注册表
+
+需要隔离实例或进行测试时，使用独立 `Registry`：
+
+```go
+registry := plugin.NewRegistry()
+
+if err := registry.Register(myplugin.New()); err != nil {
+    return err
+}
+
+p, err := registry.Get("my-plugin")
+if err != nil {
+    return err
+}
+_ = p
+```
+
+注册后实例状态为 `loaded`。运行中的插件不能直接 `Unregister`，应先通过生命周期管理器停止。
+
+## 生命周期管理
+
+`Lifecycle` 必须与承载插件的同一个 `Registry` 一起构造。`Init` 接收插件名称和配置，`Start`、`Stop` 也按名称操作：
+
+```go
+registry := plugin.NewRegistry()
+lifecycle := plugin.NewLifecycle(
+    registry,
+    plugin.WithHealthCheckInterval(30*time.Second),
+)
+
+p := myplugin.New()
+if err := registry.Register(p); err != nil {
+    return err
+}
+if err := lifecycle.Init(ctx, p.Info().Name, map[string]any{
+    "endpoint": "https://service.example.com",
+}); err != nil {
+    return err
+}
+if err := lifecycle.Start(ctx, p.Info().Name); err != nil {
+    return err
+}
+if err := lifecycle.Stop(ctx, p.Info().Name); err != nil {
+    return err
+}
+```
+
+批量场景可使用 `InitAll(ctx, configs)`、`StartAll(ctx)` 和 `StopAll(ctx)`。`StartAll` 按插件依赖启动，`StopAll` 按启动顺序的逆序停止，并聚合停止错误。
+
+`PluginManager` 把注册表和生命周期组合在一起，提供 `Load`、`Enable`、`Disable` 和 `Unload`：
+
+```go
+manager := plugin.NewPluginManager()
+if err := manager.Load(myplugin.New()); err != nil {
+    return err
+}
+if err := manager.Enable(ctx, "my-plugin", map[string]any{
+    "endpoint": "https://service.example.com",
+}); err != nil {
+    return err
+}
+defer manager.Unload(ctx, "my-plugin")
+```
+
+## 从配置加载
+
+配置加载依赖插件工厂。必须先在同一个 `Registry` 注册工厂，再构造 `Loader`：
+
+```go
+registry := plugin.NewRegistry()
+lifecycle := plugin.NewLifecycle(registry)
+
+if err := registry.RegisterFactory("my-plugin", func() plugin.Plugin {
+    return myplugin.New()
+}); err != nil {
+    return err
+}
+
+loader := plugin.NewLoader(
+    registry,
+    lifecycle,
+    plugin.WithSearchPaths("./plugins"),
+)
+if err := loader.LoadFromConfig(ctx, "plugins.yaml"); err != nil {
+    return err
+}
+if err := lifecycle.StartAll(ctx); err != nil {
+    return err
+}
+defer lifecycle.StopAll(ctx)
+```
+
+`plugins.yaml` 对应 `PluginsConfig` 和 `PluginConfig`：
 
 ```yaml
-# plugins.yaml
 plugins:
   - name: my-plugin
     enabled: true
+    priority: 10
     config:
-      key1: value1
-      key2: value2
+      endpoint: https://service.example.com
 ```
 
-```go
-// 从配置加载
-loader := plugin.NewLoader()
-err := loader.LoadFromConfig("plugins.yaml")
-```
-
-## 插件生命周期
-
-### 生命周期管理器
-
-```go
-lifecycle := plugin.NewLifecycle()
-
-// 添加插件
-lifecycle.Add(plugin1)
-lifecycle.Add(plugin2)
-
-// 初始化所有插件
-err := lifecycle.InitAll(ctx)
-
-// 启动所有插件
-err := lifecycle.StartAll(ctx)
-
-// 停止所有插件
-err := lifecycle.StopAll(ctx)
-```
-
-### 生命周期钩子
-
-```go
-lifecycle.OnInit(func(name string) {
-    log.Printf("插件 %s 初始化中...", name)
-})
-
-lifecycle.OnStart(func(name string) {
-    log.Printf("插件 %s 启动中...", name)
-})
-
-lifecycle.OnStop(func(name string) {
-    log.Printf("插件 %s 停止中...", name)
-})
-
-lifecycle.OnError(func(name string, err error) {
-    log.Printf("插件 %s 错误: %v", name, err)
-})
-```
-
-## 依赖管理
-
-### 声明依赖
-
-```go
-func (p *MyPlugin) Dependencies() []string {
-    return []string{"database-plugin", "cache-plugin"}
-}
-```
-
-### 版本约束
-
-```go
-func (p *MyPlugin) Dependencies() []string {
-    return []string{
-        "database-plugin>=1.0.0",
-        "cache-plugin~1.2.0",
-    }
-}
-```
-
-### 依赖解析
-
-```go
-graph := plugin.NewDependencyGraph()
-graph.Add(plugin1)
-graph.Add(plugin2)
-
-// 检查循环依赖
-if err := graph.CheckCycle(); err != nil {
-    log.Fatal("存在循环依赖:", err)
-}
-
-// 拓扑排序
-sorted, err := graph.TopologicalSort()
-```
-
-## 热重载
-
-### 启用热重载
-
-```go
-reloader := plugin.NewHotReloader(lifecycle)
-
-// 监听插件目录
-reloader.Watch("./plugins")
-
-// 启动监听
-reloader.Start(ctx)
-defer reloader.Stop()
-```
-
-### 版本回滚
-
-```go
-// 获取版本历史
-history := reloader.GetVersionHistory("my-plugin")
-
-// 回滚到指定版本
-err := reloader.Rollback("my-plugin", "1.0.0")
-```
-
-## 健康检查
-
-### 实现健康检查
-
-```go
-type HealthChecker interface {
-    HealthCheck(ctx context.Context) error
-}
-
-func (p *MyPlugin) HealthCheck(ctx context.Context) error {
-    // 检查数据库连接
-    if err := p.db.Ping(); err != nil {
-        return fmt.Errorf("数据库连接失败: %w", err)
-    }
-    return nil
-}
-```
-
-### 检查所有插件
-
-```go
-results := lifecycle.HealthCheckAll(ctx)
-for name, err := range results {
-    if err != nil {
-        log.Printf("插件 %s 不健康: %v", name, err)
-    }
-}
-```
-
-## 插件类型
-
-### LLM Provider 插件
-
-```go
-type LLMProviderPlugin struct {
-    plugin.BasePlugin
-    provider llm.Provider
-}
-
-func (p *LLMProviderPlugin) Init(ctx context.Context, config map[string]any) error {
-    // 初始化 LLM Provider
-    p.provider = newMyProvider(config)
-
-    // 注册到全局
-    llm.RegisterProvider("my-llm", p.provider)
-    return nil
-}
-```
-
-### 工具插件
-
-```go
-type ToolPlugin struct {
-    plugin.BasePlugin
-    tools []tool.Tool
-}
-
-func (p *ToolPlugin) Init(ctx context.Context, config map[string]any) error {
-    // 创建工具
-    p.tools = []tool.Tool{
-        newSearchTool(),
-        newCalculatorTool(),
-    }
-
-    // 注册工具
-    for _, t := range p.tools {
-        tool.Register(t)
-    }
-    return nil
-}
-```
-
-### 中间件插件
-
-```go
-type MiddlewarePlugin struct {
-    plugin.BasePlugin
-}
-
-func (p *MiddlewarePlugin) Init(ctx context.Context, config map[string]any) error {
-    // 注册中间件
-    middleware.Register("my-middleware", func(next agent.AgentHandler) agent.AgentHandler {
-        return func(ctx context.Context, input agent.Input) (agent.Output, error) {
-            // 中间件逻辑
-            return next(ctx, input)
-        }
-    })
-    return nil
-}
-```
+`LoadFromConfig` 会按 `priority` 从小到大处理已启用插件，并完成工厂创建、注册和初始化；启动仍需显式调用 `Start` 或 `StartAll`。
 
 ## 插件清单
 
-使用 YAML 描述插件：
+`PluginManifest` 的 YAML 顶层字段为 `info`、`config`、`config_schema` 和可选的 `hooks`。下面是与当前结构一致的最小清单：
 
 ```yaml
-# manifest.yaml
-name: my-plugin
-version: 1.0.0
-description: 我的自定义插件
-author: Your Name
-
-dependencies:
-  - name: database-plugin
-    version: ">=1.0.0"
+info:
+  name: my-plugin
+  version: 1.0.0
+  type: extension
+  description: My application extension
+  author: Hexagon Team
+  license: Apache-2.0
+  homepage: https://example.com/my-plugin
+  dependencies:
+    - database-plugin
+  tags:
+    - integration
 
 config:
-  schema:
-    type: object
-    properties:
-      apiKey:
-        type: string
-        required: true
-      timeout:
-        type: integer
-        default: 30
+  endpoint: https://service.example.com
 
-hooks:
-  init: scripts/init.sh
-  start: scripts/start.sh
+config_schema:
+  type: object
+  required:
+    - endpoint
+  properties:
+    endpoint:
+      type: string
 ```
 
-## 调试插件
-
-### 日志
+使用 `ParseManifest(data)` 或 `LoadManifest(path)` 解析清单：
 
 ```go
-func (p *MyPlugin) Init(ctx context.Context, config map[string]any) error {
-    log.Printf("[%s] 初始化配置: %+v", p.Name(), config)
-    return nil
+manifest, err := plugin.LoadManifest("plugin.yaml")
+if err != nil {
+    return err
+}
+fmt.Println(manifest.Info.Name)
+```
+
+清单解析只返回结构化元数据，不会注册、初始化或启动插件。
+
+## 依赖管理
+
+### 运行时依赖
+
+参与 `Lifecycle.Start` / `StartAll` 的 `PluginInfo.Dependencies` 应填写已经注册的插件名称，例如 `database-plugin`。被依赖插件必须先进入 `running` 状态。
+
+### 依赖图
+
+`DependencyGraph` 使用 `AddNode` 建图，并通过 `DetectCycle` 和 `TopologicalSort` 检查图结构：
+
+```go
+graph := plugin.NewDependencyGraph()
+graph.AddNode("database-plugin", "1.2.0", nil)
+graph.AddNode("my-plugin", "1.0.0", []plugin.Dependency{
+    {Name: "database-plugin", Version: ">=1.0.0"},
+})
+
+if cycle := graph.DetectCycle(); cycle != nil {
+    return fmt.Errorf("circular dependency: %v", cycle)
+}
+
+graphOrder, err := graph.TopologicalSort()
+if err != nil {
+    return err
+}
+_ = graphOrder
+```
+
+`DependencyResolver.CheckDependencies` 可针对已注册插件校验存在性和版本约束。约束写法为 `name@constraint`，支持 `=`、`>`、`>=`、`<`、`<=`、`~>` 和 `^`：
+
+```go
+dependencyRegistry := plugin.NewRegistry()
+if err := dependencyRegistry.Register(plugin.NewBasePlugin(plugin.PluginInfo{
+    Name:    "database-plugin",
+    Version: "1.2.0",
+    Type:    plugin.PluginTypeExtension,
+})); err != nil {
+    return err
+}
+
+resolver := plugin.NewDependencyResolver(dependencyRegistry)
+err := resolver.CheckDependencies(plugin.PluginInfo{
+    Name:         "my-plugin",
+    Version:      "1.0.0",
+    Dependencies: []string{"database-plugin@>=1.0.0"},
+})
+if err != nil {
+    return err
 }
 ```
 
-### 指标
+版本约束校验与生命周期启动是两个步骤；生命周期按插件名称查找依赖，因此用于 `Start` / `StartAll` 的实际插件元信息应保留纯名称依赖。
+
+## 健康检查
+
+每个插件通过无参数的 `Health()` 返回 `HealthStatus`。`Lifecycle.HealthCheck(ctx)` 汇总所有插件；未运行的插件返回 `unknown`：
 
 ```go
-import "github.com/hexagon-codes/hexagon/observe/metrics"
-
-func (p *MyPlugin) Start(ctx context.Context) error {
-    // 记录启动指标
-    metrics.IncCounter("plugin_starts_total", "plugin", p.Name())
-    return nil
+statuses := lifecycle.HealthCheck(ctx)
+for name, status := range statuses {
+    if status.Status != plugin.HealthStateHealthy {
+        log.Printf("plugin %s is not healthy: %s", name, status.Message)
+    }
 }
 ```
 
-## 最佳实践
+如需周期检查，可在传入可取消的 `context.Context` 后调用 `StartHealthChecker(ctx)`，并在退出时调用 `StopHealthChecker()`。
 
-1. **单一职责**: 每个插件专注一个功能
-2. **优雅降级**: 插件失败不影响主程序
-3. **配置验证**: Init 时验证配置完整性
-4. **资源清理**: Stop 时释放所有资源
-5. **版本管理**: 遵循语义化版本
-6. **文档完善**: 提供清晰的使用说明
+## 实践建议
 
-## 示例项目
-
-完整示例见 `examples/plugins/` 目录：
-
-```
-examples/plugins/
-├── llm-provider/      # LLM Provider 插件示例
-├── tool-plugin/       # 工具插件示例
-├── middleware/        # 中间件插件示例
-└── full-example/      # 完整插件示例
-```
+1. 在 `Init` 中验证配置，错误信息保持明确且可操作。
+2. 在 `Start` 和 `Stop` 中遵循 `context.Context` 的取消与超时。
+3. 只在 `Start` 成功后报告 `healthy`，并在 `HealthStatus.LastCheck` 中记录检查时间。
+4. 对依赖先做存在性、版本和循环校验，再启动插件。
+5. 使用独立 `Registry` 隔离测试，避免全局注册表在测试之间互相影响。
+6. 始终停止已启动的插件，释放连接、goroutine 和其他资源。

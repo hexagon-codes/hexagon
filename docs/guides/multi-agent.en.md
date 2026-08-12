@@ -2,575 +2,404 @@
 
 # Multi-Agent Collaboration Guide
 
-Hexagon provides powerful multi-agent collaboration capabilities, including team cooperation, agent handoffs, and network communication.
+Hexagon currently provides four in-process multi-agent primitives: `Team` for fixed orchestration, `ParallelAgent` for parallel fan-out, `SwarmRunner` for tool-driven agent transfers, and `AgentNetwork` for messaging by agent ID. Use `ConsensusProtocol` to vote across multiple agent answers. For cross-service communication, use the server and client in `agent/a2a`.
 
-## Role System
-
-### Defining a Role
+In this guide, variables such as `researcher`, `writer`, `reviewer`, and `manager` represent `agent.Agent` instances with an LLM already configured. For example:
 
 ```go
-import "github.com/hexagon-codes/hexagon/agent"
-
-role := agent.Role{
-    Name:      "Researcher",
-    Goal:      "Deeply research technical problems and provide detailed analysis",
-    Backstory: "You are an experienced technical researcher, skilled at analyzing complex technical issues.",
-}
-
-researcher := agent.NewBaseAgent(
-    agent.WithRole(role),
+researcher := agent.NewReAct(
+    agent.WithName("researcher"),
+    agent.WithRole(agent.Role{
+        Name:      "Researcher",
+        Goal:      "Collect and verify facts",
+        Backstory: "You are a rigorous technical researcher.",
+    }),
     agent.WithLLM(provider),
 )
 ```
 
-### Role Best Practices
+## Choosing a Collaboration Primitive
 
-**A good role definition**:
+| Requirement | Primitive | Key behavior |
+|-------------|-----------|--------------|
+| Fixed order, manager coordination, collaborative aggregation, or round robin | `Team` | Accepts one `agent.Input` and runs members in the configured mode |
+| Send the same input to multiple agents concurrently | `ParallelAgent` | Runs agents concurrently and merges successful results |
+| Let the model choose the next agent | `TransferTo` + `SwarmRunner` | Switches the current agent after the model calls a transfer tool |
+| Send directly by ID or broadcast | `AgentNetwork` | Delivers messages to registered node inboxes or the asynchronous router |
+| Vote across multiple agents | `ConsensusProtocol` | Queries online agents concurrently and calculates a consensus result |
+| Call across processes or languages | `agent/a2a` | HTTP + JSON-RPC task API |
+
+## Team: Fixed Team Orchestration
+
+### Creating and Running a Team
+
+The first argument to `NewTeam` is the team name. Members and execution mode are configured with options. Execution always accepts `agent.Input`: `Query` contains the task text and `Context` carries optional supplemental data.
+
 ```go
-role := agent.Role{
-    Name: "Customer Support Specialist",
-    Goal: "Respond to customer issues quickly and provide professional solutions",
-    Backstory: `You are an experienced customer support specialist with 5 years of experience.
-You are familiar with all company products and services, can quickly pinpoint problems and provide solutions.
-Your communication style is friendly and professional, and you always think from the customer's perspective.`,
+team := agent.NewTeam(
+    "content-team",
+    agent.WithTeamDescription("Research, writing, and review"),
+    agent.WithAgents(researcher, writer, reviewer),
+    agent.WithMode(agent.TeamModeSequential),
+)
+
+output, err := team.Run(ctx, agent.Input{
+    Query: "Write a technical overview of RAG",
+    Context: map[string]any{
+        "audience": "Go developers",
+    },
+})
+if err != nil {
+    return err
+}
+fmt.Println(output.Content)
+```
+
+### The Four Modes
+
+| Mode | Execution semantics | Configuration |
+|------|---------------------|---------------|
+| `TeamModeSequential` | Runs members in order; the previous `Content` becomes the next `Query`, and the previous `Metadata` becomes the next `Context` | Default, or `WithMode` |
+| `TeamModeHierarchical` | The manager produces guidance, each member processes the original task, and the manager summarizes successful results | `WithManager(manager)`, which also selects this mode |
+| `TeamModeCollaborative` | All members process the same input concurrently and successful outputs are concatenated | `WithMode` |
+| `TeamModeRoundRobin` | Cycles through members, feeding each output into the next input; stops when `Metadata["done"]` is `true` or the maximum round count is reached | `WithMode` + `WithMaxRounds` |
+
+Hierarchical mode requires both a manager and at least one member:
+
+```go
+team := agent.NewTeam(
+    "review-team",
+    agent.WithAgents(researcher, writer, reviewer),
+    agent.WithManager(manager),
+)
+
+output, err := team.Run(ctx, agent.Input{Query: "Review this technical proposal"})
+```
+
+`Team` does not have separate parallel or consensus modes. Use `ParallelAgent` for fan-out and `ConsensusProtocol` for voting.
+
+## ParallelAgent: Parallel Fan-Out
+
+`ParallelAgent` sends the same input to all child agents concurrently. Its default merge function concatenates non-empty `Content` in member order. If some children fail, it still returns the successful results and records `failed` and `errors` in `Output.Metadata`. It returns an error only when every child fails.
+
+```go
+parallel := agent.NewParallelAgent(
+    "independent-review",
+    []agent.Agent{securityReviewer, apiReviewer, testReviewer},
+    agent.WithMaxParallel(2),
+)
+
+output, err := parallel.Run(ctx, agent.Input{
+    Query: "Independently review this API change",
+})
+if err != nil {
+    return err
+}
+
+failed, _ := output.Metadata["failed"].(int)
+fmt.Printf("failed=%d\n%s\n", failed, output.Content)
+```
+
+Pass `WithMergeFunc` when the results require custom aggregation:
+
+```go
+parallel := agent.NewParallelAgent(
+    "review-summary",
+    []agent.Agent{securityReviewer, apiReviewer},
+    agent.WithMergeFunc(func(outputs []agent.Output) agent.Output {
+        parts := make([]string, 0, len(outputs))
+        for _, output := range outputs {
+            if output.Content != "" {
+                parts = append(parts, output.Content)
+            }
+        }
+        return agent.Output{Content: strings.Join(parts, "\n---\n")}
+    }),
+)
+```
+
+## TransferTo and SwarmRunner: Model-Driven Transfers
+
+`TransferTo(target)` creates a real LLM tool. After it is added to the current agent's tools, the model can call it with `message`, `reason`, and an optional `context`. `SwarmRunner` reads the transfer from the output's tool-call records, passes `message` and `context` as the target agent's next input, and continues execution.
+
+```go
+billing := agent.NewReAct(
+    agent.WithName("billing"),
+    agent.WithDescription("Handle billing questions"),
+    agent.WithLLM(provider),
+)
+
+frontDesk := agent.NewReAct(
+    agent.WithName("front-desk"),
+    agent.WithDescription("Identify the user's request"),
+    agent.WithLLM(provider),
+    agent.WithTools(agent.TransferTo(billing)),
+)
+
+runner := agent.NewSwarmRunner(frontDesk)
+runner.MaxHandoffs = 4
+
+output, err := runner.Run(ctx, agent.Input{
+    Query: "Explain the duplicate charge on this month's bill",
+})
+if err != nil {
+    return err
+}
+fmt.Println(output.Content)
+```
+
+Registering the transfer tool does not trigger a transfer by itself. A `Handoff` appears only when the current agent's model actually calls the tool. Exceeding `MaxHandoffs` returns an error.
+
+## AgentNetwork: In-Process Messaging
+
+### Registration and Direct Sending
+
+Create a network and register agents before sending. Registering the same agent ID twice returns an error.
+
+```go
+network := agent.NewAgentNetwork(
+    "review-network",
+    agent.WithNetworkTopology(agent.TopologyMesh),
+    agent.WithNetworkInboxSize(128),
+)
+
+if err := network.Register(sender); err != nil {
+    return err
+}
+if err := network.Register(receiver); err != nil {
+    return err
 }
 ```
 
-**Key points**:
-- Name: Clear and descriptive role name
-- Goal: Specific, measurable objective
-- Backstory: Rich background story to enhance the role's persona
-
-## Team Collaboration
-
-### Work Modes
-
-#### 1. Sequential Mode
-
-Agents execute tasks one after another in order.
+`RegisterHandler` binds a handler to a message `Topic`. The convenience message created by `SendTo` has an empty topic. To process it through a handler, register the `""` topic and start the network router.
 
 ```go
-team := agent.NewTeam(
-    agent.WithTeamName("research-team"),
-    agent.WithTeamMode(agent.TeamModeSequential),
-    agent.WithTeamAgents(researcher, writer, reviewer),
-)
-
-result, _ := team.Run(ctx, agent.TeamInput{
-    Task: "Research and write a technical article about RAG",
+network.RegisterHandler("", func(
+    ctx context.Context,
+    msg *agent.NetworkMessage,
+) (*agent.NetworkMessage, error) {
+    fmt.Printf("%s -> %s: %v\n", msg.From, msg.To, msg.Content)
+    return nil, nil
 })
+
+networkCtx, stopNetwork := context.WithCancel(context.Background())
+defer stopNetwork()
+
+if err := network.Start(networkCtx); err != nil {
+    return err
+}
+defer network.Stop()
+
+if err := network.SendTo(
+    ctx,
+    sender.ID(),
+    receiver.ID(),
+    "Review this result",
+); err != nil {
+    return err
+}
 ```
 
-**Use case**: Pipeline-style tasks, e.g., Research → Write → Review
+After the network starts, a successful `SendTo` means that the message entered the asynchronous router queue; it does not mean that the handler has finished. Before the network starts, the message is delivered directly to the target node's `Inbox` and registered handlers are not invoked.
 
-#### 2. Hierarchical Mode
+### Broadcast
 
-A Manager Agent coordinates the other agents.
+`Broadcast` directly delivers a copy to every registered node except the sender:
 
 ```go
-manager := agent.NewBaseAgent(
-    agent.WithRole(agent.Role{
-        Name: "Project Manager",
-        Goal: "Coordinate the team to complete the project",
-    }),
-)
-
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.TeamModeHierarchical),
-    agent.WithTeamManager(manager),
-    agent.WithTeamAgents(researcher, developer, tester),
-)
+if err := network.Broadcast(
+    ctx,
+    sender.ID(),
+    "Start a new review round",
+); err != nil {
+    return err
+}
 ```
 
-**Use case**: Dynamic task assignment and coordination
+Broadcasts use node inboxes and do not pass through `RegisterHandler`. Sending may fail when an inbox is full or closed, a node is offline, or the context is canceled.
 
-#### 3. Consensus Mode
+## ConsensusProtocol: Voting
 
-All agents vote to reach a consensus.
-
-```go
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.TeamModeConsensus),
-    agent.WithTeamAgents(expert1, expert2, expert3),
-    agent.WithConsensusThreshold(0.67), // passes with 67% agreement
-)
-```
-
-**Use case**: Decision-making tasks that require multiple expert opinions
-
-#### 4. Parallel Mode
-
-Agents run in parallel and results are merged at the end.
+`ConsensusProtocol` uses registered, online agents in the network as voters. `Propose` calls those agents concurrently. It does not depend on `AgentNetwork.Start`, because voting calls registered agents directly.
 
 ```go
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.TeamModeParallel),
-    agent.WithTeamAgents(agent1, agent2, agent3),
-)
-```
-
-**Use case**: Independent subtasks that can be processed concurrently
-
-### Complete Example
-
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-
-    "github.com/hexagon-codes/hexagon/agent"
-    "github.com/hexagon-codes/ai-core/llm/openai"
-)
-
-func main() {
-    provider := openai.New("your-api-key")
-
-    // Define agents
-    researcher := agent.NewBaseAgent(
-        agent.WithName("researcher"),
-        agent.WithRole(agent.Role{
-            Name:      "Researcher",
-            Goal:      "Research deeply and gather information",
-            Backstory: "You are a technical research expert",
-        }),
-        agent.WithLLM(provider),
-    )
-
-    writer := agent.NewBaseAgent(
-        agent.WithName("writer"),
-        agent.WithRole(agent.Role{
-            Name:      "Writer",
-            Goal:      "Organize research findings into an article",
-            Backstory: "You are a professional technical writer",
-        }),
-        agent.WithLLM(provider),
-    )
-
-    reviewer := agent.NewBaseAgent(
-        agent.WithName("reviewer"),
-        agent.WithRole(agent.Role{
-            Name:      "Reviewer",
-            Goal:      "Review the quality of the article",
-            Backstory: "You are a senior editor",
-        }),
-        agent.WithLLM(provider),
-    )
-
-    // Create team
-    team := agent.NewTeam(
-        agent.WithTeamName("content-team"),
-        agent.WithTeamMode(agent.TeamModeSequential),
-        agent.WithTeamAgents(researcher, writer, reviewer),
-    )
-
-    // Execute task
-    ctx := context.Background()
-    result, err := team.Run(ctx, agent.TeamInput{
-        Task: "Write a technical article about AI Agents",
-    })
-
-    if err != nil {
-        panic(err)
+network := agent.NewAgentNetwork("architecture-vote")
+for _, voter := range []agent.Agent{expertA, expertB, expertC} {
+    if err := network.Register(voter); err != nil {
+        return err
     }
+}
 
-    fmt.Println(result.Output)
+protocol := agent.NewConsensusProtocol(
+    network,
+    agent.WithConsensusStrategy(agent.ConsensusMajority),
+    agent.WithConsensusThreshold(2.0/3.0),
+    agent.WithMinParticipation(2.0/3.0),
+    agent.WithConsensusTimeout(15*time.Second),
+)
+
+result, err := protocol.Propose(
+    ctx,
+    "Should this architecture proposal be accepted?",
+    []any{"accept", "reject"},
+)
+if err != nil {
+    return err
+}
+
+if !result.Reached {
+    fmt.Printf("no consensus: %s\n", result.Reason)
+} else {
+    fmt.Printf("decision=%v confidence=%.2f\n", result.Decision, result.Confidence)
 }
 ```
 
-## Agent Handoff
+The vote value is derived by exact or substring matching between each agent response and the available options. A timeout or individual agent failure reduces participation. Always inspect `Reached`, `Participation`, and `Reason` rather than reading only `Decision`.
 
-Agents can hand off tasks to one another.
+## StateManager: Four State Layers
 
-### Basic Handoff
-
-```go
-// Agent A executes a task and hands it off to Agent B
-handoff := agent.NewHandoff(
-    agent.WithHandoffFrom(agentA),
-    agent.WithHandoffTo(agentB),
-    agent.WithHandoffCondition(func(result agent.Output) bool {
-        // Hand off when the condition is met
-        return result.Status == "need_review"
-    }),
-)
-
-result, _ := handoff.Execute(ctx, input)
-```
-
-### Routed Handoff
-
-Dynamically select the handoff target based on results.
+`StateManager` provides Turn, Session, Agent, and Global state. It differs from `agent.Input.Context`: `Input.Context` is supplemental data for one call, while the state manager can retain values across turns, create snapshots, and restore them.
 
 ```go
-router := agent.NewRouter(
-    agent.WithRoutes(map[string]agent.Agent{
-        "technical": techAgent,
-        "business":  bizAgent,
-        "general":   generalAgent,
-    }),
-    agent.WithRouteDecision(func(ctx context.Context, input agent.Input) (string, error) {
-        // Use LLM to decide routing
-        // Returns "technical", "business", or "general"
-    }),
-)
-```
+global := agent.NewGlobalState()
+state := agent.NewStateManager("session-42", global)
 
-### Loop Handoff
+state.Turn().Set("draft", "v1")
+state.Session().Set("user_id", "u-123")
+state.Agent().Set("preferred_style", "concise")
+state.Global().Set("release", "v0.6.0")
 
-Multiple agents collaborate in a loop until completion.
+if userID, ok := state.Session().Get("user_id"); ok {
+    fmt.Println(userID)
+}
 
-```go
-loop := agent.NewHandoffLoop(
-    agent.WithLoopAgents(coder, reviewer, tester),
-    agent.WithMaxIterations(5),
-    agent.WithStopCondition(func(result agent.Output) bool {
-        return result.Metadata["tests_passed"] == true
-    }),
-)
-```
+snapshot := state.Snapshot()
+state.NewTurn()
 
-## Agent Network Communication
+if err := state.Restore(snapshot); err != nil {
+    return err
+}
 
-### Point-to-Point Communication
-
-```go
-// Agent A sends a message to Agent B
-agentA.Send(ctx, agentB, agent.Message{
-    Type:    "request",
-    Content: "Please help me analyze this problem",
-    Data: map[string]any{
-        "problem": problem,
-    },
-})
-
-// Agent B receives messages
-msgChan := agentB.Receive(ctx)
-for msg := range msgChan {
-    // Process the message
-    response := processMessage(msg)
-
-    // Reply
-    agentB.Send(ctx, agentA, response)
+ctx = agent.ContextWithStateManager(ctx, state)
+current := agent.StateManagerFromContext(ctx)
+if current == nil {
+    return errors.New("state manager missing")
 }
 ```
 
-### Broadcast Communication
+Explicitly reuse the same `GlobalState` when multiple state managers need to share application-level data. `NewTurn` resets Turn state and increments the Session turn count.
+
+## Timeouts and Cancellation
+
+`Team`, `ParallelAgent`, `SwarmRunner`, network sends, and the A2A client all accept a caller-provided `context.Context`. Set a deadline at the entry point and preserve normal Go context error checks:
 
 ```go
-network := agent.NewNetwork(
-    agent.WithNetworkAgents(agent1, agent2, agent3),
-)
+runCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+defer cancel()
 
-// Broadcast a message to all agents
-network.Broadcast(ctx, agent.Message{
-    Type:    "announcement",
-    Content: "Starting new task",
+output, err := team.Run(runCtx, agent.Input{Query: "Complete this review round"})
+if err != nil {
+    switch {
+    case errors.Is(err, context.DeadlineExceeded):
+        return fmt.Errorf("team timed out: %w", err)
+    case errors.Is(err, context.Canceled):
+        return fmt.Errorf("team canceled: %w", err)
+    default:
+        return err
+    }
+}
+_ = output
+```
+
+Underlying agents and providers must also honor the context for timeouts to stop real work promptly. `WithConsensusTimeout` separately limits vote collection, but a voting timeout normally appears as insufficient participation rather than a `Propose` error.
+
+## A2A: Cross-Service Task Calls
+
+`agent/a2a` provides a standalone server and client. The A2A client is not an `agent.Agent` adapter and cannot be added directly to a `Team`. Applications use `a2a.Client` to query the Agent Card, submit tasks, and query task state.
+
+### Starting a Server
+
+```go
+card := &a2a.AgentCard{
+    Name:               "remote-reviewer",
+    Description:        "Remote review service",
+    URL:                "http://localhost:8080",
+    Version:            "0.1.0",
+    DefaultInputModes:  []string{"text"},
+    DefaultOutputModes: []string{"text"},
+}
+
+server := a2a.NewServer(card, a2a.NewEchoHandler())
+if err := server.Start(":8080"); err != nil {
+    log.Fatal(err)
+}
+```
+
+`Start` blocks until the server is shut down or listening fails. If application lifecycle code starts it in a separate goroutine, shut it down with a deadline-bound `server.Stop(ctx)` during process exit.
+
+### Querying and Submitting Tasks
+
+```go
+client := a2a.NewClient(
+    "http://localhost:8080",
+    a2a.WithTimeout(10*time.Second),
+)
+defer client.Close()
+
+queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+defer cancel()
+
+card, err := client.GetAgentCard(queryCtx)
+if err != nil {
+    return err
+}
+fmt.Println(card.Name)
+
+task, err := client.SendMessage(queryCtx, &a2a.SendMessageRequest{
+    Message: a2a.NewUserMessage("Review this proposal"),
 })
+if err != nil {
+    return err
+}
+
+stored, err := client.GetTask(queryCtx, task.ID)
+if err != nil {
+    return err
+}
+fmt.Println(stored.Status.State)
 ```
 
-### Pub/Sub Pattern
+### Error Handling
+
+A2A JSON-RPC errors implement `error`. Use `GetA2AError` to read protocol error codes. Network and context failures remain regular Go error chains:
 
 ```go
-// Agents subscribe to a specific topic
-network.Subscribe(agent1, "data_updated")
-network.Subscribe(agent2, "data_updated")
-
-// Publish a message
-network.Publish(ctx, "data_updated", agent.Message{
-    Content: "Data has been updated",
-    Data: map[string]any{
-        "version": "1.2",
-    },
-})
+_, err := client.GetTask(queryCtx, "missing-task")
+if err != nil {
+    if protocolErr := a2a.GetA2AError(err); protocolErr != nil {
+        if protocolErr.Code == a2a.CodeTaskNotFound {
+            return fmt.Errorf("remote task not found: %w", err)
+        }
+        return fmt.Errorf("A2A error %d: %w", protocolErr.Code, err)
+    }
+    if errors.Is(err, context.DeadlineExceeded) {
+        return fmt.Errorf("A2A query timed out: %w", err)
+    }
+    return err
+}
 ```
 
-## Consensus Mechanism
-
-Multiple agents negotiate to reach a consensus.
-
-### Voting Consensus
-
-```go
-consensus := agent.NewConsensus(
-    agent.WithConsensusAgents(agent1, agent2, agent3),
-    agent.WithConsensusStrategy(agent.ConsensusStrategyVoting),
-    agent.WithConsensusThreshold(0.67), // requires 67% agreement
-)
-
-decision, _ := consensus.Decide(ctx, agent.ConsensusInput{
-    Proposal: "Should we adopt the new technical solution?",
-    Options:  []string{"Agree", "Reject", "Need more information"},
-})
-
-fmt.Println(decision.Result) // "Agree" / "Reject" / "Need more information"
-```
-
-### Weighted Voting
-
-```go
-consensus := agent.NewConsensus(
-    agent.WithConsensusWeights(map[string]float64{
-        "senior_expert": 2.0, // senior expert weight: 2
-        "junior_expert": 1.0, // junior expert weight: 1
-    }),
-)
-```
-
-## State Management
-
-### Shared State
-
-```go
-// Global state
-globalState := agent.NewGlobalState()
-globalState.Set("project_status", "in_progress")
-
-// Agents access the global state
-status := globalState.Get("project_status")
-```
-
-### Session State
-
-```go
-// Session-level state
-session := agent.NewSession()
-session.Set("user_id", "123")
-session.Set("conversation_history", []string{})
-
-// Agent uses the session
-result, _ := agentA.RunWithSession(ctx, input, session)
-```
-
-## Best Practices
-
-### 1. Clear Role Division
-
-```go
-// ✅ Good practice
-researcher := agent.NewBaseAgent(
-    agent.WithRole(agent.Role{
-        Name: "Data Analyst",
-        Goal: "Analyze data and generate reports",
-    }),
-)
-
-writer := agent.NewBaseAgent(
-    agent.WithRole(agent.Role{
-        Name: "Technical Writer",
-        Goal: "Translate analysis results into accessible articles",
-    }),
-)
-
-// ❌ Bad practice
-generic := agent.NewBaseAgent(
-    agent.WithRole(agent.Role{
-        Name: "Assistant",
-        Goal: "Do various things",
-    }),
-)
-```
-
-### 2. Appropriate Team Size
-
-- 2–5 agents: Optimal size
-- 5–10 agents: Requires stronger coordination
-- 10+ agents: Consider hierarchical or grouped structures
-
-### 3. Avoid Circular Dependencies
-
-```go
-// ❌ Bad practice
-agentA → agentB → agentC → agentA // circular
-
-// ✅ Good practice
-agentA → agentB → agentC // unidirectional
-```
-
-### 4. Timeouts and Retries
-
-```go
-team := agent.NewTeam(
-    agent.WithTeamTimeout(5 * time.Minute),
-    agent.WithTeamRetryPolicy(&agent.RetryPolicy{
-        MaxRetries: 3,
-        BackoffStrategy: agent.ExponentialBackoff,
-    }),
-)
-```
-
-### 5. Monitoring and Observability
-
-```go
-import "github.com/hexagon-codes/hexagon/observe"
-
-// Add observers to the team
-team.OnAgentStart(func(agentName string) {
-    fmt.Printf("Agent %s started\n", agentName)
-})
-
-team.OnAgentComplete(func(agentName string, result agent.Output) {
-    fmt.Printf("Agent %s completed\n", agentName)
-})
-
-team.OnAgentError(func(agentName string, err error) {
-    fmt.Printf("Agent %s error: %v\n", agentName, err)
-})
-```
-
-## Real-World Examples
-
-### Example 1: Content Creation Team
-
-```go
-// Researcher → Writer → Reviewer → Publisher
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.TeamModeSequential),
-    agent.WithTeamAgents(
-        newResearcher(),
-        newWriter(),
-        newReviewer(),
-        newPublisher(),
-    ),
-)
-```
-
-### Example 2: Customer Service System
-
-```go
-// A router agent dispatches to specialist agents based on issue type
-router := agent.NewRouter(
-    agent.WithRoutes(map[string]agent.Agent{
-        "technical_support": techAgent,
-        "billing":           billingAgent,
-        "general":           generalAgent,
-    }),
-)
-```
-
-### Example 3: Code Review
-
-```go
-// Multiple reviewers review in parallel and reach a consensus
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.TeamModeConsensus),
-    agent.WithTeamAgents(
-        seniorReviewer1,
-        seniorReviewer2,
-        juniorReviewer,
-    ),
-    agent.WithConsensusThreshold(0.67),
-)
-```
-
-## Debugging Tips
-
-```go
-// Enable team debug mode
-team.SetDebug(true)
-
-// Observe agent interactions
-team.OnMessage(func(from, to string, msg agent.Message) {
-    fmt.Printf("%s → %s: %s\n", from, to, msg.Content)
-})
-
-// Observe the decision process
-consensus.OnVote(func(agent string, vote string) {
-    fmt.Printf("%s voted: %s\n", agent, vote)
-})
-```
-
-## A2A Protocol: Cross-Framework Agent Collaboration
-
-Hexagon supports Google's A2A (Agent-to-Agent) protocol, enabling your agents to communicate in a standardized way with agents built on other frameworks or in other languages.
-
-### What Is the A2A Protocol?
-
-A2A is an open protocol that defines a standard way for AI agents to communicate:
-
-- **Agent Card**: Describes agent capabilities (`.well-known/agent-card.json`)
-- **Task**: Task lifecycle management (submit → execute → complete)
-- **Message**: Multi-modal messages (text, files, data)
-- **Streaming**: Real-time streaming responses
-- **Push Notification**: Task status push notifications
-
-### A2A vs. Hexagon Multi-Agent
-
-| Scenario | Approach |
-|----------|----------|
-| Same-process agent collaboration | Use Team, Network, Handoff |
-| Cross-service agent collaboration | Use the A2A protocol |
-| Mixed scenarios | Combine both |
-
-### Exposing an Agent as an A2A Service
-
-```go
-import (
-    "github.com/hexagon-codes/hexagon/agent"
-    "github.com/hexagon-codes/hexagon/agent/a2a"
-)
-
-// Create a Hexagon Agent
-myAgent := agent.NewBaseAgent(
-    agent.WithName("assistant"),
-    agent.WithRole(agent.Role{
-        Name: "Assistant",
-        Goal: "Help users solve problems",
-    }),
-    agent.WithLLM(provider),
-)
-
-// Expose it as an A2A service
-server := a2a.ExposeAgent(myAgent, ":8080")
-defer server.Stop(ctx)
-```
-
-### Connecting to a Remote A2A Agent
-
-```go
-// Connect to a remote A2A agent
-remoteAgent := a2a.ConnectToA2AAgent("http://remote-agent:8080")
-
-// Use it just like a local agent
-result, _ := remoteAgent.Run(ctx, agent.Input{
-    Messages: []llm.Message{{Role: "user", Content: "Hello"}},
-})
-```
-
-### Hybrid Team: Local + Remote Agents
-
-```go
-// Local agent
-localAgent := agent.NewBaseAgent(...)
-
-// Remote A2A agents
-remoteAgent1 := a2a.ConnectToA2AAgent("http://python-agent:8080")
-remoteAgent2 := a2a.ConnectToA2AAgent("http://nodejs-agent:8080")
-
-// Form a hybrid team
-team := agent.NewTeam(
-    agent.WithTeamMode(agent.TeamModeSequential),
-    agent.WithTeamAgents(localAgent, remoteAgent1, remoteAgent2),
-)
-
-// Execute task
-result, _ := team.Run(ctx, agent.TeamInput{
-    Task: "Analyze data and generate a report",
-})
-```
-
-### A2A Use Cases
-
-1. **Cross-language collaboration**: Go agents collaborating with Python/Node.js agents
-2. **Microservice architecture**: Deploying agents as independent services
-3. **Multi-team collaboration**: Integrating agents developed by different teams
-4. **Third-party agents**: Connecting to external A2A-compatible services
-
-> For more details, see the [A2A Protocol Guide](./a2a-protocol.md)
+## Operational Boundaries
+
+- When using `TeamModeRoundRobin`, bound the rounds with `WithMaxRounds`; configure `ParallelAgent` with a resource-appropriate `WithMaxParallel`, and bound `SwarmRunner.MaxHandoffs`.
+- Inspect `Output.Metadata` for partial `ParallelAgent` failures; inspect both `Reached` and `Participation` for consensus results.
+- Register network nodes before sending. Successful asynchronous sending does not mean business processing has completed.
+- Propagate cancellation and deadlines through context instead of creating background work that the caller cannot cancel.
+- At service boundaries, handle A2A protocol errors, HTTP/network errors, and context errors separately.
 
 ## Next Steps
 
-- Learn about [Multi-Agent in Graph Orchestration](./graph-orchestration.md#多-agent-节点)
-- Explore [Performance Optimization](./performance-optimization.md#多-agent-优化)
-- Master [Observability](./observability.md)
+- Read the [A2A Protocol Guide](./a2a-protocol.en.md)
+- Read [Graph Orchestration Best Practices](./graph-orchestration.en.md)
+- Read the [Performance Optimization Guide](./performance-optimization.en.md)
+- Read the [Observability Integration Guide](./observability.en.md)

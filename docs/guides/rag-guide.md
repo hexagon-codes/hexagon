@@ -159,6 +159,38 @@ store, err := qdrant.NewWithOptions(
 )
 ```
 
+#### ai-core v0.2.7 point ID 迁移
+
+ai-core v0.2.7 起，新集合默认使用 `PointIDUUIDv8`，将文档 ID 通过 SHA-256 派生为 UUIDv8。旧版本创建的集合仍使用 legacy hash31 映射，升级时应按以下顺序迁移：
+
+1. 停止对旧集合的写入，保留它用于只读校验和回滚。
+2. 为旧集合单独创建客户端，显式设置 `PointIDLegacyHash31` 和 `WithCreateCollection(false)`。该选项只选择旧 ID 映射，**不会**把客户端变成只读；迁移代码只能调用 `Get`、`Search`、`Count` 等读方法，不得调用 `Add`、`Delete` 或 `Clear`。
+3. 创建不同名称的新集合，使用默认的 `PointIDUUIDv8`（也可显式设置），从权威原始文档或经核验的迁移数据重新索引。校验数量和抽样检索结果后，再把读流量切换到新集合。
+
+```go
+legacyStore, err := qdrant.NewWithOptions(
+    qdrant.WithHost("localhost"),
+    qdrant.WithPort(6333),
+    qdrant.WithCollection("documents_legacy"),
+    qdrant.WithDimension(1536),
+    qdrant.WithCreateCollection(false),
+    qdrant.WithPointIDStrategy(qdrant.PointIDLegacyHash31),
+)
+// legacyStore 仅用于读取和迁移校验，不再写入。
+
+uuidStore, err := qdrant.NewWithOptions(
+    qdrant.WithHost("localhost"),
+    qdrant.WithPort(6333),
+    qdrant.WithCollection("documents_uuidv8"),
+    qdrant.WithDimension(1536),
+    qdrant.WithCreateCollection(true),
+    qdrant.WithPointIDStrategy(qdrant.PointIDUUIDv8), // 新集合的默认策略
+)
+// 使用索引器将完整文档重新写入 uuidStore。
+```
+
+> **禁止混写：** 不要让 `PointIDLegacyHash31` 与 `PointIDUUIDv8` 客户端向同一集合写入。同一逻辑文档 ID 在两种策略下会映射为不同的 Qdrant point ID，可能产生重复或陈旧数据；legacy hash31 还存在确定性碰撞风险。
+
 ### 内存存储（开发测试）
 
 ```go
@@ -339,8 +371,7 @@ import "github.com/hexagon-codes/hexagon/observe/metrics"
 
 collector := metrics.GetHexagonMetrics()
 
-// 检索指标自动记录
-// 也可以手动记录
+// RAG Engine/Pipeline 不会自动写入这组聚合指标；检索完成后需显式记录。
 collector.RecordRetrieval(ctx, "vector_search", docCount, duration)
 
 // 查看统计

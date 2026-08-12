@@ -11,9 +11,9 @@ This guide covers how to develop various types of AI Agents with Hexagon.
 The foundational Agent that provides the simplest LLM invocation capability:
 
 ```go
-agent := agent.NewBaseAgent(
+assistant := agent.NewBaseAgent(
     agent.WithName("assistant"),
-    agent.WithLLM(llm),
+    agent.WithLLM(provider),
     agent.WithSystemPrompt("You are a professional assistant"),
 )
 ```
@@ -23,9 +23,9 @@ agent := agent.NewBaseAgent(
 Implements the ReAct (Reasoning + Acting) pattern, supporting multi-step reasoning and tool calls:
 
 ```go
-agent := agent.NewReAct(
+researcher := agent.NewReAct(
     agent.WithName("researcher"),
-    agent.WithLLM(llm),
+    agent.WithLLM(provider),
     agent.WithTools(searchTool, calculatorTool),
     agent.WithMaxIterations(10),
 )
@@ -37,6 +37,8 @@ There is no dedicated RAG Agent constructor. Instead, use a `rag.Engine` to retr
 
 ```go
 import (
+    "fmt"
+
     "github.com/hexagon-codes/hexagon/rag"
     "github.com/hexagon-codes/hexagon/rag/embedder"
 )
@@ -47,43 +49,114 @@ engine := rag.NewEngine(
     rag.WithEngineEmbedder(embedder.NewOpenAIEmbedder(provider)),
     rag.WithEngineTopK(5),
 )
-_ = engine.Index(ctx, docs)
+if err := engine.Index(ctx, docs); err != nil {
+    return fmt.Errorf("index documents: %w", err)
+}
 
 // Retrieve context and let the Agent answer
-context, _ := engine.Query(ctx, "What is Hexagon?")
-output, _ := myAgent.Run(ctx, agent.Input{
-    Query:   "What is Hexagon?",
-    Context: map[string]any{"knowledge": context},
+question := "What is Hexagon?"
+knowledge, err := engine.Query(ctx, question)
+if err != nil {
+    return fmt.Errorf("query knowledge: %w", err)
+}
+query := fmt.Sprintf(
+    "Use the following knowledge to answer the question.\n\n%s\n\nQuestion: %s",
+    knowledge, question,
+)
+output, err := myAgent.Invoke(ctx, agent.Input{
+    Query: query,
 })
+if err != nil {
+    return fmt.Errorf("invoke agent: %w", err)
+}
+fmt.Println(output.Content)
 ```
+
+`agent.Input.Context` carries metadata for orchestration and callers; the current `BaseAgent` and `ReActAgent` do not automatically add it to LLM messages. RAG context must therefore be folded into `Query` explicitly, as above, or handled by an application-owned prompt builder.
 
 ## Configuration Options
 
 ### Basic Configuration
 
 ```go
+agent.WithID("agent-123")            // 设置稳定 ID（可选）
 agent.WithName("my-agent")           // set name
-agent.WithLLM(llm)                   // set LLM
+agent.WithDescription("...")        // 设置描述
+agent.WithLLM(provider)              // 设置 LLM Provider
 agent.WithSystemPrompt("...")        // set system prompt
 agent.WithMaxIterations(10)          // set max reasoning iterations
-agent.WithVerbose(true)              // enable verbose logging
 ```
 
-> Note: sampling parameters such as temperature and max tokens are configured on the LLM Provider when it is created (e.g. options on `openai.New(...)`), not as Agent options.
+`WithMaxIterations` only affects Agents with an iterative loop, such as `ReActAgent`. `WithVerbose` remains a compatibility configuration field, but the current `BaseAgent`/`ReActAgent` do not emit logs from it; use request-level `LoggingMiddleware` or runtime middleware for logging.
+
+### Provider Configuration
+
+```go
+provider := openai.New(
+    os.Getenv("OPENAI_API_KEY"),
+    openai.WithModel("gpt-4o"),
+    openai.WithRequestTimeout(60*time.Second),
+)
+```
+
+The first argument to `openai.New` is the API key. Its options configure Provider properties such as the default model, base URL, HTTP client, and timeouts. Temperature and max tokens belong to `llm.CompletionRequest`; they are not `openai.New` or Agent options. The current `BaseAgent`/`ReActAgent` do not expose per-request sampling parameters. Call the Provider directly when those parameters are required:
+
+```go
+temperature := 0.2
+response, err := provider.Complete(ctx, llm.CompletionRequest{
+    Messages: []llm.Message{
+        {Role: llm.RoleUser, Content: "Summarize the current task."},
+    },
+    Temperature: &temperature,
+    MaxTokens:   1024,
+})
+if err != nil {
+    return fmt.Errorf("complete request: %w", err)
+}
+fmt.Println(response.Content)
+```
 
 ### Tool Configuration
 
+`tool.NewFunc` builds a tool and its JSON Schema from an input struct. Tool calls are executed by `ReActAgent`; `BaseAgent.Invoke` only performs one ordinary LLM completion and does not execute registered tools.
+
 ```go
-agent.WithTools(tool1, tool2)        // add tools
+type WordCountInput struct {
+    Text string `json:"text" desc:"Text to count" required:"true"`
+}
+
+wordCountTool := tool.NewFunc(
+    "word_count",
+    "Count Unicode characters in text",
+    func(_ context.Context, input WordCountInput) (int, error) {
+        return utf8.RuneCountInString(input.Text), nil
+    },
+)
+
+researcher := agent.NewReAct(
+    agent.WithLLM(provider),
+    agent.WithTools(wordCountTool),
+)
 ```
+
+Both tools and Agents expose their current schemas: `wordCountTool.Schema()` returns the tool input schema, while `researcher.InputSchema()` and `researcher.OutputSchema()` return the Agent input and output schemas. All three are `*schema.Schema` values (the Agent API exposes it through the `core.Schema` alias).
 
 ### Memory Configuration
 
 ```go
-agent.WithMemory(mem)                // add memory (capacity is set when building the memory)
+mem := memory.NewBuffer(20) // 最多保留 20 条 entry
+
+researcher := agent.NewReAct(
+    agent.WithLLM(provider),
+    agent.WithMemory(mem),
+)
 ```
 
+When `WithMemory` is omitted, `BaseAgent`/`ReActAgent` create a Buffer Memory with capacity 100. `ReActAgent` retrieves history before a call and saves the successful turn afterward; `BaseAgent.Invoke` does not currently read or write Memory automatically.
+
 ## Middleware System
+
+Hexagon has two middleware layers: the `agent.AgentMiddleware` in this section wraps one complete Agent request; `runtime.Middleware` is injected with `agent.WithMiddleware` and observes the ReAct LLM/tool lifecycle.
 
 ### Built-in Middleware
 
@@ -120,10 +193,16 @@ chain := agent.NewMiddlewareChain(
 )
 
 // Wrap the Agent
-handler := chain.WrapAgent(myAgent)
+handler := chain.Wrap(func(ctx context.Context, input agent.Input) (agent.Output, error) {
+    return myAgent.Invoke(ctx, input)
+})
 
 // Run
 output, err := handler(ctx, input)
+if err != nil {
+    return fmt.Errorf("handle agent request: %w", err)
+}
+fmt.Println(output.Content)
 ```
 
 ### Preset Combinations
@@ -157,11 +236,34 @@ func MyMiddleware() agent.AgentMiddleware {
 }
 ```
 
+### Runtime Lifecycle Middleware
+
+```go
+lifecycle := runtime.MiddlewareFuncSet{
+    BeforeLLMFunc: func(_ context.Context, state *runtime.State) error {
+        log.Printf("before LLM: messages=%d", len(state.Messages))
+        return nil
+    },
+}
+
+researcher := agent.NewReAct(
+    agent.WithLLM(provider),
+    agent.WithMiddleware(lifecycle),
+)
+```
+
+`runtime.Middleware` also defines `AfterLLM`, `BeforeTool`, `AfterTool`, and `Finalize` lifecycle methods. `runtime.MiddlewareFuncSet` lets an application implement only the callbacks it needs.
+
 ## State Management
 
 ### Four-Layer State
 
+`agent.StateManager` is an explicit application-level state utility. It is not the same object as `WithMemory` or ReAct's internal `runtime.State`. The caller must create and retain it, and call `NewTurn` at the appropriate boundary:
+
 ```go
+global := agent.NewGlobalState()
+state := agent.NewStateManager("session-123", global)
+
 // Turn state: single conversation turn
 state.Turn().Set("key", value)
 
@@ -173,19 +275,25 @@ state.Agent().Set("config", config)
 
 // Global state: cross-Agent shared state
 state.Global().Set("shared_data", data)
+
+// 开始下一轮并清空 Turn 状态
+state.NewTurn()
 ```
 
 ## Role System
 
-Define the role characteristics of an Agent:
+Define the role characteristics of an Agent. `WithRole` stores role metadata, but the current `BaseAgent`/`ReActAgent` do not automatically add it to the system prompt. To make the role affect model behavior, use `Role.ToSystemPrompt()` explicitly:
 
 ```go
-agent := agent.NewBaseAgent(
-    agent.WithRole(agent.Role{
-        Name:      "Researcher",
-        Goal:      "Collect and analyze information",
-        Backstory: "You are an experienced researcher skilled at extracting key insights from complex information",
-    }),
+role := agent.Role{
+    Name:      "Researcher",
+    Goal:      "Collect and analyze information",
+    Backstory: "You are experienced at extracting key insights from complex information.",
+}
+roleAgent := agent.NewBaseAgent(
+    agent.WithLLM(provider),
+    agent.WithRole(role),
+    agent.WithSystemPrompt(role.ToSystemPrompt()),
 )
 ```
 
@@ -193,12 +301,9 @@ agent := agent.NewBaseAgent(
 
 Create a multi-Agent team:
 
-```go
-// Create team members
-researcher := agent.NewReAct(...)
-writer := agent.NewBaseAgent(...)
-reviewer := agent.NewBaseAgent(...)
+Assume `researcher`, `writer`, and `reviewer` are initialized `agent.Agent` values:
 
+```go
 // Create the team (the first argument is the team name)
 team := agent.NewTeam("content-team",
     agent.WithMode(agent.TeamModeSequential),
@@ -206,7 +311,11 @@ team := agent.NewTeam("content-team",
 )
 
 // Run the team task
-output, err := team.Run(ctx, input)
+output, err := team.Invoke(ctx, agent.Input{Query: "Prepare a technical article."})
+if err != nil {
+    return fmt.Errorf("invoke team: %w", err)
+}
+fmt.Println(output.Content)
 ```
 
 ### Team Modes
@@ -216,53 +325,59 @@ output, err := team.Run(ctx, input)
 - `agent.TeamModeCollaborative`: collaborative execution
 - `agent.TeamModeRoundRobin`: round-robin execution
 
+Hierarchical mode requires a Manager through `agent.WithManager(manager)` and still requires members through `agent.WithAgents(...)`. `WithManager` automatically selects `TeamModeHierarchical`.
+
 ## Streaming Output
 
+`Stream` returns `*streamx.StreamReader[agent.Output]`. The current `BaseAgent`, `ReActAgent`, and `Team` complete the call first and then place one complete `Output` in the stream; this is not Provider token-level streaming.
+
 ```go
-import (
-    "errors"
-    "io"
-)
-
-// Get a streaming response: Stream returns *stream.StreamReader[agent.Output]
-reader, err := myAgent.Stream(ctx, input)
-if err != nil {
-    return err
-}
-defer reader.Close()
-
-// Loop over Recv to process streaming data; io.EOF signals the end
-for {
-    chunk, err := reader.Recv()
-    if errors.Is(err, io.EOF) {
-        break
-    }
+func printAgentStream(ctx context.Context, myAgent agent.Agent, input agent.Input) (err error) {
+    reader, err := myAgent.Stream(ctx, input)
     if err != nil {
-        return err
+        return fmt.Errorf("start agent stream: %w", err)
     }
-    fmt.Print(chunk.Content)
+    defer func() {
+        err = errors.Join(err, reader.Close())
+    }()
+
+    for {
+        chunk, recvErr := reader.Recv()
+        if errors.Is(recvErr, io.EOF) {
+            return nil
+        }
+        if recvErr != nil {
+            return fmt.Errorf("receive agent stream: %w", recvErr)
+        }
+        if _, writeErr := fmt.Print(chunk.Content); writeErr != nil {
+            return fmt.Errorf("write agent output: %w", writeErr)
+        }
+    }
 }
 ```
 
 ## Error Handling
 
 ```go
-output, err := myAgent.Run(ctx, input)
+output, err := myAgent.Invoke(ctx, input)
 if err != nil {
-    switch {
-    case errors.Is(err, context.DeadlineExceeded):
-        // handle timeout
-    default:
-        // Errors are wrapped layer by layer with fmt.Errorf("...: %w", err);
-        // use errors.Is / errors.As to unwrap and inspect the root cause
+    if errors.Is(err, context.DeadlineExceeded) {
+        return fmt.Errorf("agent timed out: %w", err)
     }
+    return fmt.Errorf("invoke agent: %w", err)
+}
+if _, err := fmt.Println(output.Content); err != nil {
+    return fmt.Errorf("write agent output: %w", err)
 }
 ```
 
+`Run` is a backward-compatibility method and is deprecated; new code should use `Invoke`. Wrap errors with `%w` so callers can inspect the cause with `errors.Is`/`errors.As`.
+
 ## Best Practices
 
-1. **Use middleware**: always add `RecoverMiddleware` to guard against panics
-2. **Set timeouts**: avoid indefinite blocking
-3. **Add logging**: facilitates debugging and monitoring
-4. **Limit iterations**: set a reasonable `MaxIterations` for `ReActAgent`
-5. **Clean up resources**: use `defer` to ensure resources are released
+1. **Prefer Invoke**: do not make the compatibility method `Run` the primary entry point in new code
+2. **Set timeouts**: bound the complete call with `context.WithTimeout` or request middleware
+3. **Use the right middleware boundary**: request middleware covers recovery, logging, and rate limiting; runtime middleware covers LLM/tool lifecycle events
+4. **Retry carefully**: use request-level retry only when the whole call and all tool side effects are safe to repeat
+5. **Limit iterations**: set a reasonable `MaxIterations` for `ReActAgent` and inspect the output `StopReason`
+6. **Clean up resources**: close each StreamReader and handle the error returned by `Close`

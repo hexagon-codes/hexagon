@@ -100,12 +100,15 @@ func SetDefaultProvider(p llm.Provider)
 
 ```go
 type Agent interface {
-    core.Component[Input, Output]
+    core.Runnable[Input, Output]
     ID() string
     Role() Role
     Tools() []tool.Tool
     Memory() memory.Memory
     LLM() llm.Provider
+
+    // 已弃用：请改用 Invoke。
+    Run(ctx context.Context, input Input) (Output, error)
 }
 ```
 
@@ -122,10 +125,12 @@ type Input struct {
 
 ```go
 type Output struct {
-    Content   string           `json:"content"`              // Final response
-    ToolCalls []ToolCallRecord `json:"tool_calls,omitempty"` // Tool call records
-    Usage     llm.Usage        `json:"usage,omitempty"`      // Token usage statistics
-    Metadata  map[string]any   `json:"metadata,omitempty"`   // Additional metadata
+    Content    string             `json:"content"`               // Final response
+    ToolCalls  []ToolCallRecord   `json:"tool_calls,omitempty"`  // Tool call records
+    Blocks     template.Blocks    `json:"blocks,omitempty"`      // Ordered content blocks
+    Usage      llm.Usage          `json:"usage,omitempty"`       // Token usage statistics
+    StopReason runtime.StopReason `json:"stop_reason,omitempty"` // end_turn / max_turns
+    Metadata   map[string]any     `json:"metadata,omitempty"`    // Additional metadata
 }
 ```
 
@@ -156,11 +161,16 @@ var NewReActAgent = agent.NewReAct
 
 ```go
 type Role struct {
-    Name         string   // Role name
-    Goal         string   // Role objective
-    Backstory    string   // Background story
-    Constraints  []string // Constraints
-    Capabilities []string // Capability list
+    Name            string   `yaml:"name" json:"name"`
+    Title           string   `yaml:"title" json:"title"`
+    Goal            string   `yaml:"goal" json:"goal"`
+    Backstory       string   `yaml:"backstory" json:"backstory"`
+    Expertise       []string `yaml:"expertise" json:"expertise"`
+    Tools           []string `yaml:"tools" json:"tools"`
+    Personality     string   `yaml:"personality" json:"personality"`
+    Constraints     []string `yaml:"constraints" json:"constraints"`
+    AllowDelegation bool     `yaml:"allow_delegation" json:"allow_delegation"`
+    DelegateTo      []string `yaml:"delegate_to" json:"delegate_to"`
 }
 ```
 
@@ -168,15 +178,20 @@ type Role struct {
 
 ```go
 type StateManager interface {
-    Turn() State    // Turn-level state
-    Session() State // Session-level state
-    Agent() State   // Agent-level state
-    Global() State  // Global state
+    Turn() agent.TurnState
+    Session() agent.SessionState
+    Agent() agent.AgentState
+    Global() agent.GlobalState
+    NewTurn() agent.TurnState
+    Snapshot() agent.StateSnapshot
+    Restore(snapshot agent.StateSnapshot) error
 }
 
 var NewStateManager = agent.NewStateManager
 var NewGlobalState = agent.NewGlobalState
 ```
+
+`TurnState`, `SessionState`, `AgentState`, `GlobalState`, and `StateSnapshot` are defined in the `agent` subpackage; the root package does not re-export them.
 
 ---
 
@@ -331,34 +346,43 @@ Create a Qdrant vector store.
 
 ```go
 var NewQdrantStore = qdrant.New
+type QdrantConfig = qdrant.Config
 ```
 
-**Configuration:**
-```go
-type QdrantConfig struct {
-    Host             string // Host address
-    Port             int    // Port
-    Collection       string // Collection name
-    Dimension        int    // Vector dimension
-    APIKey           string // API Key (optional)
-    HTTPS            bool   // Whether to use HTTPS
-    Timeout          time.Duration
-    Distance         DistanceType // Distance metric
-    OnDisk           bool         // Whether to store on disk
-    CreateCollection bool         // Whether to auto-create collection
-}
-```
+`QdrantConfig` aliases `github.com/hexagon-codes/ai-core/store/vector/qdrant.Config`, whose current fields are:
 
-**Option-based creation:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `Host` | `string` | Host address; zero defaults to `localhost` |
+| `Port` | `int` | Port; zero defaults to `6333` |
+| `Collection` | `string` | Collection name |
+| `Dimension` | `int` | Vector dimension |
+| `APIKey` | `string` | API Key (optional) |
+| `HTTPS` | `bool` | Whether to use HTTPS |
+| `Timeout` | `time.Duration` | Request timeout; zero defaults to 30 seconds |
+| `Distance` | `qdrant.Distance` | Distance metric; zero defaults to `DistanceCosine` |
+| `OnDisk` | `bool` | Whether to store vectors on disk |
+| `CreateCollection` | `bool` | Whether to create a missing collection |
+| `PointIDStrategy` | `qdrant.PointIDStrategy` | Persisted point-ID strategy; zero defaults to `PointIDUUIDv8` |
+| `MaxResponseBytes` | `int64` | HTTP response-body limit; zero defaults to 32 MiB |
+
+The root-package Qdrant constructors, configuration, and options are transitional deprecated re-exports. New code should import the ai-core Qdrant subpackage directly; only the direct package exposes the new point-ID strategy and response-body limit options:
+
 ```go
-store, err := hexagon.NewQdrantStoreWithOptions(
-    hexagon.QdrantWithHost("localhost"),
-    hexagon.QdrantWithPort(6333),
-    hexagon.QdrantWithCollection("docs"),
-    hexagon.QdrantWithDimension(1536),
-    hexagon.QdrantWithCreateCollection(true),
+import "github.com/hexagon-codes/ai-core/store/vector/qdrant"
+
+store, err := qdrant.NewWithOptions(
+    qdrant.WithHost("localhost"),
+    qdrant.WithPort(6333),
+    qdrant.WithCollection("docs"),
+    qdrant.WithDimension(1536),
+    qdrant.WithCreateCollection(true),
+    qdrant.WithPointIDStrategy(qdrant.PointIDUUIDv8),
+    qdrant.WithMaxResponseBytes(64<<20),
 )
 ```
+
+> **Existing collection migration:** ai-core v0.2.7 changes the default point ID for new collections from legacy hash31 to a SHA-256-derived UUIDv8. Use `qdrant.WithPointIDStrategy(qdrant.PointIDLegacyHash31)` only while reading and rebuilding an existing collection during a migration window; this strategy is deprecated and must not be used for new writes. Rebuild into a new collection that uses `PointIDUUIDv8`, and do not mix the two strategies in one collection.
 
 #### Additional Vector Stores
 
@@ -583,10 +607,18 @@ type CheckResult struct {
 
 #### NewCostController
 
-Create a cost controller.
+Create a cost controller. The constructor validates the final configuration and returns `(*cost.Controller, error)`.
 
 ```go
 var NewCostController = cost.NewController
+
+controller, err := hexagon.NewCostController(
+    hexagon.WithBudget(10.0),
+    hexagon.WithMaxTokensTotal(100_000),
+)
+if err != nil {
+    return err
+}
 ```
 
 **Options:**
@@ -594,10 +626,24 @@ var NewCostController = cost.NewController
 | Option | Description |
 |--------|-------------|
 | `WithBudget(amount float64)` | Set budget |
-| `WithMaxTokensPerRequest(n int)` | Per-request token limit |
-| `WithMaxTokensPerSession(n int)` | Per-session token limit |
-| `WithMaxTokensTotal(n int)` | Total token limit |
+| `WithMaxTokensPerRequest(n int64)` | Per-request token limit; zero means unlimited |
+| `WithMaxTokensTotal(n int64)` | Total token limit; zero means unlimited |
 | `WithRequestsPerMinute(n int)` | RPM limit |
+
+The root package transitionally re-exports only these four options. The complete API is in `github.com/hexagon-codes/hexagon/security/cost` and also provides custom-pricing and limit-callback options. Invalid configuration returns an error recognizable with `errors.Is(err, cost.ErrInvalidControllerConfig)`.
+
+```go
+pricing := cost.DefaultPricing()
+```
+
+Each call to `cost.DefaultPricing()` returns an independent snapshot; mutating the returned map does not change the defaults of later controllers.
+
+**Budget and usage semantics:**
+
+- `Controller.BudgetCostFunc()` only reads one run's `runtime.State.Usage` and estimates its cost. It can be injected into `runtime/middleware.Budget` for per-run checks and does not write the cumulative ledger.
+- `Controller.RecordUsageFunc()` can be injected into `runtime/middleware.CostControl` to write each LLM call to the cross-run cumulative ledger. If the total-token or budget limit would be exceeded, it returns an error without recording the usage.
+- When `TokenUsage.TotalTokens` is zero and prompt/completion components are present, their sum is recorded. Aggregate-only usage may provide only `TotalTokens`. If a total and non-zero components are both supplied, they must agree.
+- `RecordUsage` performs its final limit check and ledger update in one critical section. User callbacks run after the controller is unlocked.
 
 ---
 
@@ -644,7 +690,62 @@ span.RecordError(err error)
 span.End()
 ```
 
-### Metrics
+### OpenTelemetry (`observe/otel`)
+
+`observe/otel` directly reuses toolkit's OpenTelemetry implementation and adds Hexagon Hook adapters. Note that `otel.NewTracer` creates an OpenTelemetry tracer, whereas the root-level `hexagon.NewTracer` creates an in-memory tracer.
+
+```go
+manager := hooks.NewManager()
+tracing, err := otel.SetupTracing(manager, otel.WithTracerServiceName("my-agent"))
+if err != nil {
+    return err
+}
+
+exporter, err := otel.NewOTLPExporter(
+    "https://otel.example.com/v1/traces",
+    otel.WithOTLPBatchSize(512),
+    otel.WithOTLPBatchTimeout(time.Second),
+    otel.WithOTLPMaxQueueSize(4096),
+)
+if err != nil {
+    return err
+}
+if err := tracing.SetExporter(ctx, exporter); err != nil {
+    return err
+}
+defer tracing.Shutdown(context.Background())
+
+ctx = hooks.ContextWithManager(ctx, manager)
+```
+
+`SetExporter` takes ownership of the exporter as soon as it is called. The caller must not use or close that exporter afterward, even when the method returns an error.
+
+**Types re-exported from toolkit:**
+
+| Category | Types |
+|----------|-------|
+| Tracing | `Tracer`, `Config`, `Option`, `Span`, `SpanData`, `SpanEvent` |
+| Export | `Exporter`, `ConsoleExporter`, `OTLPExporter`, `OTLPExporterOption`, `JaegerExporter`, `ZipkinExporter`, `MultiExporter` |
+| Sampling | `Sampler`, `AlwaysSampler`, `NeverSampler`, `ProbabilitySampler`, `RateLimitingSampler` |
+| Propagation | `Propagator`, `Carrier`, `MapCarrier`, `W3CTraceContextPropagator`, `B3Propagator`, `CompositePropagator` |
+
+**Main re-exported functions:**
+
+| Function | Description |
+|----------|-------------|
+| `NewTracer(opts ...Option) *Tracer` | Create an OpenTelemetry tracer |
+| `DefaultConfig() Config` | Return the default configuration |
+| `WithServiceName` / `WithServiceVersion` / `WithEnvironment` / `WithSamplingRate` | Configure a tracer |
+| `NewConsoleExporter(w io.Writer) *ConsoleExporter` | Create a console exporter |
+| `NewOTLPExporter(endpoint string, opts ...OTLPExporterOption) (*OTLPExporter, error)` | Create and validate an OTLP exporter |
+| `WithOTLPHeaders` / `WithOTLPBatchSize` / `WithOTLPBatchTimeout` / `WithOTLPMaxQueueSize` | Configure an OTLP exporter |
+| `NewJaegerExporter` / `NewZipkinExporter` / `NewMultiExporter` | Create other exporters |
+| `NewProbabilitySampler` / `NewRateLimitingSampler` | Create samplers |
+| `NewW3CTraceContextPropagator` / `NewB3Propagator` / `NewCompositePropagator` | Create propagators |
+
+The error sentinels are `ErrTracerShutdown`, `ErrExporterShutdown`, `ErrExporterQueueFull`, `ErrInvalidExporterConfig`, and `ErrInvalidSpan`. The old names `NewOTelTracer`, `DefaultOTelConfig`, `WithEndpoint`, and `WithBatchConfig` are not part of the current wrapper API.
+
+### In-Memory Metrics
 
 #### NewMetrics
 
@@ -669,25 +770,64 @@ m.Gauge(name string, labels ...string).Inc()
 m.Gauge(name string, labels ...string).Dec()
 ```
 
+### Prometheus (`observe/prometheus`)
+
+`observe/prometheus` directly re-exports toolkit's Prometheus implementation:
+
+| Type | Description |
+|------|-------------|
+| `Exporter`, `ExporterOption` | HTTP metrics exporter and its options |
+| `Registry`, `Factory` | Isolated registry and metric factory |
+| `Counter`, `Gauge`, `Histogram`, `Summary` | Prometheus metric types |
+| `MetricsAdapter` | Adapter for toolkit's `observe.Metrics` interface |
+
+| Function | Description |
+|----------|-------------|
+| `NewExporter(opts ...ExporterOption) (*Exporter, error)` | Create an exporter and register the official Go runtime collector |
+| `WithNamespace(namespace string)` / `WithSubsystem(subsystem string)` | Configure metric-name prefixes |
+| `NewRegistry() *Registry` | Create an empty isolated registry |
+| `NewFactory(registry *Registry, namespace, subsystem string) (*Factory, error)` | Create a metric factory |
+| `NewMetricsAdapter(registry *Registry, namespace, subsystem string) (*MetricsAdapter, error)` | Create an adapter for toolkit's metrics interface |
+| `DefaultBuckets() []float64` / `DefaultQuantiles() map[float64]float64` | Return independent copies of the defaults |
+
+```go
+exporter, err := prometheus.NewExporter(
+    prometheus.WithNamespace("hexagon"),
+)
+if err != nil {
+    return err
+}
+http.Handle("/metrics", exporter.Handler())
+```
+
+`prometheus.SetupMetrics(manager, opts...)` registers Hexagon run, tool, LLM, and retrieval Hooks. Despite its name, `SetupMetricsWithExporter(manager)` creates and registers a `*metrics.MemoryMetrics` instance.
+
+> **Pipeline boundary:** the toolkit Registry created by `NewExporter` is not automatically bridged to the Hexagon `observe/metrics.Metrics` instance used by `SetupMetrics`. With the example above, `/metrics` is guaranteed to expose only metrics registered in that exporter Registry (which includes Go runtime metrics by default); it is incorrect to claim that Agent/LLM metrics emitted by the Hooks automatically appear there. For custom Prometheus metrics, register and record them explicitly through the exporter's `Registry()` / `Factory()` APIs.
+
 ---
 
 ## Type Definitions
 
-### Re-exported Types
+### Stable Root-Package Type Aliases
 
 ```go
-// Core types
 type Input = agent.Input
 type Output = agent.Output
 type Tool = tool.Tool
 type Memory = memory.Memory
 type Message = llm.Message
-type Schema = core.Schema
-type Component[I, O any] = core.Component[I, O]
-type Stream[T any] = core.Stream[T]
-
-// Agent types
 type Agent = agent.Agent
+type Provider = llm.Provider
+```
+
+The root package does not re-export `core.Schema`, `core.Component`, or `core.Stream`; import the `core` subpackage directly when those types are needed.
+
+### Deprecated Transitional Type Aliases
+
+The following aliases are defined in the root package's `deprecated.go` only to migrate existing callers. Import their source subpackages directly. They are scheduled for removal in the next major version.
+
+```go
+// Agent 定义
 type Role = agent.Role
 type Team = agent.Team
 type StateManager = agent.StateManager

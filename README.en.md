@@ -4,11 +4,11 @@
 
 <img src=".github/assets/logo.jpg" alt="Hexagon Logo" width="160">
 
-**The All-Around AI Agent Framework for the Go Ecosystem**
+**An AI Agent Framework for Go**
 
-[![Go Reference](https://img.shields.io/badge/Go-1.25.7+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
+[![Go Reference](https://img.shields.io/badge/Go-1.25.12+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen)](https://github.com/hexagon-codes/hexagon/actions)
+[![CI](https://github.com/hexagon-codes/hexagon/actions/workflows/ci.yml/badge.svg)](https://github.com/hexagon-codes/hexagon/actions/workflows/ci.yml)
 
 </div>
 
@@ -16,26 +16,24 @@
 
 ### 📖 About
 
-**Hexagon** takes its name from the Chinese internet term "hexagonal warrior" (六边形战士), symbolizing balanced strength with no weak points.
+**Hexagon** takes its name from the Chinese internet term "hexagonal warrior" (六边形战士), reflecting a focus on balanced development across framework capabilities.
 
-We focus on six core dimensions — **ease of use, performance, extensibility, task orchestration, observability, and security** — striving for balanced excellence across every capability module. Hexagon is the premier enterprise-grade AI Agent development foundation for Go developers.
-
-</p>
+The project covers six dimensions — **ease of use, concurrent execution, extensibility, task orchestration, observability, and security** — and provides framework components for Go developers building AI Agents.
 
 ### 🚀 Key Features
 
-* ⚡ **High Performance** │ Native Go concurrency engine, supporting 100k+ active Agents
-* 🧩 **Ease of Use** │ Declarative API design, build a basic prototype in 3 lines of code
-* 🛡️ **Security** │ Enterprise-grade sandbox isolation with comprehensive access control
-* 🔧 **Extensibility** │ Plugin-based architecture supporting seamless custom component integration
-* 🛠️ **Orchestration** │ Powerful graph orchestration engine for complex multi-level task pipelines
-* 🔍 **Observability** │ Deep OpenTelemetry integration for full end-to-end tracing
+* ⚡ **Concurrent Execution** │ Concurrent task processing built with Go and goroutines
+* 🧩 **Concise APIs** │ Convenience entry points, declarative options, and explicit component interfaces
+* 🛡️ **Security Components** │ Composable Guard, Guardrail, RBAC, and Sandbox components
+* 🔧 **Extension Mechanisms** │ Plugin interfaces and middleware extension points
+* 🛠️ **Task Orchestration** │ Graph, Chain, Workflow, and Planner modules
+* 🔍 **Observability** │ OpenTelemetry tracing, metrics, event streams, and Dev UI integration
 
 ---
 
 ## 🌐 Ecosystem
 
-Hexagon is a complete AI Agent development ecosystem composed of multiple repositories:
+Hexagon works with the following repositories for AI Agent development:
 
 | Repository | Description | Link |
 |-----|------|------|
@@ -43,6 +41,8 @@ Hexagon is a complete AI Agent development ecosystem composed of multiple reposi
 | **ai-core** | AI capability library (LLM/Tool/Memory/Schema) | [github.com/hexagon-codes/ai-core](https://github.com/hexagon-codes/ai-core) |
 | **toolkit** | Go general-purpose toolkit (lang/crypto/net/cache/util) | [github.com/hexagon-codes/toolkit](https://github.com/hexagon-codes/toolkit) |
 | **hexagon-ui** | Dev UI frontend (Vue 3 + TypeScript) | [github.com/hexagon-codes/hexagon-ui](https://github.com/hexagon-codes/hexagon-ui) |
+
+> Current root-module baseline: Go 1.25.12, ai-core v0.2.7, and toolkit v0.3.4. `examples/` is a standalone Go module; its dependency versions are defined by `examples/go.mod` and are not automatically synchronized with the root module.
 
 ### 🧠 ai-core — AI Capability Library
 
@@ -66,7 +66,7 @@ import "github.com/hexagon-codes/ai-core/memory"
 
 ### 🛠️ toolkit — Go General-Purpose Toolkit
 
-A production-grade Go utility package providing language enhancements, cryptography, networking, caching, goroutine pools, and other foundational capabilities:
+A Go utility package providing language enhancements, cryptography, networking, caching, goroutine pools, and other foundational capabilities:
 
 ```go
 import "github.com/hexagon-codes/toolkit/lang/conv"      // type conversion
@@ -123,7 +123,7 @@ export OPENAI_API_KEY=your-api-key
 export DEEPSEEK_API_KEY=your-api-key
 ```
 
-### 🎯 3 Lines to Get Started
+### 🎯 Basic Example
 
 ```go
 package main
@@ -365,7 +365,7 @@ for _, doc := range output.Documents {
 - Document extensions: structured data/tables/entities/relations/validation errors
 - Schema-driven structured extraction
 - LLM extractors: entity/relation extraction
-- Full validation: type/format/range/enum/regex
+- Validation rules: type/format/range/enum/regex
 - Concurrent processing + hook system
 
 ### 🌐 A2A Protocol (Agent-to-Agent)
@@ -399,20 +399,20 @@ for event := range events {
 ```
 
 **Features:**
-- Full A2A protocol implementation (AgentCard/Task/Message/Artifact)
+- A2A data models (AgentCard/Task/Message/Artifact)
 - JSON-RPC 2.0 + SSE streaming responses
 - Multiple authentication methods (Bearer Token/API Key/Basic Auth/RBAC)
 - Agent discovery service (Registry/Static/Remote)
 - Push notification support
-- Seamless bridging with Hexagon Agents
+- Adapters for bridging Hexagon Agents
 
 ## 💡 Design Philosophy
 
-1. **Progressive Complexity** - 3 lines to get started, declarative configuration for intermediate use, graph orchestration for experts
-2. **Convention over Configuration** - Sensible defaults, zero-config runnable
+1. **Progressive Complexity** - Convenience entry points, declarative configuration, and graph orchestration APIs
+2. **Convention over Configuration** - Defaults with explicit configuration options
 3. **Composition over Inheritance** - Small, focused components, flexible composition
 4. **Explicit over Implicit** - Type-safe, compile-time checks
-5. **Production First** - Built-in observability, graceful degradation
+5. **Runtime Support** - Observability and fallback-related components
 
 ## 🏗️ Architecture
 
@@ -490,7 +490,8 @@ hexagon/
 ├── config/             # Configuration management
 ├── evaluate/           # Evaluation system (agenteval/rag/metrics)
 ├── testing/            # Testing utilities (Mock/Record/E2E/Integration)
-├── deploy/             # Deployment configs (Docker Compose/Helm Chart/CI)
+├── .github/workflows/  # CI and release (dependency consistency/race/GitHub Release)
+├── deploy/             # Deployment configs (Docker Compose/Helm Chart)
 ├── examples/           # Example code (standalone module)
 ├── hexagon.go          # Top-level API (core entry symbols)
 └── deprecated.go       # Transitional re-exports (removed in next major version)
@@ -552,27 +553,27 @@ engine := rag.NewEngine(rag.WithStore(store))
 
 | Document | Description |
 |-----|------|
-| [Quick Start](docs/QUICKSTART.md) | Get up and running with Hexagon in 5 minutes |
-| [Architecture Design](docs/DESIGN.md) | Framework design philosophy and architecture |
-| [API Reference](docs/API.md) | Complete API documentation |
-| [Stability Guide](docs/STABILITY.md) | API stability and versioning policy |
-| [Framework Comparison](docs/comparison.md) | Comparison with mainstream frameworks |
+| [Quick Start](docs/QUICKSTART.en.md) | Get up and running with Hexagon in 5 minutes |
+| [Architecture Design](docs/DESIGN.en.md) | Framework design philosophy and architecture |
+| [API Reference](docs/API.en.md) | API documentation |
+| [Stability Guide](docs/STABILITY.en.md) | API stability and versioning policy |
+| [Framework Comparison](docs/comparison.en.md) | Comparison with mainstream frameworks |
 
 ### 📖 Guides
 
 | Guide | Description |
 |-----|------|
-| [Getting Started](docs/guides/getting-started.md) | Build your first Agent from scratch |
-| [Agent Development](docs/guides/agent-guide.md) | Complete Agent development guide |
-| [Advanced Agents](docs/guides/agent-development.md) | Advanced Agent development patterns |
-| [RAG System](docs/guides/rag-guide.md) | Introduction to retrieval-augmented generation |
-| [RAG Integration](docs/guides/rag-integration.md) | Deep integration of the RAG system |
-| [Graph Orchestration](docs/guides/graph-orchestration.md) | Orchestrating complex workflows |
-| [Multi-Agent](docs/guides/multi-agent.md) | Multi-Agent collaboration systems |
-| [Plugin Development](docs/guides/plugin-guide.md) | Plugin system usage guide |
-| [Observability](docs/guides/observability.md) | Tracing, metrics, and logging integration |
-| [Security](docs/guides/security.md) | Security best practices |
-| [Performance Optimization](docs/guides/performance-optimization.md) | Performance tuning guide |
+| [Getting Started](docs/guides/getting-started.en.md) | Build your first Agent from scratch |
+| [Agent Development](docs/guides/agent-guide.en.md) | Agent development guide |
+| [Advanced Agents](docs/guides/agent-development.en.md) | Advanced Agent development patterns |
+| [RAG System](docs/guides/rag-guide.en.md) | Introduction to retrieval-augmented generation |
+| [RAG Integration](docs/guides/rag-integration.en.md) | Deep integration of the RAG system |
+| [Graph Orchestration](docs/guides/graph-orchestration.en.md) | Orchestrating complex workflows |
+| [Multi-Agent](docs/guides/multi-agent.en.md) | Multi-Agent collaboration systems |
+| [Plugin Development](docs/guides/plugin-guide.en.md) | Plugin system usage guide |
+| [Observability](docs/guides/observability.en.md) | Tracing, metrics, and logging integration |
+| [Security](docs/guides/security.en.md) | Security best practices |
+| [Performance Optimization](docs/guides/performance-optimization.en.md) | Performance tuning guide |
 
 ### 💻 Examples
 
@@ -594,28 +595,46 @@ engine := rag.NewEngine(rag.WithStore(store))
 
 A built-in development and debugging interface to inspect Agent execution in real time.
 
-```go
-import "github.com/hexagon-codes/hexagon/observe/devui"
+This example binds only to the local loopback interface and explicitly handles errors returned by `Start` and `Stop`:
 
-// Create DevUI
+```go
+import (
+    "context"
+    "log"
+    "time"
+
+    "github.com/hexagon-codes/hexagon/observe/devui"
+)
+
 ui := devui.New(
-    devui.WithAddr(":8080"),
+    devui.WithAddr("127.0.0.1:8080"),
     devui.WithMaxEvents(1000),
 )
 
-// Start the service
-go ui.Start()
+go func() {
+    if err := ui.Start(); err != nil {
+        log.Printf("DevUI stopped with error: %v", err)
+    }
+}()
 
-// Visit http://localhost:8080
+defer func() {
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    if err := ui.Stop(ctx); err != nil {
+        log.Printf("Failed to stop DevUI: %v", err)
+    }
+}()
 ```
+
+Open <http://127.0.0.1:8080> after the server starts.
 
 **Running the example:**
 
 ```bash
-# Start the backend
-go run examples/devui/main.go
+# Start the backend with the standalone examples module
+(cd examples && GOWORK=off go run ./devui)
 
-# Start the frontend (hexagon-ui)
+# In another terminal, start the external hexagon-ui repository
 cd ../hexagon-ui
 npm install
 npm run dev
@@ -624,41 +643,31 @@ npm run dev
 
 ## 🚢 Deployment
 
-Hexagon provides three deployment options, covering everything from local development to production:
+Hexagon is a Go library and does not include a directly runnable application entry point or an official application image. `deploy/` provides development infrastructure and a Kubernetes integration template for custom application images; it is not a turnkey application deployment.
 
-| Option | Use Case | Command |
-|------|---------|------|
-| Docker Compose (full mode) | Quick demo, standalone deployment | `make up` |
-| Docker Compose (dev mode) | Team development (reusing docker-dev-env) | `make dev-up` |
-| Helm Chart | Kubernetes clusters, production | `make helm-install` |
+### Docker Compose Development Infrastructure
 
-### Docker Quick Start
+Compose starts only Qdrant, Redis, and PostgreSQL. It does not start a Hexagon application or Dev UI:
 
 ```bash
 cd deploy
 cp .env.example .env
-# Edit .env and fill in your LLM API Key
-make up
-
-# Access
-# Main app:  http://localhost:8000
-# Dev UI:    http://localhost:8080
+docker compose up -d
 ```
 
-### Kubernetes / Helm
+### Helm Template for Custom Images
+
+The Helm chart integrates an application image that you build. Set the image and inspect the rendered manifests first, then adapt the command, probes, and configuration to your application:
 
 ```bash
 cd deploy
-make helm-install
-
-# Using external infrastructure
-helm install hexagon helm/hexagon/ \
-  -n hexagon --create-namespace \
-  --set qdrant.enabled=false \
-  --set external.qdrant.url=http://my-qdrant:6333
+helm template hexagon helm/hexagon/ \
+  --set app.image.repository=registry.example.com/your-app \
+  --set app.image.tag=your-tag \
+  --set devui.enabled=false
 ```
 
-See the [Deployment Guide](deploy/README.md) for details.
+See the [Deployment Guide](deploy/README.en.md) for details.
 
 ## 🔨 Development
 
@@ -669,9 +678,15 @@ make lint    # lint
 make fmt     # format
 ```
 
+### CI and Release
+
+- On pushes to `main` and pull requests, CI uses the root module's Go version to run `go mod tidy -diff` and `go test -count=1 -race ./...`.
+- On `v*` tags, the release workflow repeats those checks before creating a GitHub Release in a separate job with write permission.
+- `examples/` is a standalone module and is outside the root module's `./...` test scope; validate example changes separately against `examples/go.mod`.
+
 ## 🤝 Contributing
 
-Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) to learn how to get involved.
+Contributions are welcome! Please read [CONTRIBUTING.en.md](CONTRIBUTING.en.md) to learn how to get involved.
 
 ## 📜 License
 

@@ -159,6 +159,38 @@ store, err := qdrant.NewWithOptions(
 )
 ```
 
+#### Point ID migration for ai-core v0.2.7
+
+Starting with ai-core v0.2.7, new collections default to `PointIDUUIDv8`, which derives UUIDv8 point IDs from document IDs using SHA-256. Collections created by earlier versions still use the legacy hash31 mapping. Migrate them in this order:
+
+1. Stop writes to the existing collection and retain it for read-only verification and rollback.
+2. Create a dedicated client for the existing collection with `PointIDLegacyHash31` and `WithCreateCollection(false)`. This option only selects the old ID mapping; it does **not** make the client read-only. Migration code may call read methods such as `Get`, `Search`, and `Count`, but must not call `Add`, `Delete`, or `Clear`.
+3. Create a differently named collection using the default `PointIDUUIDv8` strategy (or select it explicitly), then reindex from the authoritative source documents or verified migration data. Switch read traffic only after validating counts and sampled retrieval results.
+
+```go
+legacyStore, err := qdrant.NewWithOptions(
+    qdrant.WithHost("localhost"),
+    qdrant.WithPort(6333),
+    qdrant.WithCollection("documents_legacy"),
+    qdrant.WithDimension(1536),
+    qdrant.WithCreateCollection(false),
+    qdrant.WithPointIDStrategy(qdrant.PointIDLegacyHash31),
+)
+// legacyStore 仅用于读取与迁移校验，禁止写入。
+
+uuidStore, err := qdrant.NewWithOptions(
+    qdrant.WithHost("localhost"),
+    qdrant.WithPort(6333),
+    qdrant.WithCollection("documents_uuidv8"),
+    qdrant.WithDimension(1536),
+    qdrant.WithCreateCollection(true),
+    qdrant.WithPointIDStrategy(qdrant.PointIDUUIDv8), // Default for new collections
+)
+// 使用 indexer 将完整文档集写入 uuidStore。
+```
+
+> **Do not mix strategies:** Never let `PointIDLegacyHash31` and `PointIDUUIDv8` clients write to the same collection. The same logical document ID maps to different Qdrant point IDs under the two strategies, which can create duplicate or stale data; legacy hash31 also has deterministic collision risk.
+
 ### In-Memory Store (Development & Testing)
 
 ```go
@@ -339,8 +371,8 @@ import "github.com/hexagon-codes/hexagon/observe/metrics"
 
 collector := metrics.GetHexagonMetrics()
 
-// Retrieval metrics are recorded automatically
-// You can also record them manually
+// RAG Engine/Pipeline 不会自动填充这些聚合指标；
+// 每次检索完成后必须显式记录。
 collector.RecordRetrieval(ctx, "vector_search", docCount, duration)
 
 // View statistics

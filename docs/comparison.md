@@ -1,222 +1,70 @@
 <div align="right">语言: 中文 | <a href="comparison.en.md">English</a></div>
 
-# AI Agent 框架综合对比
+# AI Agent 框架选型参考
 
-本文档对比 Hexagon 与主流 AI Agent 框架的能力差异，帮助开发者选择合适的框架。
+本文档提供 Hexagon、LangChain、LangGraph、LlamaIndex、Eino、Semantic Kernel 与 Spring AI 的客观选型入口。它不做主观排名，也不代替针对实际业务的技术验证。
 
-## 框架概览
+## 阅读边界
 
-| 维度 | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **语言** | **Go** | Python/JS | Python/JS | Python | **Go** | C#/Python | Java |
-| **开发者** | hexagon-codes | LangChain Inc. | LangChain Inc. | LlamaIndex Inc. | 字节跳动 | Microsoft | VMware |
-| **协议** | Apache 2.0 | MIT | MIT | MIT | Apache 2.0 | MIT | Apache 2.0 |
-| **定位** | 全能型 Agent 框架 | LLM 应用框架 | 图编排引擎 | RAG 数据框架 | 流式 AI 框架 | 企业级 AI 编排 | Spring 生态 AI |
-| **生态** | hexagon + ai-core + toolkit | LangSmith + LangServe | LangSmith | LlamaHub | 独立 | Azure 生态 | Spring 生态 |
+- 项目定位、主要实现语言和许可证以各项目的官方仓库为一手来源。
+- Hexagon 能力仅按本仓库当前源码和文档列出；“存在实现”不等于已经满足特定业务的性能、安全或可靠性要求。
+- 本仓库没有覆盖上述框架的统一 benchmark。镜像大小、启动时间、吞吐、延迟、内存、成本和学习时间没有可比测试数据，因此本文不提供数字或排序。
+- 外部项目的功能、版本和支持范围会变化。进入选型或升级阶段时，应重新检查对应官方文档和发布说明。
 
-## 六维能力评分
+> **Hexagon 当前状态**：项目仍处于 v0.x 阶段，API 稳定性按模块划分；具体承诺见 [API 稳定性说明](STABILITY.md)。
 
-Hexagon 聚焦 **易用性、性能、扩展性、任务编排、可观测性、安全性** 六大核心维度：
+## 项目元信息
 
-| 维度 | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| ⚡ **性能** | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| 🧩 **易用性** | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ |
-| 🛡️ **安全性** | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| 🔧 **扩展性** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| 🛠️ **编排力** | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ |
-| 🔍 **可观测** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
+| 项目 | 主要实现 / 运行时 | 官方定位简述 | 许可证 | 一手来源 |
+|------|-----------------|-------------|--------|---------|
+| Hexagon | Go | 本仓库提供 Agent、编排、RAG、运行时、可观测性与安全相关模块 | Apache-2.0 | [官方仓库](https://github.com/hexagon-codes/hexagon) · [许可证](https://github.com/hexagon-codes/hexagon/blob/main/LICENSE) |
+| LangChain | Python；JS/TS 为独立实现 | 用于构建 Agent 和 LLM 应用的框架 | MIT | [官方仓库](https://github.com/langchain-ai/langchain) · [许可证](https://github.com/langchain-ai/langchain/blob/master/LICENSE) |
+| LangGraph | Python；JS/TS 为独立实现 | 面向长时、有状态 Agent 的底层编排框架 | MIT | [官方仓库](https://github.com/langchain-ai/langgraph) · [许可证](https://github.com/langchain-ai/langgraph/blob/main/LICENSE) |
+| LlamaIndex | Python | 用于构建 Agent 应用的数据与文档框架 | MIT | [官方仓库](https://github.com/run-llama/llama_index) · [许可证](https://github.com/run-llama/llama_index/blob/main/LICENSE) |
+| Eino | Go | 遵循 Go 习惯的 LLM 应用开发框架，提供组件、Agent 开发工具和编排 | Apache-2.0 | [官方仓库](https://github.com/cloudwego/eino) · [许可证](https://github.com/cloudwego/eino/blob/main/LICENSE-APACHE) |
+| Semantic Kernel | .NET、Python、Java | 用于构建和编排 Agent 与多 Agent 系统的模型无关 SDK | MIT | [官方仓库](https://github.com/microsoft/semantic-kernel) · [许可证](https://github.com/microsoft/semantic-kernel/blob/main/LICENSE) |
+| Spring AI | Java / Spring | 面向 AI 应用的 Spring 风格 API 与抽象 | Apache-2.0 | [官方仓库](https://github.com/spring-projects/spring-ai) · [许可证](https://github.com/spring-projects/spring-ai/blob/main/LICENSE.txt) |
 
-> **设计目标**：Hexagon 致力于实现各能力模块的均衡卓越，为 Go 开发者打造企业级落地首选的 AI Agent 开发基座。
->
-> **当前状态**：v0.5.0，部分功能仍在完善中。生态系统和社区成熟度相比 LangChain/LlamaIndex 等成熟框架仍有差距。
+表中“官方定位简述”是对项目官方说明的压缩转述，不表示本文对质量、成熟度或适用性的背书。
 
-## 核心特性对比
+## Hexagon 当前源码可证能力
 
-| 特性 | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **统一组件接口** | ✅ Component[I,O] | ✅ Runnable | ✅ | ✅ Component | ✅ Runnable | ✅ Kernel | ✅ |
-| **原生流式处理** | ✅ Stream[T] | ✅ | ✅ | ⚠️ 部分 | ✅ 核心能力 | ✅ | ✅ |
-| **编译时类型安全** | ✅ 泛型 | ❌ 运行时 | ❌ 运行时 | ❌ 运行时 | ✅ | ✅ | ✅ |
-| **图编排引擎** | ✅ 完整 | ⚠️ 基础 | ✅ 核心能力 | ❌ | ✅ Graph | ✅ | ❌ |
-| **检查点/恢复** | ⚠️ 基础 | ❌ | ✅ | ❌ | ⚠️ | ✅ | ❌ |
-| **Human-in-Loop** | ✅ | ⚠️ 手动 | ✅ | ❌ | ⚠️ | ✅ | ⚠️ |
+| 维度 | 当前实现 | 代码依据 |
+|------|---------|---------|
+| 执行抽象 | 泛型 `Runnable[I,O]` 覆盖 Invoke、Stream、Batch、Collect、Transform 与 BatchStream；`Component[I,O]` 为兼容接口 | [`core/runnable.go`](../core/runnable.go) |
+| Agent | ReAct、Team、Swarm、Handoff、顺序/并行/循环 Agent 原语，以及团队共享记忆 | [`agent/`](../agent/) |
+| 编排 | Graph 与 Workflow；Graph 包含流式执行、检查点/恢复、Barrier 和分布式执行相关实现 | [`orchestration/graph/`](../orchestration/graph/) · [`orchestration/workflow/`](../orchestration/workflow/) |
+| RAG | 文档、加载、分割、索引、检索、嵌入和向量存储接口，以及对应子包实现 | [`rag/`](../rag/) |
+| Provider 与基础能力 | LLM、Tool、Memory、Schema、流和 Qdrant 等能力来自固定版本的 ai-core；通用基础原语来自 toolkit | [`go.mod`](../go.mod) · [依赖拓扑](STABILITY.md#依赖稳定性) |
+| 可观测性 | Hook Manager、追踪、指标、OpenTelemetry、Prometheus 和 Dev UI 相关实现 | [`hooks/`](../hooks/) · [`observe/`](../observe/) |
+| 安全与预算 | Guard、PII、RBAC、成本控制、权限中间件，以及工具沙箱相关实现 | [`security/`](../security/) · [`runtime/middleware/`](../runtime/middleware/) · [`tool/sandbox/`](../tool/sandbox/) |
+| 部署材料 | Docker Compose 与 Helm 配置 | [`deploy/`](../deploy/) |
 
-## LLM Provider 支持
+上表只说明代码表面存在。正式采用前仍需用目标模型、数据、工具、权限边界和部署环境进行回归与故障验证。
 
-| Provider | Hexagon (ai-core) | LangChain | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|----------|:-----------------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **OpenAI** | ✅ GPT-4/4o/o1/o3 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **DeepSeek** | ✅ | ✅ | ⚠️ | ✅ | ⚠️ | ⚠️ |
-| **Anthropic** | ✅ Claude | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Google Gemini** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **通义千问** | ✅ | ✅ | ⚠️ | ✅ | ⚠️ | ⚠️ |
-| **豆包 (Ark)** | ✅ | ⚠️ | ❌ | ✅ | ❌ | ❌ |
-| **Ollama** | ✅ 本地模型 | ✅ | ✅ | ✅ | ✅ | ✅ |
+## 客观选型维度
 
-## RAG 能力对比
+| 维度 | 需要回答的问题 | 建议证据 |
+|------|---------------|---------|
+| 团队与运行时 | 团队维护哪种语言和运行时？现有服务、构建和运维体系能否直接接入？ | 最小集成分支、构建记录、依赖清单 |
+| Agent 与编排模型 | 业务需要单 Agent、确定性工作流、动态 Agent，还是多 Agent 协作？状态和控制流如何表达？ | 关键用户场景原型、状态机与失败路径测试 |
+| 持久化与恢复 | 是否需要长任务、检查点、人工介入、幂等恢复或跨进程执行？ | 中断/恢复、重复执行、进程重启和网络故障测试 |
+| 数据与 RAG | 数据源、解析、切分、检索、重排和向量存储的契约是什么？ | 代表性数据集上的召回、正确性、迁移和隔离测试 |
+| 模型与工具 | 必需的模型、结构化输出、流式协议、Tool、MCP 或自定义 Provider 是否有可维护接缝？ | 针对固定版本的 API/协议合同测试 |
+| 可观测与评估 | 是否能关联一次请求中的 Agent、模型、工具、检索和成本？ | Trace、指标、日志、评估样本和故障定位演练 |
+| 安全边界 | 凭证、租户、工具权限、网络访问、沙箱、PII 和审计由哪一层负责？ | 威胁模型、权限矩阵、恶意输入和失效关闭测试 |
+| 部署运维 | 目标环境如何构建、扩缩、升级、回滚和排障？ | 真实制品、启动/关闭、滚动升级和回滚演练 |
+| API 稳定与治理 | 版本策略、弃用期、升级说明、维护责任和依赖更新节奏是否匹配？ | 发布记录、兼容测试、维护流程和升级演练 |
+| 性能与成本 | 目标并发、延迟、吞吐、内存和模型成本预算是什么？ | 同一环境、同一模型、同一负载下自行执行 benchmark |
 
-| 能力 | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **文档加载器** | ✅ 10+ 格式 (含 XLSX/PPTX/OCR) | ✅ 丰富 | - | ✅ 最丰富 | ⚠️ 基础 | ⚠️ | ✅ |
-| **语义分割** | ✅ 7 种分割器 | ✅ | - | ✅ 最强 | ⚠️ | ⚠️ | ⚠️ |
-| **向量存储** | ✅ 8 种 (Qdrant/FAISS/PgVector/Redis/...) | ✅ | - | ✅ | ✅ | ✅ | ✅ |
-| **混合检索** | ✅ Vector+Keyword+HyDE+Adaptive | ✅ | - | ✅ | ⚠️ | ⚠️ | ⚠️ |
-| **重排序** | ✅ | ✅ | - | ✅ | ⚠️ | ❌ | ❌ |
-| **响应合成策略** | ✅ Refine/Compact/Tree | ⚠️ 基础 | - | ✅ 最丰富 | ⚠️ | ⚠️ | ⚠️ |
+## 可比较的 POC 基线
 
-> **注意**：Milvus 向量存储当前为实验性内存模拟实现，生产环境建议使用 Qdrant 或 Chroma。
+为避免把框架差异与模型、网络或数据差异混在一起，建议候选方案使用同一套验证条件：
 
-## 多 Agent 能力对比
+1. 固定模型与版本、API 端点、数据集、工具集合、并发模型和超时预算。
+2. 实现相同的核心旅程，包括正常调用、流式输出、工具失败、取消、重试和恢复。
+3. 记录正确性、P50/P95/P99 延迟、吞吐、峰值内存、模型调用量和失败恢复结果。
+4. 对需要的 RAG、权限、可观测性和部署链路分别建立合同测试，不以演示代码代替验收。
+5. 固定依赖版本并记录复现实验的硬件、操作系统、配置和原始结果。
 
-| 能力 | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **角色系统** | ✅ Role | ❌ | ❌ | ❌ | ❌ | ✅ Persona | ❌ |
-| **团队协作** | ✅ 4种模式 | ❌ | ⚠️ 手动 | ❌ | ⚠️ | ⚠️ | ❌ |
-| **Agent 通信** | ✅ A2A 协议 | ❌ | ✅ 消息传递 | ❌ | ⚠️ | ⚠️ | ❌ |
-| **Handoff 交接** | ✅ | ❌ | ✅ | ❌ | ❌ | ⚠️ | ❌ |
-| **共识机制** | ✅ | ❌ | ⚠️ | ❌ | ❌ | ❌ | ❌ |
-
-**Hexagon 团队协作模式：**
-- Sequential (顺序执行)
-- Hierarchical (层级分发)
-- Collaborative (协作讨论)
-- RoundRobin (轮询执行)
-
-## 可观测性对比
-
-| 能力 | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **OpenTelemetry** | ✅ 原生集成 | ⚠️ 集成 | ⚠️ 集成 | ⚠️ | ✅ | ✅ | ✅ |
-| **Prometheus** | ✅ 原生 | ❌ | ❌ | ❌ | ⚠️ | ⚠️ | ✅ Micrometer |
-| **钩子/回调** | ✅ 4层钩子 | ✅ Callbacks | ✅ | ⚠️ | ✅ Callbacks | ✅ Filters | ⚠️ |
-| **Dev UI** | ✅ 内置免费 | ✅ LangSmith💰 | ✅ LangSmith💰 | ❌ | ❌ | ❌ | ❌ |
-| **全链路追踪** | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ | ✅ | ✅ |
-
-**Hexagon 钩子系统：**
-- RunHook (Agent 执行)
-- ToolHook (工具调用)
-- LLMHook (LLM 调用)
-- RetrieverHook (检索调用)
-
-## 安全防护对比
-
-| 能力 | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **Prompt 注入检测** | ✅ Guard Chain | ⚠️ 第三方 | ⚠️ | ⚠️ | ❌ | ✅ | ⚠️ |
-| **PII 脱敏** | ✅ Luhn 校验 | ⚠️ 第三方 | ⚠️ | ❌ | ❌ | ✅ | ❌ |
-| **RBAC 权限** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ Spring |
-| **成本控制** | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ | ❌ |
-| **沙箱隔离** | ✅ | ⚠️ | ⚠️ | ❌ | ❌ | ⚠️ | ❌ |
-| **审计日志** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
-
-## 部署运维对比
-
-| 特性 | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **镜像大小** | ~20MB | ~500MB+ | ~500MB+ | ~500MB+ | ~30MB | ~200MB+ | ~200MB+ |
-| **启动时间** | <100ms | 2-5s | 2-5s | 2-5s | <100ms | 5-15s | 5-15s |
-| **并发能力** | 100k+ Agent | GIL 限制 | GIL 限制 | GIL 限制 | 100k+ | 线程池 | 线程池 |
-| **单二进制部署** | ✅ (含 Docker/Helm) | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
-| **内存占用** | 低 | 高 | 高 | 高 | 低 | 中 | 中 |
-
-## 开发体验对比
-
-| 特性 | Hexagon | LangChain | LangGraph | LlamaIndex | Eino | Semantic Kernel | Spring AI |
-|------|:-------:|:---------:|:---------:|:----------:|:----:|:---------------:|:---------:|
-| **最简代码** | 3 行 | 15 行 | 30 行 | 10 行 | 10 行 | 20 行 | 15 行 |
-| **学习曲线** | <1 小时 | 4-8 小时 | 8-16 小时 | 2-4 小时 | 2-4 小时 | 4-8 小时 | 2-4 小时 |
-| **类型提示** | ✅ 编译时 | ⚠️ 运行时 | ⚠️ 运行时 | ⚠️ 运行时 | ✅ 编译时 | ✅ 编译时 | ✅ 编译时 |
-| **文档质量** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| **中文文档** | ✅ 原生 | ⚠️ 社区 | ⚠️ 社区 | ⚠️ 社区 | ✅ 原生 | ⚠️ 社区 | ⚠️ 社区 |
-| **生态丰富度** | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-
-## 图例说明
-
-| 符号 | 含义 |
-|:----:|------|
-| ✅ | 完整支持 |
-| ⚠️ | 部分支持 |
-| ❌ | 不支持 |
-| 💰 | 付费功能 |
-| - | 不适用 |
-
-## 适用场景推荐
-
-| 场景 | 首选 | 备选 |
-|------|------|------|
-| **Go 技术栈** | Hexagon | Eino |
-| **Java/Spring 技术栈** | Spring AI | - |
-| **.NET 企业应用** | Semantic Kernel | - |
-| **复杂 RAG 应用** | LlamaIndex | Hexagon |
-| **复杂工作流编排** | LangGraph | Hexagon |
-| **高性能流式处理** | Eino | Hexagon |
-| **快速原型/学习** | LangChain | Eino |
-| **高并发生产环境** | Eino | Hexagon |
-| **企业级安全要求** | Semantic Kernel | Hexagon |
-
-> **说明**：Hexagon 仍处于 beta 阶段，生产环境使用请充分测试。对于关键业务场景，建议先考虑社区成熟的方案。
-
-## Hexagon vs Eino 详细对比
-
-由于 Hexagon 和 Eino 都是 Go 语言 AI Agent 框架，这里做更详细的对比：
-
-| 维度 | Hexagon | Eino |
-|------|---------|------|
-| **设计理念** | 六边形均衡，全能型 | 流式优先，组件化 |
-| **核心接口** | Component[I,O] 泛型接口 | Runnable 接口 |
-| **背景支持** | 开源社区项目 | 字节跳动内部验证 |
-| **成熟度** | Beta 阶段 | 生产级 |
-| **生态系统** | hexagon + ai-core + toolkit + hexagon-ui | 独立仓库 |
-| **图编排** | ✅ 支持 (检查点基础实现) | ✅ 完整支持 |
-| **多 Agent** | ✅ 角色/团队/通信/交接/共识 | ⚠️ 基础支持 |
-| **RAG 能力** | ✅ 完整管道 (加载/分割/检索/重排/合成) | ⚠️ 基础检索 |
-| **安全防护** | ✅ 注入检测/PII/RBAC/成本控制 | ❌ 需自行实现 |
-| **可观测性** | ✅ OTel + Prometheus + Dev UI | ✅ OTel + Callbacks |
-| **国产 LLM** | ✅ 通义/豆包/DeepSeek | ✅ 通义/豆包/DeepSeek |
-| **生产验证** | ⚠️ 待验证 | ✅ 字节内部大规模使用 |
-
-**选择建议**：
-- 需要完整 Agent 能力（多 Agent、RAG、安全、可观测）→ **Hexagon**（请充分测试）
-- 侧重流式处理和生产稳定性 → **Eino**
-- 对稳定性要求高的生产环境 → 建议先评估 **Eino**
-
-## Hexagon 差异化优势
-
-### 🚀 核心特性
-
-* ⚡ **高性能** │ 原生 Go 驱动，极致并发，支持 100k+ 活跃 Agent
-* 🧩 **易用性** │ 声明式 API 设计，3 行代码极速构建基础原型
-* 🛡️ **安全性** │ 企业级沙箱隔离，内置完备的权限管控与防护
-* 🔧 **扩展性** │ 插件化架构，支持高度自定义的组件无缝集成
-* 🛠️ **编排力** │ 强大的图编排引擎，轻松驾驭复杂的多级任务链路
-* 🔍 **可观测** │ 深度集成 OpenTelemetry，实现全链路透明追踪
-
-### 💡 设计理念
-
-1. **渐进式复杂度** - 入门 3 行代码，进阶声明式配置，专家图编排
-2. **约定优于配置** - 合理默认值，零配置可运行
-3. **组合优于继承** - 小而专注的组件，灵活组合
-4. **显式优于隐式** - 类型安全，编译时检查
-5. **生产优先** - 内置可观测性，优雅降级
-
-### 🌐 完整生态系统
-
-| 仓库 | 说明 |
-|-----|------|
-| **hexagon** | AI Agent 框架核心 (编排、RAG、Graph、Hooks) |
-| **ai-core** | AI 基础能力库 (LLM/Tool/Memory/Schema) |
-| **toolkit** | Go 通用工具库 (lang/crypto/net/cache/util) |
-| **hexagon-ui** | Dev UI 前端 (Vue 3 + TypeScript) |
-
-## 技术对标
-
-| 维度 | Hexagon 实现 | 对标方案 |
-|------|-------------|---------|
-| 易用性 | 3 行入门 + 渐进式 API | OpenAI Swarm 极简风格 |
-| 性能 | Go 原生并发 + 零分配流处理 | 字节 Eino 流式架构 |
-| 扩展性 | `Component[I,O]` 统一接口 | LangChain Runnable |
-| 编排 | 图编排 + 多 Agent 协作 | LangGraph |
-| 可观测 | 钩子 + OTel + Prometheus + Dev UI | LangChain Callbacks |
-| 安全 | Guard Chain + RBAC + 成本控制 | Semantic Kernel Filters |
-| RAG | 完整管道 + 多策略合成 | LlamaIndex |
+只有在上述条件一致时，性能数字和选型结论才具有可比性。

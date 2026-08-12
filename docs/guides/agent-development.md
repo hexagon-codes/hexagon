@@ -32,7 +32,7 @@ func main() {
 
     // 运行 Agent
     ctx := context.Background()
-    result, err := myAgent.Run(ctx, agent.Input{
+    result, err := myAgent.Invoke(ctx, agent.Input{
         Query: "你好！",
     })
 
@@ -100,12 +100,12 @@ import (
 )
 
 // 文件操作工具
-fileTools := file.Tools()
+fileTools := file.New(file.DefaultConfig()).All()
 
 // Shell 执行工具
-shellTool := shell.NewShellTool()
+shellTool := shell.New(shell.DefaultConfig()).ExecuteTool()
 
-agent := agent.NewBaseAgent(
+myAgent := agent.NewBaseAgent(
     agent.WithTools(append(fileTools, shellTool)...),
 )
 ```
@@ -166,38 +166,40 @@ myAgent := agent.NewBaseAgent(
 ```yaml
 # agent.yaml
 name: my-agent
+type: react
 role:
   name: 助手
   goal: 帮助用户解决问题
   backstory: 你是一个经验丰富的AI助手
 llm:
   provider: openai
-  model: gpt-4
+  model: gpt-4o
+  api_key: ${OPENAI_API_KEY}
   temperature: 0.7
-tools:
-  - type: file
-    config:
-      allowed_paths: ["/tmp"]
-  - type: shell
-    config:
-      timeout: 30s
+max_iterations: 5
+verbose: false
 memory:
   type: buffer
-  config:
-    max_messages: 10
+  max_size: 10
 ```
 
 ```go
-import "github.com/hexagon-codes/hexagon/config"
+import (
+    "github.com/hexagon-codes/hexagon/agent"
+    "github.com/hexagon-codes/hexagon/config"
+)
 
-// 从配置文件加载
-cfg, err := config.LoadAgentConfig("agent.yaml")
-if err != nil {
-    panic(err)
+func buildAgentFromConfig(path string) (agent.Agent, error) {
+    cfg, err := config.LoadAgentConfig(path)
+    if err != nil {
+        return nil, err
+    }
+
+    return config.NewBuilder().BuildAgent(cfg)
 }
-
-agent, err := cfg.Build()
 ```
+
+`LoadAgentConfig` 只负责解析和展开环境变量；`AgentConfig` 本身没有 `Build` 方法。需要由 `config.Builder.BuildAgent` 显式构造 Agent。默认工具工厂不会凭 YAML 自动创建文件或 Shell 工具；需要这类工具时，请按“使用内置工具”一节显式构造并注入，或提供自定义 `ToolFactory`。
 
 ## 最佳实践
 
@@ -230,7 +232,7 @@ agent, err := cfg.Build()
 ### 3. 错误处理
 
 ```go
-result, err := myAgent.Run(ctx, input)
+result, err := myAgent.Invoke(ctx, input)
 if err != nil {
     switch {
     case errors.Is(err, context.DeadlineExceeded):
@@ -298,14 +300,34 @@ myAgent := agent.NewReAct(
 ### 使用 Dev UI
 
 ```go
-import "github.com/hexagon-codes/hexagon/observe/devui"
+import (
+    "context"
+    "log"
+    "time"
 
-// 启动 Dev UI（监听地址通过 WithAddr 配置，Start() 不接收参数）
-ui := devui.New(devui.WithAddr(":8080"))
-go ui.Start()
+    "github.com/hexagon-codes/hexagon/hooks"
+    "github.com/hexagon-codes/hexagon/observe/devui"
+)
 
-// 将 ui.HookManager() 注册到 Agent 的 Hook 即可推送事件到 Dev UI
+ui := devui.New(devui.WithAddr("127.0.0.1:8080"))
+ctx = hooks.ContextWithManager(ctx, ui.HookManager())
+
+go func() {
+    if err := ui.Start(); err != nil {
+        log.Printf("Dev UI stopped with error: %v", err)
+    }
+}()
+
+defer func() {
+    shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    if err := ui.Stop(shutdownCtx); err != nil {
+        log.Printf("Failed to stop Dev UI: %v", err)
+    }
+}()
 ```
+
+Dev UI 默认和示例都只监听本机回环地址。若改为非回环地址，必须通过 `devui.WithAuthToken` 配置至少 32 个无空白字节的令牌，否则服务会拒绝启动。
 
 ## 下一步
 

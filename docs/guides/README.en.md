@@ -2,133 +2,74 @@
 
 # Hexagon Guides
 
-Welcome to the Hexagon AI Agent framework! This directory contains detailed usage guides and best practices.
+This directory indexes Hexagon guides for getting started, agents, RAG, orchestration, collaboration, plugins, and operations. The guides explain common usage; treat the current source, [`go.mod`](../../go.mod), and tests as the authorities for exported APIs, dependency versions, and actual behavior, respectively.
 
-## Ecosystem
+## Ecosystem and Current Baseline
 
-Hexagon is a complete AI Agent development ecosystem:
+| Module | Role | Current Root-Module Declaration |
+|--------|------|---------------------------------|
+| **hexagon** | AI Agent framework core | Go `1.25.12` |
+| [**ai-core**](https://github.com/hexagon-codes/ai-core) | Core AI capability library | `v0.2.7` |
+| [**toolkit**](https://github.com/hexagon-codes/toolkit) | General-purpose Go toolkit | `v0.3.4` |
 
-| Repository | Description |
-|-----|------|
-| **hexagon** | AI Agent framework core (orchestration, RAG, Graph, Hooks) |
-| **ai-core** | AI capability library (LLM/Tool/Memory/Schema) |
-| **toolkit** | Go general-purpose toolkit (lang/crypto/net/cache/util) |
-| **hexagon-ui** | Dev UI frontend (Vue 3 + TypeScript) |
+This table is a snapshot of the current root module. Treat [`go.mod`](../../go.mod) as the single source of truth for subsequent dependency updates.
+
+### `examples` Module Boundary
+
+[`examples/`](../../examples/) has its own [`examples/go.mod`](../../examples/go.mod) and is not part of the root module's release surface. Running `go build ./...` or `go test ./...` from the repository root does not automatically cover this nested module. Resolve dependencies and verify the examples from their own directory:
+
+```bash
+cd examples
+GOWORK=off go test ./...
+```
+
+`examples/go.mod` manages dependency versions independently and may differ from the root-module baseline. When root dependencies change, decide separately whether to align and verify the examples.
 
 ## Guide Index
 
-### Getting Started
+### Getting Started and Core Capabilities
 
-1. [**Agent Development Guide**](./agent-development.en.md)
-   - Creating your first Agent
-   - Choosing the right Agent type
-   - Adding tools and memory
-   - Configuration management
-   - Best practices
+- [**Getting Started Guide**](./getting-started.en.md): installation, a minimal example, and core concepts.
+- [**Agent Development Guide**](./agent-development.en.md): creating agents, adding tools and memory, configuration, and debugging.
+- [**Agent Capabilities Guide**](./agent-guide.en.md): agent types, middleware, state, teams, and streaming topics.
+- [**RAG Integration Guide**](./rag-integration.en.md): loading, splitting, vector storage, retrieval, reranking, and synthesis.
+- [**RAG User Guide**](./rag-guide.en.md): supplementary reference for RAG components and complete pipelines.
 
-2. [**RAG System Integration Guide**](./rag-integration.en.md)
-   - Document loading and splitting
-   - Embedding generation and storage
-   - Retrieval strategies
-   - Answer synthesis
-   - Performance optimization
+### Orchestration, Collaboration, and Extension
 
-### Advanced Guides
+- [**Graph Orchestration Best Practices**](./graph-orchestration.en.md): conditional branches, parallel execution, resumption, and checkpoints.
+- [**Multi-Agent Collaboration Guide**](./multi-agent.en.md): roles, teams, handoffs, networking, and consensus.
+- [**A2A Protocol Guide**](./a2a-protocol.en.md): A2A clients, servers, authentication, and agent discovery.
+- [**Plugin Development Guide**](./plugin-guide.en.md): plugin registration, lifecycle, dependency resolution, and health checks.
 
-3. [**Multi-Agent Collaboration Guide**](./multi-agent.en.md)
-   - Role system
-   - Team working modes
-   - Agent handoff
-   - Network communication
-   - Consensus mechanism
+### Operations and Quality
 
-4. [**Graph Orchestration Best Practices**](./graph-orchestration.en.md)
-   - Basic graph structure
-   - Conditional branching and loops
-   - Parallel execution
-   - Interrupt and resume
-   - Checkpoint mechanism
+- [**Observability Integration Guide**](./observability.en.md): hook integration, OpenTelemetry, Prometheus, logging, and Dev UI.
+- [**Security Configuration Guide**](./security.en.md): input protection, PII, RBAC, cost controls, and auditing.
+- [**Performance Optimization Guide**](./performance-optimization.en.md): agent, RAG, multi-agent, and runtime optimization guidance.
 
-### Deployment & Operations
+## Deployment Configuration Boundary
 
-5. [**Deployment Guide**](../../deploy/README.md)
-   - Docker Compose full mode (one-click startup)
-   - Docker Compose development mode (connect to docker-dev-env)
-   - Kubernetes / Helm Chart
-   - Infrastructure switching (built-in / external)
+The [deployment configuration guide](../../deploy/README.en.md) covers only two kinds of configuration. They are not three directly runnable application deployment modes:
 
-### Operations Guides
+- **Docker Compose local infrastructure**: starts only Qdrant, Redis, and PostgreSQL; it does not start a Hexagon application or Dev UI.
+- **Helm application-integration template**: integrates a user-built and user-verified application image with Kubernetes. Before installation, replace the images and verify the template's entry-point, port, health-check, and security-context contracts.
 
-6. [**Observability Integration Guide**](./observability.en.md)
-   - Distributed tracing (OpenTelemetry)
-   - Metrics monitoring (Prometheus)
-   - Logging
-   - Dev UI usage
-
-7. [**Security Configuration Guide**](./security.en.md)
-   - Input validation and prompt injection detection
-   - PII detection and redaction
-   - RBAC access control
-   - Cost control
-   - Audit logging
-
-8. [**Performance Optimization Guide**](./performance-optimization.en.md)
-   - Agent optimization
-   - RAG optimization
-   - Multi-Agent optimization
-   - System optimization
-   - Benchmarking
-
-## Quick Navigation
-
-### I want to...
-
-- **Create a simple conversational Agent** → [Agent Development Guide](./agent-development.en.md#quick-start)
-- **Build a knowledge Q&A system** → [RAG System Integration Guide](./rag-integration.en.md#quick-start)
-- **Have multiple agents collaborate on a task** → [Multi-Agent Collaboration Guide](./multi-agent.en.md#team-collaboration)
-- **Implement a complex workflow** → [Graph Orchestration Best Practices](./graph-orchestration.en.md)
-- **Monitor Agent performance** → [Observability Integration Guide](./observability.en.md)
-- **Deploy to Docker / K8s** → [Deployment Guide](../../deploy/README.md)
-- **Secure the system** → [Security Configuration Guide](./security.en.md)
-- **Improve system performance** → [Performance Optimization Guide](./performance-optimization.en.md)
+This repository currently contains no application Dockerfile and publishes no directly deployable application or Dev UI container image. To deploy an application, first build a runnable program with the Hexagon library and produce your own image.
 
 ## Other Resources
 
-- [Quick Start](../QUICKSTART.en.md) - Get up and running in 5 minutes
-- [API Documentation](../API.en.md) - Complete API reference
-- [Design Document](../DESIGN.en.md) - Architecture and design philosophy
-- [Framework Comparison](../comparison.en.md) - How Hexagon compares to mainstream frameworks
-- [Example Code](../../examples/) - Runnable examples
-
-## Learning Paths
-
-### Beginner Path
-
-1. Read [Quick Start](../QUICKSTART.en.md)
-2. Study [Agent Development Guide](./agent-development.en.md)
-3. Try [examples/quickstart](../../examples/quickstart/)
-4. Explore [RAG System Integration Guide](./rag-integration.en.md)
-
-### Advanced Path
-
-1. Master [Multi-Agent Collaboration Guide](./multi-agent.en.md)
-2. Study [Graph Orchestration Best Practices](./graph-orchestration.en.md)
-3. Configure [Observability](./observability.en.md)
-4. Apply [Performance Optimization](./performance-optimization.en.md)
-
-### Production-Ready Path
-
-1. Implement [Security](./security.en.md)
-2. Configure [Observability](./observability.en.md)
-3. Optimize [Performance](./performance-optimization.en.md)
-4. Establish monitoring and alerting
+- [Quick Start](../QUICKSTART.en.md)
+- [API Documentation](../API.en.md)
+- [Design Document](../DESIGN.en.md)
+- [Stability Notes](../STABILITY.en.md)
+- [Framework Comparison](../comparison.en.md)
+- [Example Code](../../examples/)
 
 ## Get Help
 
 - [GitHub Issues](https://github.com/hexagon-codes/hexagon/issues)
-- [Discussions](https://github.com/hexagon-codes/hexagon/discussions)
-- Email: support@hexagon-codes.com
 
 ## License
 
-Hexagon is open-sourced under the Apache License 2.0.
+Hexagon is open source under the Apache License 2.0.

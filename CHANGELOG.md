@@ -4,11 +4,25 @@
 
 ## [Unreleased]
 
+> **BREAKING / 发布级别：** 本批次包含公开 API、最低 Go 版本与 Qdrant 持久数据合同变更。Hexagon 仍处于 v0.x 阶段，因此相对最新已发布的 v0.5.9，下一版本必须至少为 **v0.6.0**，不得作为 v0.5.x patch 发布。
+
 ### Changed
-- 依赖升级：ai-core v0.2.0 → **v0.2.4**；主模块与 examples 独立模块同步升级。
-- **agent、rag/citation、security/guard**：日志查询、文档标题和国际化邮箱脱敏改为按 rune/字节边界处理，避免 CJK 字符被截断。
-- **llm/conversation、runtime/middleware**：Token 估算统一委托 `ai-core/tokenizer.CountGPT4`，保持中文与英文文本的估算口径一致。
-- **examples**：示例独立模块的 `github.com/hexagon-codes/hexagon` 依赖从 v0.4.8 同步到 **v0.5.7**，消除旧发布包仍包含 `examples/...` 时触发的 ambiguous import。
+- 根模块依赖相对 v0.5.9 升级：ai-core v0.2.4 → **v0.2.7**、toolkit v0.2.6 → **v0.3.4**；最低 Go 版本由 **1.25.7** 提升至 **1.25.12**。本次只更新 Hexagon 根模块；`examples` 是独立模块，继续使用其当前已发布版本依赖，不作调整。
+- **CI/CD**：工作流收敛为根模块 `CI` 与 `Release` 两条链路。CI 在 `GOWORK=off` 下只执行 `go mod tidy -diff` 和全量 `go test -count=1 -race ./...`；Release 将只读验证与写权限发布拆成独立 job，并在验证通过后生成 GitHub Release。
+- **CI/CD 降噪**：删除不具备可靠阻断能力的 API compatibility 和浮动下游分支工作流，以及 Codecov、非阻断 lint、重复的 build/download、手工 changelog 和空通知步骤；Dependabot 改为每月分组更新，每类最多保留一个 PR。
+
+### BREAKING
+- **Go 构建基线**：根模块最低 Go 版本提升至 **1.25.12**；使用更早 Go 工具链的调用方须先升级工具链。
+- **Qdrant 持久数据**：ai-core v0.2.7 将新集合的默认 point ID 从 legacy hash31 改为 SHA-256 派生 UUIDv8。已有集合应在升级前完成重建；迁移窗口可直接使用 `github.com/hexagon-codes/ai-core/store/vector/qdrant`，显式选择已弃用的 `PointIDLegacyHash31` 读取旧映射，但不得继续用于写入新数据，也不得在同一集合中混用两种策略。
+- **core/CircuitBreaker**：`NewCircuitBreaker` 与 `WithCircuitBreaker` 现返回 `(..., error)`，调用方必须处理构造校验错误；`CircuitBreakerConfig` 新增独立的 `HalfOpenMaxRequests`。旧 `Allow`/`RecordSuccess`/`RecordFailure` 调用序列迁移为 `Acquire()` 获取同一次执行的 permit，并以恰好一次 `permit.Complete(err)` 完成。
+- **agent/a2a Push**：`PushNotification` 改为构造后不可变的通知快照；`NewTaskStatusNotification`、`NewArtifactNotification`、`NewPushManager`、`NewWebhookPushService`、`NewAsyncPushService` 与 `NewDefaultPushService` 现返回 `(..., error)`。`PushService.Push` 改为接收 `*PushNotification`，`PushManager.Push` 改为从通知中取得任务 ID。移除旧 `RetryConfig`、`DefaultRetryConfig`、`WithRetryConfig`、`WithPushSignKey`、`HTTPPushService` 与 `NewHTTPPushService`；本版本不承诺自动 Webhook 重试，调用方不得依赖旧 PushManager 的隐式重试行为。
+- **security/cost**：`NewController` 现返回 `(*Controller, error)` 并严格校验配置；`DefaultPricing` 由共享变量改为返回独立副本的函数；移除无实际强制点的 `WithMaxTokensPerSession`。调用方应处理构造错误，并使用 `WithMaxTokensPerRequest` / `WithMaxTokensTotal` 配合运行时预算中间件表达限制。
+- **observe/otel**：重导出入口与 toolkit v0.3.4 对齐，`OTelTracer` / `OTelConfig` / `OTelOption` / `OTelSpan` / `NewOTelTracer` / `DefaultOTelConfig` 分别迁移为 `Tracer` / `Config` / `Option` / `Span` / `NewTracer` / `DefaultConfig`。移除 `WithEndpoint` 与 `WithBatchConfig`；OTLP 调用方应通过可失败的 `NewOTLPExporter` 创建导出器，并用 `SetExporter(ctx, exporter)` 转移生命周期所有权。
+- **observe/prometheus**：`Collector` / `NewCollector` 迁移为 `Factory` / `NewFactory`，`PrometheusCounter` / `PrometheusGauge` / `PrometheusHistogram` / `PrometheusSummary` 分别迁移为 `Counter` / `Gauge` / `Histogram` / `Summary`；`NewExporter` 现返回 `(*Exporter, error)`，`DefaultBuckets` 与 `DefaultQuantiles` 由共享变量改为函数。
+
+### Fixed
+- **core.Retry**：兼容 toolkit v0.3.4 对 `MaxDelay` 的正值校验；`delay == 0` 时不再传入无效的 `retry.MaxDelay(0)`，仍立即执行首次调用加 `maxRetries` 次重试。正延迟的固定重试语义不变，耗尽时原始错误仍可由 `errors.Is` 匹配。
+- **core.WithRetry**：兼容 toolkit v0.3.4 的严格配置校验，同时保留升级前语义：`MaxDelay == 0` 时立即重试，`Multiplier == 0` 时按 `InitialDelay` 固定重试，避免部分 `RetryConfig` 在首次 Runnable 调用前返回 `ErrInvalidConfig`。
 
 ## [0.5.7]
 > 功能版本：工具执行**状态一等化** + **有序内容块流 Blocks**（保真多步 ReAct 交错）+ 截断 rune/字节安全 + ai-core v0.1.11 / toolkit v0.2.3 lockstep。hexagon 公开 API 仅新增字段（SemVer minor）。

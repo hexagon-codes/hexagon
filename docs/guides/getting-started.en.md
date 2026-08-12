@@ -12,7 +12,7 @@ go get github.com/hexagon-codes/hexagon
 
 ## Minimal Example
 
-Create an AI Agent with just 3 lines of code:
+Create an AI Agent with a small amount of code:
 
 ```go
 package main
@@ -20,25 +20,29 @@ package main
 import (
     "context"
     "fmt"
+    "log"
 
-    "github.com/hexagon-codes/hexagon/agent"
     "github.com/hexagon-codes/ai-core/llm/openai"
+    "github.com/hexagon-codes/hexagon/agent"
 )
 
 func main() {
     // Create an LLM Provider
-    llm, _ := openai.New(openai.WithAPIKey("your-api-key"))
+    provider := openai.New("your-api-key")
 
     // Create an Agent
     myAgent := agent.NewBaseAgent(
-        agent.WithLLM(llm),
+        agent.WithLLM(provider),
         agent.WithSystemPrompt("You are a helpful assistant"),
     )
 
     // Run
-    output, _ := myAgent.Run(context.Background(), agent.Input{
+    output, err := myAgent.Invoke(context.Background(), agent.Input{
         Query: "Hello, please introduce yourself",
     })
+    if err != nil {
+        log.Fatalf("agent execution failed: %v", err)
+    }
 
     fmt.Println(output.Content)
 }
@@ -55,18 +59,31 @@ An Agent is the central concept in Hexagon — it represents an executable AI en
 - Use tools to perform tasks
 - Return processed results
 
-### Component
+### Runnable and Component
 
-All components (Agent, Tool, Chain, Graph) implement the unified `Component[I, O]` interface:
+`core.Runnable[I, O]` is Hexagon's unified abstraction for executable components, and Agent implements this interface. `core.Component[I, O]` is a compatibility interface retained for older code and directly embeds `Runnable`. New code should prefer `Runnable` and `Invoke`:
 
 ```go
-type Component[I, O any] interface {
+type Runnable[I, O any] interface {
+    Invoke(ctx context.Context, input I, opts ...Option) (O, error)
+    Stream(ctx context.Context, input I, opts ...Option) (*StreamReader[O], error)
+    Batch(ctx context.Context, inputs []I, opts ...Option) ([]O, error)
+    Collect(ctx context.Context, input *StreamReader[I], opts ...Option) (O, error)
+    Transform(ctx context.Context, input *StreamReader[I], opts ...Option) (*StreamReader[O], error)
+    BatchStream(ctx context.Context, inputs []I, opts ...Option) (*StreamReader[O], error)
+
     Name() string
-    Run(ctx context.Context, input I) (O, error)
-    Stream(ctx context.Context, input I) (Stream[O], error)
-    Batch(ctx context.Context, inputs []I) ([]O, error)
+    Description() string
+    InputSchema() *Schema
+    OutputSchema() *Schema
+}
+
+type Component[I, O any] interface {
+    Runnable[I, O]
 }
 ```
+
+Agent's `Run` method remains only for backward compatibility; new code should use `Invoke`.
 
 ### Middleware
 
@@ -115,8 +132,8 @@ Add conversational memory to an Agent:
 ```go
 import "github.com/hexagon-codes/ai-core/memory"
 
-// Create memory
-mem := memory.NewConversationMemory(10) // retain the last 10 conversation turns
+// 创建记忆（保留最近 10 条消息）
+mem := memory.NewBuffer(10)
 
 // Create an Agent with memory
 myAgent := agent.NewBaseAgent(
@@ -157,6 +174,8 @@ _ = engine.Index(ctx, docs)
 answer, _ := engine.Query(ctx, "What is Hexagon?")
 ```
 
+Starting with ai-core v0.2.7, new Qdrant collections use SHA-256-derived UUIDv8 point IDs by default. To migrate an older collection, temporarily read it with `qdrant.WithPointIDStrategy(qdrant.PointIDLegacyHash31)`, then rebuild the data into a new collection that uses the default UUIDv8 strategy. Do not mix both strategies in one collection.
+
 ## Observability
 
 Add metrics and tracing:
@@ -178,5 +197,5 @@ fmt.Printf("Total runs: %d\n", summary.TotalAgentRuns)
 ## Next Steps
 
 - [Agent Development Guide](agent-guide.en.md) - Deep dive into Agent development
-- [RAG System Usage](rag-guide.md) - Build knowledge-augmented applications
-- [Plugin Development Guide](plugin-guide.md) - Extend the framework
+- [RAG System Usage](rag-guide.en.md) - Build knowledge-augmented applications
+- [Plugin Development Guide](plugin-guide.en.md) - Extend the framework

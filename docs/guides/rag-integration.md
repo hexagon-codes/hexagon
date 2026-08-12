@@ -1,449 +1,415 @@
 <div align="right">语言: 中文 | <a href="rag-integration.en.md">English</a></div>
 
-# RAG 系统使用指南
+# RAG 端到端集成
 
-Hexagon 提供了完整的 RAG (Retrieval-Augmented Generation) 系统，用于构建知识密集型 AI 应用。
+本文按 Hexagon 当前源码及其 `ai-core` 向量存储依赖编写，覆盖一条可运行的 RAG 主链路。更完整的组件说明见 [RAG 指南](rag-guide.md)。
 
-## 快速开始
+## 真实边界
 
-### 基本 RAG 流程
+```text
+Loader -> Splitter -> Indexer -> Embedder -> ai-core vector.Store
+                                      ^                 |
+                                      |                 v
+                                  Retriever <-----------+
+                                      |
+                                      v
+                                 Synthesizer -> Response
+```
+
+- `Loader` 和 `Splitter` 处理 `rag.Document`。
+- `Indexer` 调用 Embedder 生成向量，再写入 `github.com/hexagon-codes/ai-core/store/vector.Store`。
+- `Retriever` 使用同一个 Embedder 和 Store 检索 `[]rag.Document`。
+- `Synthesizer` 独立调用 `ai-core/llm.Provider` 生成最终回答。
+- `rag.Engine` 只封装加载、分块、索引和检索。`Engine.Query` 返回格式化的检索上下文，不调用 LLM，也不替代 Synthesizer。
+
+## 可编译的完整示例
+
+运行前设置 `OPENAI_API_KEY`，并确保 `./docs` 下存在 Markdown 文件。`VectorIndexer.Index` 内部完成批量 Embed，无需先手动调用 `Embed`。
 
 ```go
 package main
 
 import (
-    "context"
+	"context"
+	"fmt"
+	"log"
+	"os"
 
-    "github.com/hexagon-codes/hexagon/rag"
-    "github.com/hexagon-codes/hexagon/rag/loader"
-    "github.com/hexagon-codes/hexagon/rag/splitter"
-    "github.com/hexagon-codes/hexagon/rag/embedder"
-    "github.com/hexagon-codes/hexagon/rag/indexer"
-    "github.com/hexagon-codes/hexagon/rag/retriever"
-    "github.com/hexagon-codes/hexagon/rag/synthesizer"
-    "github.com/hexagon-codes/ai-core/llm/openai"
-    "github.com/hexagon-codes/ai-core/store/vector"
+	"github.com/hexagon-codes/ai-core/llm/openai"
+	"github.com/hexagon-codes/ai-core/store/vector"
+	"github.com/hexagon-codes/hexagon/rag"
+	"github.com/hexagon-codes/hexagon/rag/embedder"
+	"github.com/hexagon-codes/hexagon/rag/indexer"
+	"github.com/hexagon-codes/hexagon/rag/loader"
+	"github.com/hexagon-codes/hexagon/rag/retriever"
+	"github.com/hexagon-codes/hexagon/rag/splitter"
+	"github.com/hexagon-codes/hexagon/rag/synthesizer"
 )
 
 func main() {
-    ctx := context.Background()
+	if err := run(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+}
 
-    // 1. 加载文档
-    docs, _ := loader.NewDirectoryLoader("./docs").Load(ctx)
+func run(ctx context.Context) error {
+	if os.Getenv("OPENAI_API_KEY") == "" {
+		return fmt.Errorf("OPENAI_API_KEY is required")
+	}
 
-    // 2. 文档分割
-    chunks := splitter.NewRecursiveSplitter(
-        splitter.WithChunkSize(1000),
-        splitter.WithChunkOverlap(200),
-    ).Split(docs)
+	provider := openai.New(
+		os.Getenv("OPENAI_API_KEY"),
+		openai.WithModel("gpt-4o"),
+	)
+	emb := embedder.NewOpenAIEmbedder(
+		provider,
+		embedder.WithModel("text-embedding-3-small"),
+		embedder.WithDimension(1536),
+		embedder.WithBatchSize(100),
+	)
 
-    // 3. 生成向量
-    provider := openai.New("your-api-key")
-    emb := embedder.NewOpenAIEmbedder(provider, "text-embedding-ada-002")
-    emb.Embed(ctx, chunks)
+	store := vector.NewMemoryStore(emb.Dimension())
+	defer func() {
+		if err := store.Close(); err != nil {
+			log.Printf("close vector store: %v", err)
+		}
+	}()
 
-    // 4. 索引文档
-    store := vector.NewMemoryStore(1536)
-    idx := indexer.NewVectorIndexer(store, emb)
-    idx.Index(ctx, chunks)
+	source := loader.NewDirectoryLoader(
+		"./docs",
+		loader.WithPattern("*.md"),
+		loader.WithRecursive(true),
+	)
+	docs, err := source.Load(ctx)
+	if err != nil {
+		return err
+	}
 
-    // 5. 检索相关文档
-    ret := retriever.NewVectorRetriever(store, emb)
-    results, _ := ret.Retrieve(ctx, "如何创建 Agent?", retriever.WithTopK(3))
+	chunker := splitter.NewRecursiveSplitter(
+		splitter.WithRecursiveChunkSize(1000),
+		splitter.WithRecursiveChunkOverlap(200),
+		splitter.WithSeparators([]string{"\n\n", "\n", "。", ".", " ", ""}),
+	)
+	chunks, err := chunker.Split(ctx, docs)
+	if err != nil {
+		return err
+	}
 
-    // 6. 生成答案
-    syn := synthesizer.NewRefine(provider)
-    answer, _ := syn.Synthesize(ctx, "如何创建 Agent?", results)
+	idx := indexer.NewVectorIndexer(
+		store,
+		emb,
+		indexer.WithBatchSize(100),
+	)
+	if err := idx.Index(ctx, chunks); err != nil {
+		return err
+	}
 
-    println(answer)
+	ret := retriever.NewVectorRetriever(
+		store,
+		emb,
+		retriever.WithTopK(5),
+		retriever.WithMinScore(0.2),
+	)
+	const query = "Hexagon 的 RAG Engine 负责什么？"
+	hits, err := ret.Retrieve(
+		ctx,
+		query,
+		rag.WithTopK(3),
+		rag.WithMinScore(0.2),
+	)
+	if err != nil {
+		return err
+	}
+
+	syn := synthesizer.NewCompactSynthesizer(
+		synthesizer.WithCompactSynthesizerLLM(provider),
+		synthesizer.WithCompactSynthesizerMaxContext(8000),
+	)
+	response, err := syn.Synthesize(
+		ctx,
+		query,
+		hits,
+		synthesizer.WithSourceDocuments(true),
+	)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(response.Content)
+	return nil
 }
 ```
 
-## 文档加载器
+## 组件 API
 
-### 支持的文档类型
+除上面的完整程序外，下文 Go 代码均为集成片段，并假定其中提到的 `ctx`、Provider、文档或组件变量已在调用方定义；所列函数和选项名均来自当前源码。
 
-#### 1. 文本文件
+### Loader 和 Splitter
+
+常用 Loader 均实现 `rag.Loader`，入口都是 `Load(ctx)`：
 
 ```go
-// 单个文本文件
-doc, err := loader.NewTextLoader("document.txt").Load(ctx)
+textSource := loader.NewTextLoader("document.txt")
+markdownSource := loader.NewMarkdownLoader(
+	"README.md",
+	loader.WithRemoveImages(false),
+	loader.WithRemoveLinks(false),
+	loader.WithExtractMetadata(true),
+)
+directorySource := loader.NewDirectoryLoader(
+	"./docs",
+	loader.WithPattern("*.md"),
+	loader.WithRecursive(true),
+)
+urlSource := loader.NewURLLoader("https://example.com/article")
 
-// 目录下的所有文本文件
-docs, err := loader.NewDirectoryLoader("./docs",
-    loader.WithPattern("*.txt"),
-    loader.WithRecursive(true),
-).Load(ctx)
+docs, err := directorySource.Load(ctx)
 ```
 
-#### 2. Markdown
+`NewReaderLoader(reader, source)` 和 `NewStringLoader(content, source)` 可用于内存输入。`URLLoader` 返回响应正文，不负责把 HTML 清洗成纯文本。
+
+Splitter 实现 `Split(ctx, docs)`；不同类型使用不同的选项命名空间：
 
 ```go
-docs, err := loader.NewMarkdownLoader("README.md").Load(ctx)
+character := splitter.NewCharacterSplitter(
+	splitter.WithChunkSize(1000),
+	splitter.WithChunkOverlap(200),
+	splitter.WithSeparator("\n\n"),
+)
+recursive := splitter.NewRecursiveSplitter(
+	splitter.WithRecursiveChunkSize(1000),
+	splitter.WithRecursiveChunkOverlap(200),
+)
+markdown := splitter.NewMarkdownSplitter(
+	splitter.WithMarkdownChunkSize(1000),
+	splitter.WithMarkdownChunkOverlap(200),
+	splitter.WithCodeBlockAware(true),
+)
+
+chunks, err := recursive.Split(ctx, docs)
 ```
 
-#### 3. URL 内容
+### Embedder 和 ai-core vector Store
+
+`NewOpenAIEmbedder` 接受 Provider 和函数选项。`Embed` 的输入是 `[]string`，`EmbedOne` 处理单段文本：
 
 ```go
-docs, err := loader.NewURLLoader("https://example.com/article").Load(ctx)
+emb := embedder.NewOpenAIEmbedder(
+	provider,
+	embedder.WithModel("text-embedding-3-small"),
+	embedder.WithDimension(1536),
+	embedder.WithBatchSize(100),
+)
+
+vectors, err := emb.Embed(ctx, []string{"first chunk", "second chunk"})
+queryVector, err := emb.EmbedOne(ctx, "search query")
 ```
 
-### 自定义加载器
+生产链路使用 `ai-core/store/vector.Store`。它提供 `Add`、`Search`、`Get`、`Delete`、`Clear`、`Count` 和 `Close`；搜索选项为 `vector.WithFilter`、`vector.WithMinScore`、`vector.WithEmbedding` 和 `vector.WithMetadata`。
+
+Embedder 声明的维度、实际返回向量的长度和 Store 的集合维度必须一致。更换 embedding 模型或维度时，应使用新集合重建索引。
+
+### Indexer 和 Retriever
+
+`VectorIndexer` 负责 Embed 和写入，公开入口是 `Index(ctx, docs)`：
 
 ```go
-type CustomLoader struct{}
-
-func (l *CustomLoader) Load(ctx context.Context) ([]rag.Document, error) {
-    // 自定义加载逻辑
-    return []rag.Document{
-        {
-            ID:      "doc-1",
-            Content: "文档内容",
-            Metadata: map[string]any{
-                "source": "custom",
-            },
-        },
-    }, nil
+idx := indexer.NewVectorIndexer(store, emb, indexer.WithBatchSize(100))
+if err := idx.Index(ctx, chunks); err != nil {
+	return err
 }
 ```
 
-## 文档分割
-
-### 分割策略
-
-#### 1. 字符分割
-
-按固定字符数分割，最简单的策略。
+Retriever 的构造选项与每次检索的选项来自不同包：
 
 ```go
-splitter := splitter.NewCharacterSplitter(
-    splitter.WithChunkSize(1000),
-    splitter.WithChunkOverlap(200),
+ret := retriever.NewVectorRetriever(
+	store,
+	emb,
+	retriever.WithTopK(5),
+	retriever.WithMinScore(0.2),
+)
+
+hits, err := ret.Retrieve(
+	ctx,
+	query,
+	rag.WithTopK(3),
+	rag.WithMinScore(0.3),
+	rag.WithFilter(map[string]any{"loader": "markdown"}),
 )
 ```
 
-#### 2. 递归分割
-
-智能分割，优先在段落、句子边界分割。
+关键词和混合检索的真实构造方式如下。`HybridRetriever` 已并行执行两个底层 Retriever：
 
 ```go
-splitter := splitter.NewRecursiveSplitter(
-    splitter.WithChunkSize(1000),
-    splitter.WithChunkOverlap(200),
-    splitter.WithSeparators([]string{"\n\n", "\n", "。", "，"}),
-)
-```
-
-**推荐使用**，效果最好。
-
-#### 3. Markdown 分割
-
-按 Markdown 结构分割（标题、段落）。
-
-```go
-splitter := splitter.NewMarkdownSplitter(
-    splitter.WithChunkSize(1000),
-)
-```
-
-#### 4. 语义分割
-
-基于语义相似度分割，效果最好但速度较慢。
-
-```go
-splitter := splitter.NewSemanticSplitter(
-    embedder,
-    splitter.WithThreshold(0.75), // 相似度阈值
-)
-```
-
-### 分割参数调优
-
-| 参数 | 推荐值 | 说明 |
-|-----|-------|------|
-| ChunkSize | 500-1500 | 根据文档特性调整 |
-| ChunkOverlap | 100-300 | 10-20% 的 ChunkSize |
-| Separators | `["\n\n", "\n", "。"]` | 中文优先句号 |
-
-## 向量生成
-
-### OpenAI Embeddings
-
-```go
-embedder := embedder.NewOpenAIEmbedder(
-    provider,
-    "text-embedding-ada-002", // 1536 维
+keyword := retriever.NewKeywordRetriever(chunks, retriever.WithKeywordTopK(10))
+hybrid := retriever.NewHybridRetriever(
+	ret,
+	keyword,
+	retriever.WithVectorWeight(0.7),
+	retriever.WithKeywordWeight(0.3),
+	retriever.WithHybridTopK(5),
 )
 
-// 或使用更小的模型
-embedder := embedder.NewOpenAIEmbedder(
-    provider,
-    "text-embedding-3-small", // 512 维，速度更快
+hits, err := hybrid.Retrieve(ctx, query, rag.WithTopK(5))
+```
+
+### Synthesizer 和 Engine
+
+现有合成器构造器是：
+
+- `synthesizer.NewRefineSynthesizer`
+- `synthesizer.NewCompactSynthesizer`
+- `synthesizer.NewTreeSummarizeSynthesizer`
+- `synthesizer.NewSimpleSummarizeSynthesizer`
+
+它们分别通过 `WithRefineSynthesizerLLM`、`WithCompactSynthesizerLLM`、`WithTreeSynthesizerLLM`、`WithSimpleSynthesizerLLM` 注入 `ai-core/llm.Provider`。每次调用使用 `Synthesize(ctx, query, docs, opts...)`，返回 `*synthesizer.Response`。
+
+下面是 Engine 片段；假定 `store`、`emb`、`source`、`chunker`、`syn`、`ctx` 和 `query` 已定义：
+
+```go
+engine := rag.NewEngine(
+	rag.WithStore(store),
+	rag.WithEngineEmbedder(emb),
+	rag.WithLoader(source),
+	rag.WithEngineSplitter(chunker),
+	rag.WithEngineTopK(5),
+	rag.WithEngineMinScore(0.2),
 )
+
+if err := engine.Ingest(ctx); err != nil {
+	return err
+}
+docs, err := engine.Retrieve(ctx, query, rag.WithTopK(3))
+if err != nil {
+	return err
+}
+answer, err := syn.Synthesize(ctx, query, docs)
 ```
 
-### 缓存 Embedder
+若只需要拼接后的检索上下文，可调用 `engine.Query(ctx, query, ...)`。它的返回类型是 `(string, error)`，不是最终 LLM 回答。
 
-避免重复计算向量，提升性能。
+## 切换到 Qdrant
 
-```go
-cachedEmbedder := embedder.NewCachedEmbedder(
-    baseEmbedder,
-    embedder.WithCacheSize(1000),
-)
-```
+### 新集合
 
-## 向量存储
-
-### 内存存储
-
-适合开发和小规模数据。
+把内存 Store 替换为下面的 Qdrant Store；其余 Indexer、Retriever 和 Engine 代码不变。此片段假定 `emb` 已定义：
 
 ```go
-store := vector.NewMemoryStore(1536) // 向量维度
-```
-
-### Qdrant
-
-生产环境推荐，性能优秀。
-
-```go
-import "github.com/hexagon-codes/ai-core/store/vector/qdrant"
-
 store, err := qdrant.New(qdrant.Config{
-    Host:       "localhost",
-    Port:       6333,
-    Collection: "documents",
-    Dimension:  1536,
+	Host:             "localhost",
+	Port:             6333,
+	Collection:       "documents_v2",
+	Dimension:        emb.Dimension(),
+	Distance:         qdrant.DistanceCosine,
+	CreateCollection: true,
 })
+if err != nil {
+	return err
+}
 defer store.Close()
 ```
 
-## 检索策略
+新集合应使用默认的 `qdrant.PointIDUUIDv8`。Qdrant 会拒绝空 ID、错误维度、非有限向量，以及 metadata 中的保留键 `content`、`created_at`、`_original_id`。
 
-### 1. 向量检索
+### 从旧 Point ID 策略迁移
 
-基于语义相似度的检索。
+`qdrant.PointIDLegacyHash31` 仅用于读取和迁移旧集合。不要在同一集合上直接切换策略：旧 numeric point 与新 UUID point 可能并存为重复数据，而且切换后按原 ID 的 `Get`/`Delete` 映射也会变化。
 
-```go
-retriever := retriever.NewVectorRetriever(store, embedder)
+迁移步骤：
 
-results, _ := retriever.Retrieve(ctx, query,
-    retriever.WithTopK(5),              // 返回前5个结果
-    retriever.WithMinScore(0.7),        // 最小相似度0.7
-    retriever.WithFilters(map[string]any{
-        "type": "technical",             // 元数据过滤
-    }),
-)
-```
+1. 以 `PointIDLegacyHash31` 打开旧集合。
+2. 创建一个不同名称、相同维度和距离的新集合；省略 `PointIDStrategy`，使用安全默认值。
+3. 用 `Scroll` 读取旧集合，并用 `AddBatch` 写入新集合。
+4. 比较 `Count`，抽样检索和按 ID 读取，再切换应用配置；旧集合保留到回滚窗口结束。
 
-### 2. 关键词检索
-
-基于 BM25 算法的关键词匹配。
+核心迁移片段如下，假定 `ctx`、`legacy` 和 `target` 均已初始化：
 
 ```go
-retriever := retriever.NewKeywordRetriever(index)
-
-results, _ := retriever.Retrieve(ctx, query,
-    retriever.WithTopK(5),
-)
-```
-
-### 3. 混合检索
-
-结合向量和关键词检索。
-
-```go
-retriever := retriever.NewHybridRetriever(
-    vectorRetriever,
-    keywordRetriever,
-    retriever.WithAlpha(0.7), // 向量权重 0.7，关键词权重 0.3
-)
-```
-
-### 4. 多查询检索
-
-生成多个查询变体提升召回率。
-
-```go
-retriever := retriever.NewMultiQueryRetriever(
-    baseRetriever,
-    llmProvider,
-    retriever.WithNumQueries(3), // 生成3个查询变体
-)
-```
-
-## 重排序
-
-提升检索结果的相关性。
-
-```go
-import "github.com/hexagon-codes/hexagon/rag/reranker"
-
-// 创建重排序器
-reranker := reranker.NewLLMReranker(llmProvider)
-
-// 对检索结果重排序
-reranked, _ := reranker.Rerank(ctx, query, results,
-    reranker.WithTopN(3), // 返回前3个
-)
-```
-
-## 答案合成
-
-### 1. Refine 策略
-
-逐个处理文档，精炼答案。
-
-```go
-synthesizer := synthesizer.NewRefine(llmProvider,
-    synthesizer.WithSystemPrompt("基于提供的上下文回答问题"),
-)
-
-answer, _ := synthesizer.Synthesize(ctx, query, results)
-```
-
-**适用场景**: 需要综合多个文档的信息。
-
-### 2. Compact 策略
-
-将所有文档合并为一个提示。
-
-```go
-synthesizer := synthesizer.NewCompact(llmProvider)
-
-answer, _ := synthesizer.Synthesize(ctx, query, results)
-```
-
-**适用场景**: 文档较少，上下文窗口足够大。
-
-### 3. Tree 策略
-
-树状聚合，分层总结。
-
-```go
-synthesizer := synthesizer.NewTree(llmProvider,
-    synthesizer.WithBranchFactor(3), // 每层3个分支
-)
-
-answer, _ := synthesizer.Synthesize(ctx, query, results)
-```
-
-**适用场景**: 大量文档需要处理。
-
-## 完整 RAG Engine
-
-使用 RAG Engine 简化流程。
-
-```go
-engine := rag.NewEngine(
-    rag.WithLLM(llmProvider),
-    rag.WithEmbedder(embedder),
-    rag.WithVectorStore(store),
-    rag.WithRetrieverType(rag.RetrieverTypeHybrid),
-    rag.WithSynthesizerType(rag.SynthesizerTypeRefine),
-)
-
-// 索引文档
-engine.Index(ctx, docs)
-
-// 查询
-answer, _ := engine.Query(ctx, "如何使用 RAG?")
-```
-
-## 性能优化
-
-### 1. 批量处理
-
-```go
-// 批量生成向量
-embedder.EmbedBatch(ctx, chunks, embedder.WithBatchSize(100))
-
-// 批量索引
-indexer.IndexBatch(ctx, chunks, indexer.WithConcurrency(4))
-```
-
-### 2. 异步索引
-
-```go
-// 在后台索引文档
-go func() {
-    indexer.Index(ctx, docs)
-}()
-```
-
-### 3. 增量更新
-
-```go
-// 只索引新文档
-indexer.IndexIncremental(ctx, newDocs)
-```
-
-### 4. 缓存策略
-
-```go
-// 缓存查询结果
-engine := rag.NewEngine(
-    rag.WithQueryCache(
-        cache.NewLRU(100), // 缓存100个查询结果
-    ),
-)
-```
-
-## 评估指标
-
-### 检索质量
-
-```go
-import "github.com/hexagon-codes/hexagon/evaluate/metrics"
-
-// 相关性评估
-relevance := metrics.NewRelevanceMetric(llmProvider)
-score, _ := relevance.Evaluate(ctx, evaluate.EvalInput{
-    Query:    query,
-    Context:  results,
-    Response: answer,
+err := legacy.Scroll(ctx, 100, func(docs []vector.Document) error {
+	return target.AddBatch(
+		ctx,
+		docs,
+		qdrant.WithBatchSize(100),
+		qdrant.WithConcurrency(4),
+		qdrant.WithRetry(3, time.Second),
+	)
 })
-
-// 忠实度评估（答案是否基于上下文）
-faithfulness := metrics.NewFaithfulnessMetric(llmProvider)
-score, _ := faithfulness.Evaluate(ctx, input)
 ```
 
-## 常见问题
+旧 Hash31 冲突已经覆盖的数据无法从旧集合恢复；此时必须从原始文档重新构建新集合。
 
-### Q: 如何选择分块大小？
+## 缓存、并发和增量索引
 
-**A**:
-- 短文本 (新闻、评论): 300-500
-- 中等文本 (文章、文档): 500-1000
-- 长文本 (书籍、论文): 1000-1500
+只缓存 embedding 时，使用现有的 LRU 包装器：
 
-### Q: 向量检索 vs 关键词检索？
+```go
+cached := embedder.NewCachedEmbedder(
+	emb,
+	embedder.WithMaxCacheSize(10_000),
+)
+```
 
-**A**:
-- 向量检索: 语义理解好，但对精确匹配较弱
-- 关键词检索: 精确匹配好，但理解能力弱
-- **推荐**: 混合检索，结合两者优势
+并发索引使用 `ConcurrentIndexer`，不要再在 `Index` 外包一层无法收集错误的裸 goroutine：
 
-### Q: 如何处理中文？
+```go
+idx := indexer.NewConcurrentIndexer(
+	store,
+	cached,
+	indexer.WithConcurrentBatchSize(100),
+	indexer.WithConcurrency(4),
+)
+if err := idx.Index(ctx, chunks); err != nil {
+	return err
+}
+```
 
-**A**:
-- 使用支持中文的 Embedder
-- 分割时使用中文标点符号: `["。", "！", "？", "\n\n"]`
-- Markdown 分割器对中文支持良好
+需要同一进程内按内容校验和跳过未变化文档时，可使用：
 
-### Q: 如何提升检索准确率？
+```go
+idx := indexer.NewIncrementalIndexer(
+	store,
+	emb,
+	indexer.WithIncrementalBatchSize(100),
+)
+if err := idx.Index(ctx, changedDocs); err != nil {
+	return err
+}
+```
 
-**A**:
-1. 使用语义分割而非固定长度分割
-2. 合适的 Chunk Overlap
-3. 使用重排序器
-4. 多查询检索生成查询变体
-5. 混合检索策略
+`IncrementalIndexer` 的校验和状态在内存中，不跨进程持久化。当前 Engine 没有查询结果缓存选项。
 
-## 下一步
+## Evaluate
 
-- 了解 [Agent 集成 RAG](./agent-development.md#rag-集成)
-- 学习 [图编排中的 RAG 节点](./graph-orchestration.md#rag-节点)
-- 掌握 [RAG 性能优化](./performance-optimization.md#rag-优化)
+下面的评估片段使用现有 `evaluate/rag.NewEvaluator`。传入 `nil` 时使用包内规则评估；如需 LLM 评审，传入实现 `evaluate/rag.LLMProvider` 的对象：
+
+```go
+contexts := make([]string, 0, len(hits))
+for _, doc := range hits {
+	contexts = append(contexts, doc.Content)
+}
+
+report, err := rageval.NewEvaluator(nil).Evaluate(ctx, &rageval.EvaluationInput{
+	Question: query,
+	Answer:   answer.Content,
+	Contexts: contexts,
+})
+if err != nil {
+	return err
+}
+fmt.Printf("faithfulness=%.2f relevancy=%.2f\n", report.Faithfulness, report.Relevancy)
+```
+
+另一套通用评估框架可使用 `metrics.NewRelevanceEvaluator` 和 `metrics.NewFaithfulnessEvaluator`，二者接收 `evaluate.LLMJudge`。
+
+## 上线检查
+
+- 所有调用都透传可取消、可超时的 `context.Context`，并检查错误。
+- 摄取和查询必须复用同一 embedding 模型及维度；变更后新建集合并重建索引。
+- 文档 ID 必须稳定且非空，metadata 不使用 Qdrant 保留键。
+- 在切流前比较旧、新集合数量，并对固定查询集做检索和回答回归。
+- 退出时调用 `Store.Close`；只有 Qdrant 迁移/直接写入场景才使用 Qdrant 自身的 `AddBatch`。
+
+## 相关文档
+
+- [RAG 指南](rag-guide.md)

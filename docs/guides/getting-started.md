@@ -12,7 +12,7 @@ go get github.com/hexagon-codes/hexagon
 
 ## 最简示例
 
-只需 3 行代码即可创建一个 AI Agent：
+使用少量代码即可创建一个 AI Agent：
 
 ```go
 package main
@@ -20,25 +20,29 @@ package main
 import (
     "context"
     "fmt"
+    "log"
 
-    "github.com/hexagon-codes/hexagon/agent"
     "github.com/hexagon-codes/ai-core/llm/openai"
+    "github.com/hexagon-codes/hexagon/agent"
 )
 
 func main() {
     // 创建 LLM Provider
-    llm, _ := openai.New(openai.WithAPIKey("your-api-key"))
+    provider := openai.New("your-api-key")
 
     // 创建 Agent
     myAgent := agent.NewBaseAgent(
-        agent.WithLLM(llm),
+        agent.WithLLM(provider),
         agent.WithSystemPrompt("你是一个有帮助的助手"),
     )
 
     // 执行
-    output, _ := myAgent.Run(context.Background(), agent.Input{
+    output, err := myAgent.Invoke(context.Background(), agent.Input{
         Query: "你好，请介绍一下你自己",
     })
+    if err != nil {
+        log.Fatalf("agent execution failed: %v", err)
+    }
 
     fmt.Println(output.Content)
 }
@@ -55,18 +59,31 @@ Agent 是 Hexagon 的核心概念，代表一个可执行的 AI 实体。每个 
 - 使用工具执行任务
 - 返回处理结果
 
-### Component
+### Runnable 与 Component
 
-所有组件（Agent、Tool、Chain、Graph）都实现统一的 `Component[I, O]` 接口：
+`core.Runnable[I, O]` 是 Hexagon 可执行组件的统一抽象，Agent 实现了该接口。`core.Component[I, O]` 是为旧代码保留的兼容接口，直接嵌入 `Runnable`。新代码应优先使用 `Runnable` 和 `Invoke`：
 
 ```go
-type Component[I, O any] interface {
+type Runnable[I, O any] interface {
+    Invoke(ctx context.Context, input I, opts ...Option) (O, error)
+    Stream(ctx context.Context, input I, opts ...Option) (*StreamReader[O], error)
+    Batch(ctx context.Context, inputs []I, opts ...Option) ([]O, error)
+    Collect(ctx context.Context, input *StreamReader[I], opts ...Option) (O, error)
+    Transform(ctx context.Context, input *StreamReader[I], opts ...Option) (*StreamReader[O], error)
+    BatchStream(ctx context.Context, inputs []I, opts ...Option) (*StreamReader[O], error)
+
     Name() string
-    Run(ctx context.Context, input I) (O, error)
-    Stream(ctx context.Context, input I) (Stream[O], error)
-    Batch(ctx context.Context, inputs []I) ([]O, error)
+    Description() string
+    InputSchema() *Schema
+    OutputSchema() *Schema
+}
+
+type Component[I, O any] interface {
+    Runnable[I, O]
 }
 ```
+
+Agent 的 `Run` 仅作为向后兼容方法保留；新代码使用 `Invoke`。
 
 ### 中间件
 
@@ -115,8 +132,8 @@ myAgent := agent.NewReAct(
 ```go
 import "github.com/hexagon-codes/ai-core/memory"
 
-// 创建记忆
-mem := memory.NewConversationMemory(10) // 保留最近 10 轮对话
+// 创建记忆（保留最近 10 条消息）
+mem := memory.NewBuffer(10)
 
 // 创建带记忆的 Agent
 myAgent := agent.NewBaseAgent(
@@ -156,6 +173,8 @@ engine := rag.NewEngine(
 _ = engine.Index(ctx, docs)
 answer, _ := engine.Query(ctx, "什么是 Hexagon？")
 ```
+
+ai-core v0.2.7 起，新建 Qdrant 集合默认使用 SHA-256 派生的 UUIDv8 point ID。迁移旧集合时，使用 `qdrant.WithPointIDStrategy(qdrant.PointIDLegacyHash31)` 临时读取旧数据，再将数据重建到采用默认 UUIDv8 策略的新集合；不要在同一集合中混用两种策略。
 
 ## 可观测性
 

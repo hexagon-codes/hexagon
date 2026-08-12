@@ -2,572 +2,568 @@
 
 # A2A (Agent-to-Agent) Protocol Guide
 
-Hexagon implements the Google A2A protocol, enabling AI Agents to communicate securely, coordinate tasks, and share context with each other.
+Hexagon's `agent/a2a` package provides Agent Cards, Tasks, JSON-RPC, SSE, authentication, push delivery, and Agent bridges. This guide follows the current repository source; `ProtocolVersion` is currently `1.0`.
 
-## Overview
+## Capability Boundaries
 
-A2A (Agent-to-Agent) is an open protocol that defines a standardized communication method between AI Agents. With the A2A protocol, you can:
+- Regular requests use JSON-RPC 2.0; streaming requests use Server-Sent Events (SSE).
+- `Server` includes an in-memory Task store and optional push delivery, but it does not install authentication middleware automatically.
+- `Client` supports synchronous Task APIs and SSE event streams. Calls made after closing it return `ErrClientClosed`.
+- `AgentCard.Capabilities` is both a declaration and a server-side gate. Declare only capabilities that are actually configured.
+- The default store, asynchronous push queue, and subscribers are in-process components, not persistence or reliable-messaging guarantees.
 
-- Expose Hexagon Agents as standard A2A services
-- Connect to any remote Agent that conforms to the A2A specification
-- Achieve cross-platform, cross-framework Agent interoperability
-
-## Quick Start
-
-### Creating an A2A Server
-
-```go
-import (
-    "github.com/hexagon-codes/hexagon/agent"
-    "github.com/hexagon-codes/hexagon/agent/a2a"
-)
-
-// Create a Hexagon Agent
-myAgent := agent.NewBaseAgent(
-    agent.WithName("assistant"),
-    agent.WithLLM(llmProvider),
-)
-
-// Expose it as an A2A service with one line
-server := a2a.ExposeAgent(myAgent, "http://localhost:8080")
-server.Start(":8080")
-```
-
-### Connecting to an A2A Agent
-
-```go
-// Connect to a remote A2A Agent
-client := a2a.NewClient("http://localhost:8080")
-
-// Retrieve the Agent Card
-card, _ := client.GetAgentCard(ctx)
-fmt.Printf("Agent: %s - %s\n", card.Name, card.Description)
-
-// Send a message
-task, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    Message: a2a.NewUserMessage("Hello"),
-})
-
-fmt.Printf("Task ID: %s, Status: %s\n", task.ID, task.Status.State)
-```
-
-## Core Concepts
+## Core Model
 
 ### Agent Card
 
-The Agent Card is a central concept in the A2A protocol. It describes an Agent's basic information, capabilities, and skills.
+An Agent Card is published at `GET /.well-known/agent-card.json`. Name, URL, and version are the essential fields. Capabilities, authentication schemes, and skills must match the running service.
 
 ```go
-card := &a2a.AgentCard{
-    Name:        "assistant",
-    Description: "General-purpose assistant Agent",
-    URL:         "http://localhost:8080",
-    Version:     "1.0.0",
-    Provider: &a2a.AgentProvider{
-        Organization: "My Company",
-        URL:          "https://example.com",
-    },
-    Capabilities: a2a.AgentCapabilities{
-        Streaming:         true,  // supports streaming responses
-        PushNotifications: true,  // supports push notifications
-    },
-    Skills: []a2a.AgentSkill{
-        {ID: "search", Name: "Search", Description: "Web search"},
-        {ID: "code", Name: "Coding", Description: "Code generation"},
-    },
+card := a2a.NewAgentCard("assistant", "http://localhost:8080", "1.0.0")
+card.Description = "Text assistant"
+card.Capabilities = a2a.AgentCapabilities{
+	Streaming:         true,
+	PushNotifications: false,
 }
+card.Authentication = &a2a.AuthConfig{
+	Schemes: []a2a.AuthScheme{{Type: "bearer", BearerFormat: "JWT"}},
+}
+card.Skills = []a2a.AgentSkill{{
+	ID:          "answer",
+	Name:        "Answer questions",
+	Tags:        []string{"text", "qa"},
+	InputModes:  []string{"text"},
+	OutputModes: []string{"text"},
+}}
 ```
 
-The Agent Card is served at `/.well-known/agent-card.json`.
+`NewAgentCard` sets `Streaming` to `true` by default. Set it explicitly to `false` when the service does not offer SSE.
 
-### Task Lifecycle
+### Tasks and States
 
-A Task is the core unit of work in A2A, representing the complete lifecycle of a single Agent interaction.
+A Task is the durable identity of one interaction. It contains an `ID`, optional `SessionID`, current `Status`, `History`, `Artifacts`, and metadata.
 
+A typical flow is:
+
+```text
+submitted → working → input-required → working
+                    └→ completed | failed | canceled
 ```
-submitted → working → input-required → completed
-                  ↘                 ↗
-                   → failed/canceled
-```
 
-State descriptions:
-- `submitted`: Task created, awaiting processing
-- `working`: Agent is processing the task
-- `input-required`: Waiting for the user to provide more information
-- `completed`: Task completed successfully
-- `failed`: Task execution failed
-- `canceled`: Task was canceled
+`completed`, `failed`, and `canceled` are terminal states; use `TaskState.IsTerminal()` to test them. Supplying an existing ID in `SendMessageRequest.TaskID` continues that Task. Supplying an unknown ID returns a task-not-found error. `SessionID` correlates multiple Tasks and does not replace `TaskID`.
 
-### Message
+### Messages, Parts, and Artifacts
 
-A Message is the communication unit between an Agent and a user, and supports multimodal content.
+A Message has a `user` or `agent` role and is composed of `TextPart`, `FilePart`, or `DataPart` values. Artifacts use the same Part model for outputs.
 
 ```go
-// Text message
-msg := a2a.NewUserMessage("Hello")
-
-// Multimodal message
-msg := a2a.Message{
-    Role: a2a.RoleUser,
-    Parts: []a2a.Part{
-        &a2a.TextPart{Text: "Please analyze this image"},
-        &a2a.FilePart{
-            File: a2a.FileContent{
-                Name:     "image.png",
-                MimeType: "image/png",
-                Bytes:    base64EncodedData,
-            },
-        },
-    },
-}
-```
-
-### Artifact
-
-An Artifact is an output produced during task execution.
-
-```go
-artifact := a2a.Artifact{
-    Name:        "analysis_result",
-    Description: "Analysis result",
-    Parts: []a2a.Part{
-        &a2a.TextPart{Text: "Analysis complete..."},
-        &a2a.DataPart{
-            Data: map[string]any{
-                "score": 0.95,
-                "tags":  []string{"positive", "technical"},
-            },
-        },
-    },
-}
-```
-
-## Server-Side Development
-
-### Custom TaskHandler
-
-```go
-type MyHandler struct {
-    llm llm.Provider
-}
-
-func (h *MyHandler) HandleTask(ctx context.Context, task *a2a.Task, msg *a2a.Message) (*a2a.TaskUpdate, error) {
-    // Retrieve user message text
-    userText := msg.GetTextContent()
-
-    // Call LLM for processing
-    resp, err := h.llm.Complete(ctx, llm.CompletionRequest{
-        Messages: []llm.Message{
-            {Role: "user", Content: userText},
-        },
-    })
-    if err != nil {
-        return a2a.NewFailedUpdate(err.Error()), nil
-    }
-
-    // Return completed status
-    return a2a.NewCompletedUpdate(&a2a.Message{
-        Role: a2a.RoleAgent,
-        Parts: []a2a.Part{
-            &a2a.TextPart{Text: resp.Content},
-        },
-    }), nil
-}
-```
-
-### Streaming Processing
-
-```go
-func (h *MyHandler) HandleTaskStream(ctx context.Context, task *a2a.Task, msg *a2a.Message) (<-chan *a2a.TaskUpdate, error) {
-    updates := make(chan *a2a.TaskUpdate)
-
-    go func() {
-        defer close(updates)
-
-        // Stream content generation
-        stream, _ := h.llm.Stream(ctx, req)
-
-        for chunk := range stream {
-            updates <- &a2a.TaskUpdate{
-                Artifact: &a2a.Artifact{
-                    Name:   "response",
-                    Append: true,
-                    Parts: []a2a.Part{
-                        &a2a.TextPart{Text: chunk.Content},
-                    },
-                },
-            }
-        }
-
-        // Send completion status
-        updates <- a2a.NewCompletedUpdate(...)
-    }()
-
-    return updates, nil
-}
-```
-
-### Creating a Full Server
-
-```go
-card := &a2a.AgentCard{
-    Name:    "my-agent",
-    URL:     "http://localhost:8080",
-    Version: "1.0.0",
-    Capabilities: a2a.AgentCapabilities{
-        Streaming:         true,
-        PushNotifications: true,
-    },
-}
-
-handler := &MyHandler{llm: llmProvider}
-server := a2a.NewServer(card, handler,
-    a2a.WithStore(a2a.NewMemoryTaskStore()),
-    a2a.WithPushService(a2a.NewDefaultPushService()),
-    a2a.WithCORS(true, "*"),
-)
-
-server.Start(":8080")
-```
-
-## Client-Side Development
-
-### Basic Usage
-
-```go
-client := a2a.NewClient("http://localhost:8080",
-    a2a.WithTimeout(30 * time.Second),
-    a2a.WithAuth(&a2a.BearerAuth{Token: "my-token"}),
-)
-defer client.Close()
-
-// Send a message and get the result
-task, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    Message: a2a.NewUserMessage("Hello"),
+msg := a2a.NewUserMessage("Summarize this document")
+msg.Parts = append(msg.Parts, &a2a.DataPart{
+	Data: map[string]any{"language": "en"},
 })
 
-// Check task status
-if task.Status.State == a2a.TaskStateCompleted {
-    // Retrieve Agent response
-    for _, msg := range task.History {
-        if msg.Role == a2a.RoleAgent {
-            fmt.Println(msg.GetTextContent())
-        }
-    }
+artifact := a2a.NewTextArtifact("summary", "Summary content")
+artifact.LastChunk = true
+```
+
+`Message.GetTextContent()` and `Artifact.GetTextContent()` collect only text Parts. When the server receives an Artifact with `Append=true`, it appends its Parts to the last existing Artifact. Otherwise it creates a new Artifact and assigns its `Index` on the server.
+
+## Server and Handler
+
+### Minimal Server
+
+The complete `TaskHandler` signature is:
+
+```go
+type TaskHandler interface {
+	HandleTask(
+		ctx context.Context,
+		task *a2a.Task,
+		msg *a2a.Message,
+	) (*a2a.TaskUpdate, error)
 }
 ```
 
-### Streaming Interaction
+Use `NewFuncHandler` to wrap a function. `Server.Start` blocks and returns an `error`; never discard it.
 
 ```go
-events, _ := client.SendMessageStream(ctx, &a2a.SendMessageRequest{
-    Message: a2a.NewUserMessage("Write a poem"),
-})
+func main() {
+	card := a2a.NewAgentCard("assistant", "http://localhost:8080", "1.0.0")
+	card.Capabilities.Streaming = false
 
-for event := range events {
-    switch e := event.(type) {
-    case *a2a.TaskStatusEvent:
-        fmt.Printf("Status: %s\n", e.Status.State)
+	handler := a2a.NewFuncHandler(func(
+		ctx context.Context,
+		task *a2a.Task,
+		msg *a2a.Message,
+	) (*a2a.TaskUpdate, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return a2a.NewCompletedUpdate(
+			a2aMessage("Echo: " + msg.GetTextContent()),
+		), nil
+	})
 
-    case *a2a.ArtifactEvent:
-        fmt.Print(e.Artifact.GetTextContent())
+	server := a2a.NewServer(card, handler, a2a.WithCORS(false))
+	if err := server.Start(":8080"); err != nil {
+		log.Fatal(err)
+	}
+}
 
-    case *a2a.DoneEvent:
-        fmt.Println("\nDone!")
-    }
+func a2aMessage(text string) *a2a.Message {
+	msg := a2a.NewAgentMessage(text)
+	return &msg
 }
 ```
 
-### Multi-Turn Conversation
+For signal handling, custom timeouts, or middleware, use `server.Handler()` as the Handler of an externally managed `http.Server`, and check errors from both `ListenAndServe` and `Shutdown`. When using `Start` directly, graceful shutdown is available through `server.Stop(ctx)`; its error must also be handled.
+
+`NewServer` uses `MemoryTaskStore` by default. Inject a production `TaskStore` with `WithStore` when Tasks must survive process restarts. If push configuration is enabled, a custom store should also implement `PushConfigStore`.
+
+### Results and Errors
+
+A `TaskUpdate` may contain `Status`, `Message`, `Artifact`, `Metadata`, and `Final`. Common constructors are:
+
+- `NewStatusUpdate`
+- `NewMessageUpdate`
+- `NewArtifactUpdate`
+- `NewCompletedUpdate`
+- `NewFailedUpdate`
+- `NewInputRequiredUpdate`
+
+When regular `HandleTask` returns a non-nil `error`, the server records the Task as `failed` and returns a JSON-RPC or SSE error. When `HandleTaskStream` returns an error while opening the stream, the current implementation writes an SSE `error` event but does not automatically persist a `failed` terminal state. To expose a business failure as a queryable terminal Task, return `NewFailedUpdate(message), nil` from a regular Handler or send that update on the streaming channel.
+
+### Streaming Handler
 
 ```go
-// First turn
-task1, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    Message: a2a.NewUserMessage("Hello"),
-})
-
-// Second turn - continue the same task
-task2, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    TaskID:  task1.ID,  // continue existing task
-    Message: a2a.NewUserMessage("Please continue"),
-})
+type StreamingTaskHandler interface {
+	a2a.TaskHandler
+	HandleTaskStream(
+		ctx context.Context,
+		task *a2a.Task,
+		msg *a2a.Message,
+	) (<-chan *a2a.TaskUpdate, error)
+}
 ```
 
-## Authentication and Security
-
-### Server-Side Authentication
+`NewStreamingFuncHandler` requires both the regular and streaming functions:
 
 ```go
-// Bearer Token authentication
-validator := a2a.NewBearerTokenValidator()
-validator.AddToken("secret-token", "client-1")
+normal := func(
+	ctx context.Context,
+	task *a2a.Task,
+	msg *a2a.Message,
+) (*a2a.TaskUpdate, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	reply := a2a.NewAgentMessage(msg.GetTextContent())
+	return a2a.NewCompletedUpdate(&reply), nil
+}
 
-// API Key authentication
-validator := a2a.NewAPIKeyValidator("X-API-Key", "header")
-validator.AddKey("my-api-key", "client-1")
+stream := func(
+	ctx context.Context,
+	task *a2a.Task,
+	msg *a2a.Message,
+) (<-chan *a2a.TaskUpdate, error) {
+	updates := make(chan *a2a.TaskUpdate)
+	go func() {
+		defer close(updates)
+		chunk := a2a.NewTextArtifact("response", msg.GetTextContent())
+		select {
+		case updates <- a2a.NewArtifactUpdate(&chunk):
+		case <-ctx.Done():
+			return
+		}
+		reply := a2a.NewAgentMessage("done")
+		select {
+		case updates <- a2a.NewCompletedUpdate(&reply):
+		case <-ctx.Done():
+		}
+	}()
+	return updates, nil
+}
 
-// RBAC access control
-rbac := a2a.NewRBACValidator(validator)
-rbac.SetPermissions("client-1",
-    a2a.PermissionRead,
-    a2a.PermissionSendMessage,
-)
-
-// Apply authentication middleware
-mux := http.NewServeMux()
-handler := a2a.AuthMiddleware(validator)(server.Handler())
+handler := a2a.NewStreamingFuncHandler(normal, stream)
 ```
 
-### Client-Side Authentication
+Before closing its channel, a streaming Handler should send a terminal update with `Final=true`. If it closes immediately, the Server still emits `done`, but the final Task may remain `working`.
+
+The server accepts streaming endpoints only when `AgentCard.Capabilities.Streaming=true`. If the Card declares streaming but the Handler implements only `TaskHandler`, the server calls `HandleTask` synchronously and ends the SSE response with the final Task status and a `done` event. It does not produce genuine intermediate chunks.
+
+## Client
+
+### Regular Requests
 
 ```go
-// Bearer Token
-client := a2a.NewClient(url,
-    a2a.WithAuth(&a2a.BearerAuth{Token: "my-token"}),
-)
+func call(ctx context.Context) (_ *a2a.Task, err error) {
+	client := a2a.NewClient(
+		"http://localhost:8080",
+		a2a.WithTimeout(10*time.Second),
+	)
+	defer func() {
+		if closeErr := client.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
-// API Key
-client := a2a.NewClient(url,
-    a2a.WithAuth(&a2a.APIKeyAuth{
-        Key:   "X-API-Key",
-        Value: "my-api-key",
-        In:    "header",
-    }),
-)
+	card, err := client.GetAgentCard(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get Agent Card: %w", err)
+	}
+	if card.Name == "" {
+		return nil, fmt.Errorf("Agent Card has no name")
+	}
 
-// Basic Auth
-client := a2a.NewClient(url,
-    a2a.WithAuth(&a2a.BasicAuth{
-        Username: "user",
-        Password: "pass",
-    }),
-)
+	task, err := client.SendMessage(ctx, &a2a.SendMessageRequest{
+		SessionID: "conversation-1",
+		Message:   a2a.NewUserMessage("Hello"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("send message: %w", err)
+	}
+	return task, nil
+}
 ```
+
+To continue the same Task, call `SendMessage` again with `TaskID: task.ID`. `GetTask`, `ListTasks`, `CancelTask`, `SetPushNotification`, and `GetPushNotification` all return errors that must be handled. Pass every network call a deadline-bound or cancelable `context.Context`. The client preserves error chains, so `errors.Is(err, context.DeadlineExceeded)` can identify a timeout.
+
+### Consuming SSE
+
+```go
+func consume(
+	ctx context.Context,
+	client *a2a.Client,
+	onArtifact func(string),
+) error {
+	if onArtifact == nil {
+		return fmt.Errorf("onArtifact must not be nil")
+	}
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	events, err := client.SendMessageStream(streamCtx, &a2a.SendMessageRequest{
+		Message: a2a.NewUserMessage("Stream the answer"),
+	})
+	if err != nil {
+		return err
+	}
+
+	for event := range events {
+		switch value := event.(type) {
+		case *a2a.TaskStatusEvent:
+			if value.Final {
+				continue
+			}
+		case *a2a.ArtifactEvent:
+			onArtifact(value.Artifact.GetTextContent())
+		case *a2a.ErrorEvent:
+			if value.Error == nil {
+				return fmt.Errorf("empty SSE error")
+			}
+			return value.Error
+		case *a2a.DoneEvent:
+			return nil
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+```
+
+Parsing or transport errors that occur after the HTTP response is established arrive as `*ErrorEvent`; they are not returned later by `SendMessageStream`. Consume the channel until it closes and handle `ErrorEvent`. `Resubscribe(ctx, taskID)` uses the same event model.
+
+## Authentication and Authorization
+
+### Server Side
+
+The server package provides `BearerTokenValidator`, `APIKeyValidator`, `BasicAuthValidator`, `ChainValidator`, `AuthMiddleware`, and `OptionalAuthMiddleware`. `NewServer` and `Start` do not enable them automatically. Wrap `server.Handler()` in an externally managed `http.Server`.
+
+```go
+func protectedHandler(server *a2a.Server) http.Handler {
+	tokens := a2a.NewBearerTokenValidator()
+	tokens.AddToken("secret", "client-1")
+
+	routes := server.Handler()
+	protected := a2a.AuthMiddleware(tokens)(routes)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == a2a.PathAgentCard {
+			routes.ServeHTTP(w, r)
+			return
+		}
+		protected.ServeHTTP(w, r)
+	})
+}
+```
+
+This example deliberately leaves the Agent Card public. The current `Client.GetAgentCard` does not apply `WithAuth`, while JSON-RPC and SSE calls do. Protecting the Card makes it undiscoverable through the standard `Client`, `NewRemoteAgent`, and `ConnectToA2AAgent`.
+
+For RBAC, first use `AuthMiddleware(rbac)` to populate `AuthContext`, then apply `rbac.RequirePermission(...)` inside it. Authentication failures return HTTP 401 and permission failures return HTTP 403; the body remains a JSON-RPC error object.
+
+### Client Side
+
+```go
+client := a2a.NewClient(
+	"https://agent.example.com",
+	a2a.WithAuth(&a2a.BearerAuth{Token: "secret"}),
+	a2a.WithTimeout(10*time.Second),
+)
+defer func() {
+	if err := client.Close(); err != nil {
+		log.Printf("close A2A client: %v", err)
+	}
+}()
+```
+
+The client also provides `APIKeyAuth` and `BasicAuth`. Do not put credentials in an Agent Card, logs, or the repository. Use TLS and restrict server-side CORS origins in production.
 
 ## Push Notifications
 
-### Configuring Push Notifications
+### Configuration
+
+Push configuration APIs are available only when the Card declares `PushNotifications=true`; actual delivery also requires the Server to receive a `PushService` through `WithPushService`. `NewDefaultPushService` now returns `(*AsyncPushService, error)`: check the error and call `Close` during shutdown.
 
 ```go
-// Client-side push notification configuration
-client.SetPushNotification(ctx, task.ID, &a2a.PushNotificationConfig{
-    URL:   "https://my-webhook.example.com/callback",
-    Token: "callback-token",
-})
+func serveWithPush(card *a2a.AgentCard, handler a2a.TaskHandler) error {
+	push, err := a2a.NewDefaultPushService()
+	if err != nil {
+		return fmt.Errorf("create push service: %w", err)
+	}
+	defer push.Close()
 
-// Or configure when sending a message
-task, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    Message: a2a.NewUserMessage("Hello"),
-    PushNotification: &a2a.PushNotificationConfig{
-        URL: "https://my-webhook.example.com/callback",
-    },
-})
+	card.Capabilities.PushNotifications = true
+	server := a2a.NewServer(card, handler, a2a.WithPushService(push))
+	return server.Start(":8080")
+}
 ```
 
-### Handling Push Callbacks
+A new Task can carry its push configuration directly:
 
 ```go
-http.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-    var task a2a.Task
-    json.NewDecoder(r.Body).Decode(&task)
-
-    fmt.Printf("Task %s status: %s\n", task.ID, task.Status.State)
-
-    w.WriteHeader(http.StatusOK)
+task, err := client.SendMessage(ctx, &a2a.SendMessageRequest{
+	Message: a2a.NewUserMessage("Run the job"),
+	PushNotification: &a2a.PushNotificationConfig{
+		URL:   "https://consumer.example.com/a2a/events",
+		Token: "callback-token",
+	},
 })
+if err != nil {
+	return err
+}
+if task.ID == "" {
+	return fmt.Errorf("server returned an empty Task ID")
+}
 ```
+
+Configure an existing Task with `client.SetPushNotification(ctx, task.ID, config)` and verify it with `GetPushNotification`. Handle errors from both calls.
+
+### Immutable Notification Contract
+
+`PushNotification` fields are private and notifications can be created only through constructors. Construction serializes a snapshot. Mutating the source Task or Artifact later, or mutating a copy returned by an accessor, cannot change the notification.
+
+```go
+notification, err := a2a.NewTaskStatusNotification(task)
+if err != nil {
+	return err
+}
+snapshot, err := notification.Task()
+if err != nil {
+	return err
+}
+if snapshot == nil || notification.EventType() != a2a.EventTypeTaskStatus {
+	return fmt.Errorf("invalid Task notification")
+}
+```
+
+Use `NewArtifactNotification(taskID, artifact)` for Artifact notifications and read a copy with `Artifact()`; check errors from both construction and access. `TaskID()`, `EventType()`, and `Timestamp()` expose notification metadata. `NewWebhookPushService` and `NewAsyncPushService` also return configuration-validation errors.
+
+### Delivery Guarantees
+
+The current implementation is best-effort. It does not promise automatic Webhook retries or reliable delivery:
+
+- Each `WebhookPushService.Push` call performs one HTTP POST. `WithWebhookRetry` currently validates and stores configuration only; it is not an executed automatic-retry guarantee.
+- A successful `AsyncPushService.Push` means only that the request was enqueued. A full queue returns `ErrPushQueueFull`; a closed service returns `ErrPushServiceClosed`. Workers do not propagate underlying delivery failures to callers.
+- `Server` triggers an asynchronous Task-status push after regular `tasks/send`, without waiting for or exposing the delivery error. Built-in streaming updates do not automatically emit Artifact Webhooks.
+- `Close` stops workers and releases the remaining queue; it does not promise to flush every pending message.
+
+For at-least-once delivery, implement a custom `PushService` and persistent outbox with bounded retries, idempotency keys, observable failures, and dead-letter handling. `PushManager` can provide per-Task configuration and rate limiting; its `NewPushManager` constructor also returns an `error`.
 
 ## Agent Discovery
 
-### Static Discovery
+`Discovery` defines `Discover`, `Register`, `Deregister`, `Get`, and `Watch`. Every method returns an error that callers must handle.
+
+| Implementation | Data source | Actual filtering | `Watch` semantics |
+| --- | --- | --- | --- |
+| `StaticDiscovery` | In-process Card map | Exact Name or `*`, plus Skill IDs | Immediately returns a closed channel |
+| `RegistryDiscovery` | `agent.Registry` events and manual registration | Name, Skill IDs, Tags, Streaming/Push capabilities | Returns a buffered channel; currently ignores filter/context and has no unsubscribe API |
+| `RemoteDiscovery` | Preconfigured remote URLs and a TTL cache | Exact Name or `*` only | Immediately returns a closed channel |
+
+`AgentFilter.Name` is not a general glob. Every value except the special `*` is an exact match.
 
 ```go
-discovery := a2a.NewStaticDiscovery(
-    &a2a.AgentCard{Name: "agent-1", URL: "http://agent1.example.com"},
-    &a2a.AgentCard{Name: "agent-2", URL: "http://agent2.example.com"},
-)
-
-// Discover all Agents
-cards, _ := discovery.Discover(ctx, nil)
-
-// Filter by skill
-cards, _ := discovery.Discover(ctx, &a2a.AgentFilter{
-    Skills: []string{"search"},
+discovery := a2a.NewStaticDiscovery(card)
+cards, err := discovery.Discover(ctx, &a2a.AgentFilter{
+	Name:   "assistant",
+	Skills: []string{"answer"},
 })
+if err != nil {
+	return err
+}
+if len(cards) == 0 {
+	return fmt.Errorf("no matching Agent")
+}
 ```
 
-### Registry Integration
+`RegistryDiscovery` watches Registry events that occur after construction; it does not replay entries registered before construction. Create the discovery instance before registration, or register Cards explicitly through the discovery instance.
+
+`RemoteDiscovery.Discover` skips URLs whose Cards cannot be fetched and may still return a nil error. Use `Get(ctx, url)` and check its error when one specific Agent must be available. Its internal Clients have no authentication options, so it is suitable for public Agent Cards.
+
+## Hexagon Bridges
+
+### Exposing a Local Agent
+
+`WrapAgent` converts an `agent.Agent` into a regular `TaskHandler`; `WrapStreamingAgent` converts it into a `StreamingTaskHandler`. `ExposeAgent` creates and returns a `*Server`; **it does not start it**.
 
 ```go
-// Integrate with the Hexagon Registry
-registry := agent.GlobalRegistry()
-discovery := a2a.NewRegistryDiscovery(registry, "http://localhost:8080")
-
-// Agents registered in the Registry are automatically discoverable
-cards, _ := discovery.Discover(ctx, nil)
+func expose(localAgent agent.Agent) error {
+	server := a2a.ExposeAgent(localAgent, "http://localhost:8080")
+	if err := server.Start(":8080"); err != nil {
+		return fmt.Errorf("start A2A server: %w", err)
+	}
+	return nil
+}
 ```
 
-### Remote Discovery
+`ExposeAgent` declares streaming support and uses the Agent's `Stream` method. The regular wrapper turns an Agent execution error into a failed Task update. The streaming wrapper turns content chunks into Artifacts and emits one merged completion Message at the end.
+
+### Calling a Remote Agent
+
+`NewRemoteAgent` and `ConnectToA2AAgent` fetch the Agent Card immediately during construction, so both return an `error` that must be handled. Construction uses an internal background context; use `WithTimeout` to bound HTTP duration.
 
 ```go
-// Remote Agent discovery
-discovery := a2a.NewRemoteDiscovery(5 * time.Minute) // cache for 5 minutes
-discovery.AddAgent("http://agent1.example.com")
-discovery.AddAgent("http://agent2.example.com")
+func invokeRemote(ctx context.Context, input agent.Input) (_ agent.Output, err error) {
+	remote, err := a2a.ConnectToA2AAgent(
+		"https://agent.example.com",
+		a2a.WithTimeout(10*time.Second),
+		a2a.WithAuth(&a2a.BearerAuth{Token: "secret"}),
+	)
+	if err != nil {
+		return agent.Output{}, fmt.Errorf("connect to A2A Agent: %w", err)
+	}
+	defer func() {
+		if closeErr := remote.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
 
-// Automatically fetches Agent Cards
-cards, _ := discovery.Discover(ctx, nil)
+	return remote.Run(ctx, input)
+}
 ```
 
-## Integration with Hexagon
+Despite its name, the current `RemoteAgent` exposes only `ID`, `Name`, `Run`, `Card`, `Close`, and `NewSession`. It **does not satisfy the complete `agent.Agent`/`core.Runnable` interface**. Do not pass it directly to `Team` or `AgentNetwork.Register`. Write an explicit adapter for the missing methods, or use `Client` directly.
 
-### Wrapping an Existing Agent
+In addition, `RemoteAgent.Run` repeatedly polls `GetTask` without backoff when a Task is non-terminal. For asynchronous remote services or long-running Tasks, prefer direct `Client` use with deadline-bound, interval-controlled, rate-limited polling.
+
+### AgentNetwork Bridge
+
+`NewNetworkBridge(network, taskStore)` exposes three explicit methods:
+
+- `SendToAgent` finds the target Agent, calls `Run` directly, and returns the converted A2A Message.
+- `BroadcastMessage` broadcasts the Message's text content through the network.
+- `SendToAgentNetwork` sends the text content to a named Agent through the network queue.
 
 ```go
-// Wrap a Hexagon Agent as an A2A Handler
-myAgent := agent.NewReAct(...)
-handler := a2a.WrapAgent(myAgent)
-
-// Or use a streaming wrapper
-handler := a2a.WrapStreamingAgent(myAgent)
+reply, err := bridge.SendToAgent(ctx, "researcher", &message)
+if err != nil {
+	return err
+}
+if reply.GetTextContent() == "" {
+	return fmt.Errorf("Agent returned an empty response")
+}
 ```
 
-### Using a Remote A2A Agent
+The current `NetworkBridge` methods do not use its `taskStore` field, so it does not imply Task tracking or persistence. The two network-routing methods forward only `GetTextContent()` and do not preserve File or Data Parts.
 
-```go
-// Connect to a remote A2A Agent and use it as a Hexagon Agent
-remoteAgent, _ := a2a.ConnectToA2AAgent("http://remote-agent.example.com")
-defer remoteAgent.Close()
+## JSON-RPC and Endpoints
 
-// Use it just like a local Agent
-output, _ := remoteAgent.Run(ctx, agent.Input{Query: "Hello"})
-```
+### HTTP Paths
 
-### Using in an Agent Network
+| Path | Method | Purpose |
+| --- | --- | --- |
+| `/.well-known/agent-card.json` | GET | Fetch the Agent Card |
+| `/tasks` | POST | Unified endpoint for the `Client`'s non-streaming JSON-RPC calls |
+| `/tasks/send` | POST | Server-registered non-streaming alias |
+| `/tasks/sendSubscribe` | POST | `SendMessageStream` SSE |
+| `/tasks/get` | POST | Server-registered non-streaming alias |
+| `/tasks/cancel` | POST | Server-registered non-streaming alias |
+| `/tasks/resubscribe` | POST | `Resubscribe` SSE |
+| `/tasks/pushNotification/get` | POST | Server-registered non-streaming alias |
+| `/tasks/pushNotification/set` | POST | Server-registered non-streaming alias |
 
-```go
-// Create an Agent network
-network := agent.NewAgentNetwork("my-network")
-
-// Add a local Agent
-network.Register(localAgent)
-
-// Add a remote A2A Agent
-remoteAgent, _ := a2a.ConnectToA2AAgent("http://remote.example.com")
-network.Register(remoteAgent)
-
-// Agents can communicate normally
-network.SendTo(ctx, "local-agent", "remote-agent", "Collaboration message")
-```
-
-## API Reference
-
-### Endpoints
-
-| Path | Method | Description |
-|------|--------|-------------|
-| `/.well-known/agent-card.json` | GET | Retrieve Agent Card |
-| `/tasks` | POST | JSON-RPC endpoint |
-| `/tasks/sendSubscribe` | POST | Stream message sending |
-| `/tasks/resubscribe` | POST | Resubscribe to a task |
+The Server also registers matching split paths for send/get/cancel/push operations, but the official `Client` posts every non-streaming method to `/tasks`.
 
 ### JSON-RPC Methods
 
-| Method | Description |
-|--------|-------------|
-| `tasks/send` | Send a message |
-| `tasks/get` | Get a task |
-| `tasks/list` | List tasks |
-| `tasks/cancel` | Cancel a task |
-| `tasks/pushNotification/set` | Set push notification config |
-| `tasks/pushNotification/get` | Get push notification config |
+| Method | Result |
+| --- | --- |
+| `tasks/send` | Create or continue a Task; return the Task |
+| `tasks/sendSubscribe` | Create or continue a Task; return SSE |
+| `tasks/get` | Get a Task |
+| `tasks/list` | List Tasks by Session/state with pagination |
+| `tasks/cancel` | Cancel a non-terminal Task |
+| `tasks/resubscribe` | Resubscribe to an existing Task |
+| `tasks/pushNotification/set` | Set a Task's push configuration |
+| `tasks/pushNotification/get` | Get a Task's push configuration |
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tasks/send",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"type": "text", "text": "Hello"}]
+    }
+  }
+}
+```
+
+### SSE Events
+
+Event names are fixed as `task-status`, `artifact`, `error`, and `done`. `task-status` carries a status and `final`; `artifact` carries an Artifact; `error` carries an `*a2a.Error`; and `done` may carry the final Task.
 
 ### Error Codes
 
 | Code | Meaning |
-|------|---------|
-| -32700 | JSON parse error |
-| -32600 | Invalid request |
-| -32601 | Method not found |
-| -32602 | Invalid parameters |
-| -32603 | Internal error |
-| -32001 | Task not found |
-| -32002 | Task cannot be canceled |
-| -32003 | Push notifications not supported |
-| -32010 | Authentication required |
-| -32011 | Authentication failed |
-| -32012 | Insufficient permissions |
+| --- | --- |
+| `-32700` | Parse error |
+| `-32600` | Invalid request |
+| `-32601` | Method not found |
+| `-32602` | Invalid params |
+| `-32603` | Internal error |
+| `-32001` | Task not found |
+| `-32002` | Task not cancelable |
+| `-32003` | Push notification not supported |
+| `-32004` | Unsupported operation |
+| `-32005` | Content type not supported |
+| `-32010` | Authentication required |
+| `-32011` | Authentication failed |
+| `-32012` | Permission denied |
 
-## Best Practices
+A regular protocol error may appear in the JSON-RPC `error` field of an HTTP 200 response; do not inspect only the HTTP status. The official `Client` returns that field as `*a2a.Error`; use `a2a.GetA2AError(err)` to read its `Code`.
 
-### 1. Design a Clear Agent Card
+## Pre-production Checklist
 
-```go
-card := &a2a.AgentCard{
-    Name:        "customer-service",  // concise, descriptive name
-    Description: "Enterprise customer service Agent for product inquiries and technical support",
-    Version:     "1.2.0",  // semantic versioning
-    Skills: []a2a.AgentSkill{
-        {
-            ID:          "product-qa",
-            Name:        "Product Inquiries",
-            Description: "Answers questions about product features, pricing, and usage",
-            Examples:    []string{"What features does this product have?", "How much does it cost?"},
-        },
-        {
-            ID:          "tech-support",
-            Name:        "Technical Support",
-            Description: "Resolves technical issues and troubleshooting",
-            Examples:    []string{"I can't log in, what should I do?", "Why am I seeing an error?"},
-        },
-    },
-}
-```
+- The Agent Card's URL, capabilities, skills, input/output modes, and authentication declaration match runtime behavior.
+- Every Client, Discovery, and Bridge call has a deadline, cancellation, and error classification; every Stream is consumed until closed.
+- Authentication middleware actually wraps Task and SSE routes, and the Agent Card publication policy matches current Client behavior.
+- Production Tasks use a persistent `TaskStore`; callback-dependent workflows use a reliable outbox and do not treat the built-in Webhook as an automatic retry queue.
+- Shutdown checks `Stop`/`Shutdown` errors and closes Clients and any asynchronous push service that was created.
 
-### 2. Handle Errors Gracefully
+## Related Documentation
 
-```go
-func (h *MyHandler) HandleTask(ctx context.Context, task *a2a.Task, msg *a2a.Message) (*a2a.TaskUpdate, error) {
-    // Business errors should return a TaskUpdate, not an error
-    if !isValid(msg) {
-        return a2a.NewFailedUpdate("Invalid message format, please try again"), nil
-    }
-
-    result, err := h.process(ctx, msg)
-    if err != nil {
-        // Distinguish between retryable and non-retryable errors
-        if isRetryable(err) {
-            return a2a.NewFailedUpdate("Service temporarily unavailable, please try again later"), nil
-        }
-        return a2a.NewFailedUpdate("Processing failed: " + err.Error()), nil
-    }
-
-    return a2a.NewCompletedUpdate(result), nil
-}
-```
-
-### 3. Use Sessions for Multi-Turn Conversations
-
-```go
-// Associate multiple tasks via SessionID
-task1, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    SessionID: "user-session-123",
-    Message:   a2a.NewUserMessage("First turn"),
-})
-
-task2, _ := client.SendMessage(ctx, &a2a.SendMessageRequest{
-    SessionID: "user-session-123",  // same session
-    Message:   a2a.NewUserMessage("Second turn"),
-})
-
-// Query all tasks in the session
-tasks, _ := client.ListTasks(ctx, &a2a.ListTasksRequest{
-    SessionID: "user-session-123",
-})
-```
-
-## References
-
-- [Google A2A Protocol Specification](https://google.github.io/A2A/)
-- [JSON-RPC 2.0 Specification](https://www.jsonrpc.org/specification)
-- [Server-Sent Events (SSE)](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
+- [API reference](../API.en.md)
+- [Multi-agent orchestration](multi-agent.en.md)
+- [`agent/a2a` source](../../agent/a2a/a2a.go)

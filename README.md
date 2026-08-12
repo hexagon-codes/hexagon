@@ -4,11 +4,11 @@
 
 <img src=".github/assets/logo.jpg" alt="Hexagon Logo" width="160">
 
-**Go 生态全能型 AI Agent 框架**
+**Go AI Agent 框架**
 
-[![Go Reference](https://img.shields.io/badge/Go-1.25.7+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
+[![Go Reference](https://img.shields.io/badge/Go-1.25.12+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen)](https://github.com/hexagon-codes/hexagon/actions)
+[![CI](https://github.com/hexagon-codes/hexagon/actions/workflows/ci.yml/badge.svg)](https://github.com/hexagon-codes/hexagon/actions/workflows/ci.yml)
 
 </div>
 
@@ -16,26 +16,24 @@
 
 ### 📖 项目简介
 
-**Hexagon** 取名自网络热词「**六边形战士**」，寓意均衡强大、无懈可击。
+**Hexagon** 取名自网络热词「**六边形战士**」，表达对多项框架能力均衡发展的关注。
 
-我们聚焦 **易用性、性能、扩展性、任务编排、可观测性、安全性** 六大核心维度，深耕技术打磨，致力于实现各能力模块的均衡卓越，为 Go 开发者打造企业级落地首选的 AI Agent 开发基座。
-
-</p>
+项目围绕 **易用性、并发执行、扩展性、任务编排、可观测性、安全性** 六个维度，为 Go 开发者提供构建 AI Agent 的框架组件。
 
 ### 🚀 核心特性
 
-* ⚡ **高性能** │ 原生 Go 驱动，极致并发，支持 100k+ 活跃 Agent
-* 🧩 **易用性** │ 声明式 API 设计，3 行代码极速构建基础原型
-* 🛡️ **安全性** │ 企业级沙箱隔离，内置完备的权限管控与防护
-* 🔧 **扩展性** │ 插件化架构，支持高度自定义的组件无缝集成
-* 🛠️ **编排力** │ 强大的图编排引擎，轻松驾驭复杂的多级任务链路
-* 🔍 **可观测** │ 深度集成 OpenTelemetry，实现全链路透明追踪
+* ⚡ **并发执行** │ 基于 Go 和 goroutine 实现并发任务处理
+* 🧩 **简洁 API** │ 提供便捷入口、声明式选项和明确的组件接口
+* 🛡️ **安全组件** │ 提供 Guard、Guardrail、RBAC 和 Sandbox 等可组合组件
+* 🔧 **扩展机制** │ 提供插件接口和中间件扩展点
+* 🛠️ **任务编排** │ 提供 Graph、Chain、Workflow 和 Planner 模块
+* 🔍 **可观测性** │ 提供 OpenTelemetry 追踪、指标、事件流和 Dev UI 集成
 
 ---
 
 ## 🌐 生态系统
 
-Hexagon 是一个完整的 AI Agent 开发生态，由多个仓库组成：
+Hexagon 与以下 AI Agent 开发相关仓库协同使用：
 
 | 仓库 | 说明 | 链接 |
 |-----|------|------|
@@ -43,6 +41,8 @@ Hexagon 是一个完整的 AI Agent 开发生态，由多个仓库组成：
 | **ai-core** | AI 基础能力库 (LLM/Tool/Memory/Schema) | [github.com/hexagon-codes/ai-core](https://github.com/hexagon-codes/ai-core) |
 | **toolkit** | Go 通用工具库 (lang/crypto/net/cache/util) | [github.com/hexagon-codes/toolkit](https://github.com/hexagon-codes/toolkit) |
 | **hexagon-ui** | Dev UI 前端 (Vue 3 + TypeScript) | [github.com/hexagon-codes/hexagon-ui](https://github.com/hexagon-codes/hexagon-ui) |
+
+> 当前根模块构建基线：Go 1.25.12、ai-core v0.2.7、toolkit v0.3.4。`examples/` 是独立 Go module，其依赖版本以 `examples/go.mod` 为准，不随根模块自动同步。
 
 ### 🧠 ai-core — AI 基础能力库
 
@@ -66,7 +66,7 @@ import "github.com/hexagon-codes/ai-core/memory"
 
 ### 🛠️ toolkit — Go 通用工具库
 
-生产级 Go 通用工具包，提供语言增强、加密、网络、缓存、协程池等基础能力：
+Go 通用工具包，提供语言增强、加密、网络、缓存、协程池等基础能力：
 
 ```go
 import "github.com/hexagon-codes/toolkit/lang/conv"      // 类型转换
@@ -123,7 +123,7 @@ export OPENAI_API_KEY=your-api-key
 export DEEPSEEK_API_KEY=your-api-key
 ```
 
-### 🎯 3 行代码入门
+### 🎯 基础示例
 
 ```go
 package main
@@ -364,7 +364,7 @@ for _, doc := range output.Documents {
 - Document 扩展：结构化数据/表格/实体/关系/验证错误
 - Schema 驱动的结构化提取
 - LLM 提取器：实体/关系提取
-- 完整验证：类型/格式/范围/枚举/正则
+- 验证规则：类型/格式/范围/枚举/正则
 - 并发处理 + 钩子系统
 
 ### 🌐 A2A 协议 (Agent-to-Agent)
@@ -398,20 +398,20 @@ for event := range events {
 ```
 
 **特性：**
-- 完整 A2A 协议实现 (AgentCard/Task/Message/Artifact)
+- A2A 数据模型 (AgentCard/Task/Message/Artifact)
 - JSON-RPC 2.0 + SSE 流式响应
 - 多种认证方式 (Bearer Token/API Key/Basic Auth/RBAC)
 - Agent 发现服务 (Registry/Static/Remote)
 - 推送通知支持
-- 与 Hexagon Agent 无缝桥接
+- Hexagon Agent 桥接适配
 
 ## 💡 设计理念
 
-1. **渐进式复杂度** - 入门 3 行代码，进阶声明式配置，专家图编排
-2. **约定优于配置** - 合理默认值，零配置可运行
+1. **渐进式复杂度** - 提供便捷入口、声明式配置和图编排 API
+2. **约定优于配置** - 提供默认值，同时保留显式配置选项
 3. **组合优于继承** - 小而专注的组件，灵活组合
 4. **显式优于隐式** - 类型安全，编译时检查
-5. **生产优先** - 内置可观测性，优雅降级
+5. **运行支持** - 提供可观测性和降级相关组件
 
 ## 🏗️ 架构
 
@@ -489,7 +489,8 @@ hexagon/
 ├── config/             # 配置管理
 ├── evaluate/           # 评估系统 (agenteval/rag/metrics)
 ├── testing/            # 测试工具 (Mock/Record/E2E/Integration)
-├── deploy/             # 部署配置 (Docker Compose/Helm Chart/CI)
+├── .github/workflows/  # CI 与发布 (依赖一致性/race/GitHub Release)
+├── deploy/             # 部署配置 (Docker Compose/Helm Chart)
 ├── examples/           # 示例代码 (独立 module)
 ├── hexagon.go          # 顶层 API（核心入口符号）
 └── deprecated.go       # 过渡性重导出（下一大版本移除）
@@ -553,7 +554,7 @@ engine := rag.NewEngine(rag.WithStore(store))
 |-----|------|
 | [快速入门](docs/QUICKSTART.md) | 5 分钟上手 Hexagon |
 | [架构设计](docs/DESIGN.md) | 框架设计理念和架构 |
-| [API 参考](docs/API.md) | 完整 API 文档 |
+| [API 参考](docs/API.md) | API 文档 |
 | [稳定性说明](docs/STABILITY.md) | API 稳定性和版本策略 |
 | [框架对比](docs/comparison.md) | 与主流框架的对比分析 |
 
@@ -562,7 +563,7 @@ engine := rag.NewEngine(rag.WithStore(store))
 | 指南 | 说明 |
 |-----|------|
 | [快速开始](docs/guides/getting-started.md) | 从零开始构建第一个 Agent |
-| [Agent 开发](docs/guides/agent-guide.md) | Agent 开发完整指南 |
+| [Agent 开发](docs/guides/agent-guide.md) | Agent 开发指南 |
 | [Agent 进阶](docs/guides/agent-development.md) | 高级 Agent 开发模式 |
 | [RAG 系统](docs/guides/rag-guide.md) | 检索增强生成入门 |
 | [RAG 集成](docs/guides/rag-integration.md) | RAG 系统深度集成 |
@@ -593,28 +594,49 @@ engine := rag.NewEngine(rag.WithStore(store))
 
 内置开发调试界面，实时查看 Agent 执行过程。
 
+以下示例仅监听本机回环地址，并显式处理 `Start` 和 `Stop` 返回的错误：
+
 ```go
-import "github.com/hexagon-codes/hexagon/observe/devui"
+import (
+    "context"
+    "log"
+    "time"
+
+    "github.com/hexagon-codes/hexagon/observe/devui"
+)
 
 // 创建 DevUI
 ui := devui.New(
-    devui.WithAddr(":8080"),
+    devui.WithAddr("127.0.0.1:8080"),
     devui.WithMaxEvents(1000),
 )
 
 // 启动服务
-go ui.Start()
+go func() {
+    if err := ui.Start(); err != nil {
+        log.Printf("DevUI stopped with error: %v", err)
+    }
+}()
 
-// 访问 http://localhost:8080
+// 在所属服务退出时停止 DevUI
+defer func() {
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    if err := ui.Stop(ctx); err != nil {
+        log.Printf("Failed to stop DevUI: %v", err)
+    }
+}()
+
+// 访问 http://127.0.0.1:8080
 ```
 
 **运行示例：**
 
 ```bash
-# 启动后端
-go run examples/devui/main.go
+# 按 examples 独立模块的依赖启动后端
+(cd examples && GOWORK=off go run ./devui)
 
-# 启动前端 (hexagon-ui)
+# 在另一个终端启动外部 hexagon-ui 仓库
 cd ../hexagon-ui
 npm install
 npm run dev
@@ -623,38 +645,28 @@ npm run dev
 
 ## 🚢 部署
 
-Hexagon 提供三种部署方式，支持本地开发到生产环境的全场景覆盖：
+Hexagon 是 Go 库，不包含可直接运行的应用入口或官方应用镜像。`deploy/` 提供开发基础设施和自定义应用镜像的 Kubernetes 接入模板，不是一键部署成品应用。
 
-| 方案 | 适用场景 | 命令 |
-|------|---------|------|
-| Docker Compose (完整模式) | 快速体验、演示、单机部署 | `make up` |
-| Docker Compose (开发模式) | 团队开发（复用 docker-dev-env） | `make dev-up` |
-| Helm Chart | K8s 集群、生产环境 | `make helm-install` |
+### Docker Compose 开发基础设施
 
-### Docker 快速启动
+Compose 仅启动 Qdrant、Redis 和 PostgreSQL，不会启动 Hexagon 应用或 Dev UI：
 
 ```bash
 cd deploy
 cp .env.example .env
-# 编辑 .env，填入 LLM API Key
-make up
-
-# 访问
-# 主应用:  http://localhost:8000
-# Dev UI:  http://localhost:8080
+docker compose up -d
 ```
 
-### Kubernetes / Helm
+### Helm 自定义镜像接入模板
+
+Helm Chart 用于接入你自行构建的应用镜像。先设置镜像并检查渲染结果，再根据应用实际命令、探针和配置调整模板：
 
 ```bash
 cd deploy
-make helm-install
-
-# 使用外部基础设施
-helm install hexagon helm/hexagon/ \
-  -n hexagon --create-namespace \
-  --set qdrant.enabled=false \
-  --set external.qdrant.url=http://my-qdrant:6333
+helm template hexagon helm/hexagon/ \
+  --set app.image.repository=registry.example.com/your-app \
+  --set app.image.tag=your-tag \
+  --set devui.enabled=false
 ```
 
 详见 [部署指南](deploy/README.md)。
@@ -667,6 +679,12 @@ make test    # 测试
 make lint    # 代码检查
 make fmt     # 格式化
 ```
+
+### CI 与发布
+
+- 推送到 `main` 和提交 Pull Request 时，CI 使用根模块的 Go 版本执行 `go mod tidy -diff` 和 `go test -count=1 -race ./...`。
+- 推送 `v*` tag 时，发布流程先重复上述验证，再以隔离的写权限任务创建 GitHub Release。
+- `examples/` 是独立 module，不在根模块 `./...` 的测试范围内；修改示例时应以 `examples/go.mod` 为基线单独验证。
 
 ## 🤝 贡献
 

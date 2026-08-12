@@ -1,449 +1,415 @@
 <div align="right">Language: <a href="rag-integration.md">中文</a> | English</div>
 
-# RAG System Integration Guide
+# End-to-End RAG Integration
 
-Hexagon provides a complete RAG (Retrieval-Augmented Generation) system for building knowledge-intensive AI applications.
+This guide follows the current Hexagon source and its `ai-core` vector-store dependency. It covers one runnable RAG path. See the [RAG guide](rag-guide.en.md) for a broader component reference.
 
-## Quick Start
+## Actual boundaries
 
-### Basic RAG Flow
+```text
+Loader -> Splitter -> Indexer -> Embedder -> ai-core vector.Store
+                                      ^                 |
+                                      |                 v
+                                  Retriever <-----------+
+                                      |
+                                      v
+                                 Synthesizer -> Response
+```
+
+- `Loader` and `Splitter` process `rag.Document` values.
+- `Indexer` calls the Embedder and writes vectors to `github.com/hexagon-codes/ai-core/store/vector.Store`.
+- `Retriever` uses the same Embedder and Store and returns `[]rag.Document`.
+- `Synthesizer` separately calls an `ai-core/llm.Provider` to produce the final answer.
+- `rag.Engine` wraps loading, splitting, indexing, and retrieval only. `Engine.Query` returns formatted retrieval context; it neither calls an LLM nor replaces a Synthesizer.
+
+## Complete compilable example
+
+Set `OPENAI_API_KEY` and ensure that `./docs` contains Markdown files before running this program. `VectorIndexer.Index` performs batched embedding internally; do not embed the chunks first.
 
 ```go
 package main
 
 import (
-    "context"
+	"context"
+	"fmt"
+	"log"
+	"os"
 
-    "github.com/hexagon-codes/hexagon/rag"
-    "github.com/hexagon-codes/hexagon/rag/loader"
-    "github.com/hexagon-codes/hexagon/rag/splitter"
-    "github.com/hexagon-codes/hexagon/rag/embedder"
-    "github.com/hexagon-codes/hexagon/rag/indexer"
-    "github.com/hexagon-codes/hexagon/rag/retriever"
-    "github.com/hexagon-codes/hexagon/rag/synthesizer"
-    "github.com/hexagon-codes/ai-core/llm/openai"
-    "github.com/hexagon-codes/ai-core/store/vector"
+	"github.com/hexagon-codes/ai-core/llm/openai"
+	"github.com/hexagon-codes/ai-core/store/vector"
+	"github.com/hexagon-codes/hexagon/rag"
+	"github.com/hexagon-codes/hexagon/rag/embedder"
+	"github.com/hexagon-codes/hexagon/rag/indexer"
+	"github.com/hexagon-codes/hexagon/rag/loader"
+	"github.com/hexagon-codes/hexagon/rag/retriever"
+	"github.com/hexagon-codes/hexagon/rag/splitter"
+	"github.com/hexagon-codes/hexagon/rag/synthesizer"
 )
 
 func main() {
-    ctx := context.Background()
+	if err := run(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+}
 
-    // 1. Load documents
-    docs, _ := loader.NewDirectoryLoader("./docs").Load(ctx)
+func run(ctx context.Context) error {
+	if os.Getenv("OPENAI_API_KEY") == "" {
+		return fmt.Errorf("OPENAI_API_KEY is required")
+	}
 
-    // 2. Split documents
-    chunks := splitter.NewRecursiveSplitter(
-        splitter.WithChunkSize(1000),
-        splitter.WithChunkOverlap(200),
-    ).Split(docs)
+	provider := openai.New(
+		os.Getenv("OPENAI_API_KEY"),
+		openai.WithModel("gpt-4o"),
+	)
+	emb := embedder.NewOpenAIEmbedder(
+		provider,
+		embedder.WithModel("text-embedding-3-small"),
+		embedder.WithDimension(1536),
+		embedder.WithBatchSize(100),
+	)
 
-    // 3. Generate embeddings
-    provider := openai.New("your-api-key")
-    emb := embedder.NewOpenAIEmbedder(provider, "text-embedding-ada-002")
-    emb.Embed(ctx, chunks)
+	store := vector.NewMemoryStore(emb.Dimension())
+	defer func() {
+		if err := store.Close(); err != nil {
+			log.Printf("close vector store: %v", err)
+		}
+	}()
 
-    // 4. Index documents
-    store := vector.NewMemoryStore(1536)
-    idx := indexer.NewVectorIndexer(store, emb)
-    idx.Index(ctx, chunks)
+	source := loader.NewDirectoryLoader(
+		"./docs",
+		loader.WithPattern("*.md"),
+		loader.WithRecursive(true),
+	)
+	docs, err := source.Load(ctx)
+	if err != nil {
+		return err
+	}
 
-    // 5. Retrieve relevant documents
-    ret := retriever.NewVectorRetriever(store, emb)
-    results, _ := ret.Retrieve(ctx, "How do I create an Agent?", retriever.WithTopK(3))
+	chunker := splitter.NewRecursiveSplitter(
+		splitter.WithRecursiveChunkSize(1000),
+		splitter.WithRecursiveChunkOverlap(200),
+		splitter.WithSeparators([]string{"\n\n", "\n", "。", ".", " ", ""}),
+	)
+	chunks, err := chunker.Split(ctx, docs)
+	if err != nil {
+		return err
+	}
 
-    // 6. Generate answer
-    syn := synthesizer.NewRefine(provider)
-    answer, _ := syn.Synthesize(ctx, "How do I create an Agent?", results)
+	idx := indexer.NewVectorIndexer(
+		store,
+		emb,
+		indexer.WithBatchSize(100),
+	)
+	if err := idx.Index(ctx, chunks); err != nil {
+		return err
+	}
 
-    println(answer)
+	ret := retriever.NewVectorRetriever(
+		store,
+		emb,
+		retriever.WithTopK(5),
+		retriever.WithMinScore(0.2),
+	)
+	const query = "What does Hexagon's RAG Engine do?"
+	hits, err := ret.Retrieve(
+		ctx,
+		query,
+		rag.WithTopK(3),
+		rag.WithMinScore(0.2),
+	)
+	if err != nil {
+		return err
+	}
+
+	syn := synthesizer.NewCompactSynthesizer(
+		synthesizer.WithCompactSynthesizerLLM(provider),
+		synthesizer.WithCompactSynthesizerMaxContext(8000),
+	)
+	response, err := syn.Synthesize(
+		ctx,
+		query,
+		hits,
+		synthesizer.WithSourceDocuments(true),
+	)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(response.Content)
+	return nil
 }
 ```
 
-## Document Loaders
+## Component APIs
 
-### Supported Document Types
+Except for the complete program above, the Go blocks below are integration fragments. They assume that the referenced `ctx`, Provider, documents, or component variables are defined by the caller; every listed function and option name comes from the current source.
 
-#### 1. Text Files
+### Loader and Splitter
+
+The common Loaders implement `rag.Loader`; every entry point is `Load(ctx)`:
 
 ```go
-// Single text file
-doc, err := loader.NewTextLoader("document.txt").Load(ctx)
+textSource := loader.NewTextLoader("document.txt")
+markdownSource := loader.NewMarkdownLoader(
+	"README.md",
+	loader.WithRemoveImages(false),
+	loader.WithRemoveLinks(false),
+	loader.WithExtractMetadata(true),
+)
+directorySource := loader.NewDirectoryLoader(
+	"./docs",
+	loader.WithPattern("*.md"),
+	loader.WithRecursive(true),
+)
+urlSource := loader.NewURLLoader("https://example.com/article")
 
-// All text files in a directory
-docs, err := loader.NewDirectoryLoader("./docs",
-    loader.WithPattern("*.txt"),
-    loader.WithRecursive(true),
-).Load(ctx)
+docs, err := directorySource.Load(ctx)
 ```
 
-#### 2. Markdown
+Use `NewReaderLoader(reader, source)` and `NewStringLoader(content, source)` for in-memory input. `URLLoader` returns the response body; it does not clean HTML into plain text.
+
+Splitters implement `Split(ctx, docs)`. Each splitter type has its own option namespace:
 
 ```go
-docs, err := loader.NewMarkdownLoader("README.md").Load(ctx)
+character := splitter.NewCharacterSplitter(
+	splitter.WithChunkSize(1000),
+	splitter.WithChunkOverlap(200),
+	splitter.WithSeparator("\n\n"),
+)
+recursive := splitter.NewRecursiveSplitter(
+	splitter.WithRecursiveChunkSize(1000),
+	splitter.WithRecursiveChunkOverlap(200),
+)
+markdown := splitter.NewMarkdownSplitter(
+	splitter.WithMarkdownChunkSize(1000),
+	splitter.WithMarkdownChunkOverlap(200),
+	splitter.WithCodeBlockAware(true),
+)
+
+chunks, err := recursive.Split(ctx, docs)
 ```
 
-#### 3. URL Content
+### Embedder and the ai-core vector Store
+
+`NewOpenAIEmbedder` takes a Provider and functional options. `Embed` accepts `[]string`; `EmbedOne` handles one text value:
 
 ```go
-docs, err := loader.NewURLLoader("https://example.com/article").Load(ctx)
+emb := embedder.NewOpenAIEmbedder(
+	provider,
+	embedder.WithModel("text-embedding-3-small"),
+	embedder.WithDimension(1536),
+	embedder.WithBatchSize(100),
+)
+
+vectors, err := emb.Embed(ctx, []string{"first chunk", "second chunk"})
+queryVector, err := emb.EmbedOne(ctx, "search query")
 ```
 
-### Custom Loader
+Production paths use `ai-core/store/vector.Store`. It exposes `Add`, `Search`, `Get`, `Delete`, `Clear`, `Count`, and `Close`; search options are `vector.WithFilter`, `vector.WithMinScore`, `vector.WithEmbedding`, and `vector.WithMetadata`.
+
+The Embedder's declared dimension, actual vector length, and Store collection dimension must match. Create a new collection and rebuild the index when changing the embedding model or dimension.
+
+### Indexer and Retriever
+
+`VectorIndexer` embeds and writes documents through `Index(ctx, docs)`:
 
 ```go
-type CustomLoader struct{}
-
-func (l *CustomLoader) Load(ctx context.Context) ([]rag.Document, error) {
-    // Custom loading logic
-    return []rag.Document{
-        {
-            ID:      "doc-1",
-            Content: "Document content",
-            Metadata: map[string]any{
-                "source": "custom",
-            },
-        },
-    }, nil
+idx := indexer.NewVectorIndexer(store, emb, indexer.WithBatchSize(100))
+if err := idx.Index(ctx, chunks); err != nil {
+	return err
 }
 ```
 
-## Document Splitting
-
-### Splitting Strategies
-
-#### 1. Character Splitting
-
-Splits by a fixed number of characters — the simplest strategy.
+Retriever constructor options and per-call options come from different packages:
 
 ```go
-splitter := splitter.NewCharacterSplitter(
-    splitter.WithChunkSize(1000),
-    splitter.WithChunkOverlap(200),
+ret := retriever.NewVectorRetriever(
+	store,
+	emb,
+	retriever.WithTopK(5),
+	retriever.WithMinScore(0.2),
+)
+
+hits, err := ret.Retrieve(
+	ctx,
+	query,
+	rag.WithTopK(3),
+	rag.WithMinScore(0.3),
+	rag.WithFilter(map[string]any{"loader": "markdown"}),
 )
 ```
 
-#### 2. Recursive Splitting
-
-Intelligent splitting that prefers paragraph and sentence boundaries.
+These are the actual keyword and hybrid retrieval constructors. `HybridRetriever` already runs its two underlying Retrievers concurrently:
 
 ```go
-splitter := splitter.NewRecursiveSplitter(
-    splitter.WithChunkSize(1000),
-    splitter.WithChunkOverlap(200),
-    splitter.WithSeparators([]string{"\n\n", "\n", "。", "，"}),
-)
-```
-
-**Recommended** — produces the best results.
-
-#### 3. Markdown Splitting
-
-Splits along Markdown structure (headings, paragraphs).
-
-```go
-splitter := splitter.NewMarkdownSplitter(
-    splitter.WithChunkSize(1000),
-)
-```
-
-#### 4. Semantic Splitting
-
-Splits based on semantic similarity — highest quality but slower.
-
-```go
-splitter := splitter.NewSemanticSplitter(
-    embedder,
-    splitter.WithThreshold(0.75), // similarity threshold
-)
-```
-
-### Splitting Parameter Tuning
-
-| Parameter | Recommended Value | Description |
-|-----------|------------------|-------------|
-| ChunkSize | 500–1500 | Adjust based on document characteristics |
-| ChunkOverlap | 100–300 | 10–20% of ChunkSize |
-| Separators | `["\n\n", "\n", "。"]` | Prefer Chinese period for Chinese text |
-
-## Embedding Generation
-
-### OpenAI Embeddings
-
-```go
-embedder := embedder.NewOpenAIEmbedder(
-    provider,
-    "text-embedding-ada-002", // 1536 dimensions
+keyword := retriever.NewKeywordRetriever(chunks, retriever.WithKeywordTopK(10))
+hybrid := retriever.NewHybridRetriever(
+	ret,
+	keyword,
+	retriever.WithVectorWeight(0.7),
+	retriever.WithKeywordWeight(0.3),
+	retriever.WithHybridTopK(5),
 )
 
-// Or use a smaller model
-embedder := embedder.NewOpenAIEmbedder(
-    provider,
-    "text-embedding-3-small", // 512 dimensions, faster
+hits, err := hybrid.Retrieve(ctx, query, rag.WithTopK(5))
+```
+
+### Synthesizer and Engine
+
+The available Synthesizer constructors are:
+
+- `synthesizer.NewRefineSynthesizer`
+- `synthesizer.NewCompactSynthesizer`
+- `synthesizer.NewTreeSummarizeSynthesizer`
+- `synthesizer.NewSimpleSummarizeSynthesizer`
+
+Inject an `ai-core/llm.Provider` with `WithRefineSynthesizerLLM`, `WithCompactSynthesizerLLM`, `WithTreeSynthesizerLLM`, or `WithSimpleSynthesizerLLM`, respectively. Each call uses `Synthesize(ctx, query, docs, opts...)` and returns `*synthesizer.Response`.
+
+The following is a fragment; it assumes `store`, `emb`, `source`, `chunker`, `syn`, `ctx`, and `query` have already been defined:
+
+```go
+engine := rag.NewEngine(
+	rag.WithStore(store),
+	rag.WithEngineEmbedder(emb),
+	rag.WithLoader(source),
+	rag.WithEngineSplitter(chunker),
+	rag.WithEngineTopK(5),
+	rag.WithEngineMinScore(0.2),
 )
+
+if err := engine.Ingest(ctx); err != nil {
+	return err
+}
+docs, err := engine.Retrieve(ctx, query, rag.WithTopK(3))
+if err != nil {
+	return err
+}
+answer, err := syn.Synthesize(ctx, query, docs)
 ```
 
-### Cached Embedder
+Call `engine.Query(ctx, query, ...)` when you only need concatenated retrieval context. Its return type is `(string, error)`, not a final LLM answer.
 
-Avoid recomputing vectors to improve performance.
+## Moving to Qdrant
 
-```go
-cachedEmbedder := embedder.NewCachedEmbedder(
-    baseEmbedder,
-    embedder.WithCacheSize(1000),
-)
-```
+### New collection
 
-## Vector Storage
-
-### In-Memory Store
-
-Suitable for development and small-scale data.
+Replace the in-memory Store with this Qdrant Store. The remaining Indexer, Retriever, and Engine code stays unchanged. This fragment assumes `emb` is defined:
 
 ```go
-store := vector.NewMemoryStore(1536) // vector dimensions
-```
-
-### Qdrant
-
-Recommended for production — excellent performance.
-
-```go
-import "github.com/hexagon-codes/ai-core/store/vector/qdrant"
-
 store, err := qdrant.New(qdrant.Config{
-    Host:       "localhost",
-    Port:       6333,
-    Collection: "documents",
-    Dimension:  1536,
+	Host:             "localhost",
+	Port:             6333,
+	Collection:       "documents_v2",
+	Dimension:        emb.Dimension(),
+	Distance:         qdrant.DistanceCosine,
+	CreateCollection: true,
 })
+if err != nil {
+	return err
+}
 defer store.Close()
 ```
 
-## Retrieval Strategies
+Use the default `qdrant.PointIDUUIDv8` for new collections. Qdrant rejects empty IDs, incorrect dimensions, non-finite vectors, and the reserved metadata keys `content`, `created_at`, and `_original_id`.
 
-### 1. Vector Retrieval
+### Migrating the old point-ID strategy
 
-Retrieval based on semantic similarity.
+`qdrant.PointIDLegacyHash31` exists only to read and migrate legacy collections. Do not switch strategies on the same collection: old numeric points and new UUID points can coexist as duplicates, and `Get`/`Delete` mapping for original IDs changes after the switch.
 
-```go
-retriever := retriever.NewVectorRetriever(store, embedder)
+Migration sequence:
 
-results, _ := retriever.Retrieve(ctx, query,
-    retriever.WithTopK(5),              // return top 5 results
-    retriever.WithMinScore(0.7),        // minimum similarity score 0.7
-    retriever.WithFilters(map[string]any{
-        "type": "technical",             // metadata filtering
-    }),
-)
-```
+1. Open the old collection with `PointIDLegacyHash31`.
+2. Create a differently named collection with the same dimension and distance. Omit `PointIDStrategy` to use the safe default.
+3. Read the old collection with `Scroll` and write the new collection with `AddBatch`.
+4. Compare `Count`, sample retrieval and by-ID reads, then switch application configuration. Keep the old collection through the rollback window.
 
-### 2. Keyword Retrieval
-
-Keyword matching based on the BM25 algorithm.
+This core migration fragment assumes that `ctx`, `legacy`, and `target` are initialized:
 
 ```go
-retriever := retriever.NewKeywordRetriever(index)
-
-results, _ := retriever.Retrieve(ctx, query,
-    retriever.WithTopK(5),
-)
-```
-
-### 3. Hybrid Retrieval
-
-Combines vector and keyword retrieval.
-
-```go
-retriever := retriever.NewHybridRetriever(
-    vectorRetriever,
-    keywordRetriever,
-    retriever.WithAlpha(0.7), // vector weight 0.7, keyword weight 0.3
-)
-```
-
-### 4. Multi-Query Retrieval
-
-Generates multiple query variants to improve recall.
-
-```go
-retriever := retriever.NewMultiQueryRetriever(
-    baseRetriever,
-    llmProvider,
-    retriever.WithNumQueries(3), // generate 3 query variants
-)
-```
-
-## Reranking
-
-Improve the relevance of retrieved results.
-
-```go
-import "github.com/hexagon-codes/hexagon/rag/reranker"
-
-// Create a reranker
-reranker := reranker.NewLLMReranker(llmProvider)
-
-// Rerank retrieval results
-reranked, _ := reranker.Rerank(ctx, query, results,
-    reranker.WithTopN(3), // return top 3
-)
-```
-
-## Answer Synthesis
-
-### 1. Refine Strategy
-
-Processes documents one by one, progressively refining the answer.
-
-```go
-synthesizer := synthesizer.NewRefine(llmProvider,
-    synthesizer.WithSystemPrompt("Answer the question based on the provided context"),
-)
-
-answer, _ := synthesizer.Synthesize(ctx, query, results)
-```
-
-**Use case**: When you need to synthesize information from multiple documents.
-
-### 2. Compact Strategy
-
-Merges all documents into a single prompt.
-
-```go
-synthesizer := synthesizer.NewCompact(llmProvider)
-
-answer, _ := synthesizer.Synthesize(ctx, query, results)
-```
-
-**Use case**: When the number of documents is small and the context window is large enough.
-
-### 3. Tree Strategy
-
-Tree-based aggregation with hierarchical summarization.
-
-```go
-synthesizer := synthesizer.NewTree(llmProvider,
-    synthesizer.WithBranchFactor(3), // 3 branches per level
-)
-
-answer, _ := synthesizer.Synthesize(ctx, query, results)
-```
-
-**Use case**: When a large number of documents need to be processed.
-
-## Full RAG Engine
-
-Use the RAG Engine to simplify the workflow.
-
-```go
-engine := rag.NewEngine(
-    rag.WithLLM(llmProvider),
-    rag.WithEmbedder(embedder),
-    rag.WithVectorStore(store),
-    rag.WithRetrieverType(rag.RetrieverTypeHybrid),
-    rag.WithSynthesizerType(rag.SynthesizerTypeRefine),
-)
-
-// Index documents
-engine.Index(ctx, docs)
-
-// Query
-answer, _ := engine.Query(ctx, "How do I use RAG?")
-```
-
-## Performance Optimization
-
-### 1. Batch Processing
-
-```go
-// Batch embedding generation
-embedder.EmbedBatch(ctx, chunks, embedder.WithBatchSize(100))
-
-// Batch indexing
-indexer.IndexBatch(ctx, chunks, indexer.WithConcurrency(4))
-```
-
-### 2. Asynchronous Indexing
-
-```go
-// Index documents in the background
-go func() {
-    indexer.Index(ctx, docs)
-}()
-```
-
-### 3. Incremental Updates
-
-```go
-// Only index new documents
-indexer.IndexIncremental(ctx, newDocs)
-```
-
-### 4. Caching Strategy
-
-```go
-// Cache query results
-engine := rag.NewEngine(
-    rag.WithQueryCache(
-        cache.NewLRU(100), // cache 100 query results
-    ),
-)
-```
-
-## Evaluation Metrics
-
-### Retrieval Quality
-
-```go
-import "github.com/hexagon-codes/hexagon/evaluate/metrics"
-
-// Relevance evaluation
-relevance := metrics.NewRelevanceMetric(llmProvider)
-score, _ := relevance.Evaluate(ctx, evaluate.EvalInput{
-    Query:    query,
-    Context:  results,
-    Response: answer,
+err := legacy.Scroll(ctx, 100, func(docs []vector.Document) error {
+	return target.AddBatch(
+		ctx,
+		docs,
+		qdrant.WithBatchSize(100),
+		qdrant.WithConcurrency(4),
+		qdrant.WithRetry(3, time.Second),
+	)
 })
-
-// Faithfulness evaluation (whether the answer is grounded in context)
-faithfulness := metrics.NewFaithfulnessMetric(llmProvider)
-score, _ := faithfulness.Evaluate(ctx, input)
 ```
 
-## FAQ
+Data already overwritten by a legacy Hash31 collision cannot be recovered from that collection; rebuild the new collection from source documents in that case.
 
-### Q: How do I choose a chunk size?
+## Caching, concurrency, and incremental indexing
 
-**A**:
-- Short text (news, comments): 300–500
-- Medium text (articles, documents): 500–1000
-- Long text (books, papers): 1000–1500
+Use the existing LRU wrapper when only embedding results need caching:
 
-### Q: Vector retrieval vs. keyword retrieval?
+```go
+cached := embedder.NewCachedEmbedder(
+	emb,
+	embedder.WithMaxCacheSize(10_000),
+)
+```
 
-**A**:
-- Vector retrieval: Strong semantic understanding, but weaker on exact matches
-- Keyword retrieval: Strong on exact matches, but limited in understanding
-- **Recommendation**: Hybrid retrieval — combines the strengths of both
+Use `ConcurrentIndexer` for concurrent indexing. Do not wrap `Index` in a bare goroutine whose error cannot be collected:
 
-### Q: How do I handle Chinese text?
+```go
+idx := indexer.NewConcurrentIndexer(
+	store,
+	cached,
+	indexer.WithConcurrentBatchSize(100),
+	indexer.WithConcurrency(4),
+)
+if err := idx.Index(ctx, chunks); err != nil {
+	return err
+}
+```
 
-**A**:
-- Use an Embedder that supports Chinese
-- Use Chinese punctuation as separators: `["。", "！", "？", "\n\n"]`
-- The Markdown splitter has good Chinese support
+To skip unchanged documents by content checksum within one process, use:
 
-### Q: How do I improve retrieval accuracy?
+```go
+idx := indexer.NewIncrementalIndexer(
+	store,
+	emb,
+	indexer.WithIncrementalBatchSize(100),
+)
+if err := idx.Index(ctx, changedDocs); err != nil {
+	return err
+}
+```
 
-**A**:
-1. Use semantic splitting instead of fixed-length splitting
-2. Set an appropriate Chunk Overlap
-3. Use a reranker
-4. Use multi-query retrieval to generate query variants
-5. Use a hybrid retrieval strategy
+`IncrementalIndexer` keeps checksum state in memory; it is not persisted across processes. The current Engine has no query-result cache option.
 
-## Next Steps
+## Evaluate
 
-- Learn about [Agent RAG Integration](./agent-development.md#rag-集成)
-- Explore [RAG Nodes in Graph Orchestration](./graph-orchestration.md#rag-节点)
-- Master [RAG Performance Optimization](./performance-optimization.md#rag-优化)
+This fragment uses the existing `evaluate/rag.NewEvaluator`. Passing `nil` selects its built-in rule-based evaluation; pass an implementation of `evaluate/rag.LLMProvider` for LLM judging:
+
+```go
+contexts := make([]string, 0, len(hits))
+for _, doc := range hits {
+	contexts = append(contexts, doc.Content)
+}
+
+report, err := rageval.NewEvaluator(nil).Evaluate(ctx, &rageval.EvaluationInput{
+	Question: query,
+	Answer:   answer.Content,
+	Contexts: contexts,
+})
+if err != nil {
+	return err
+}
+fmt.Printf("faithfulness=%.2f relevancy=%.2f\n", report.Faithfulness, report.Relevancy)
+```
+
+The general evaluation framework also provides `metrics.NewRelevanceEvaluator` and `metrics.NewFaithfulnessEvaluator`; both accept `evaluate.LLMJudge`.
+
+## Production checklist
+
+- Pass a cancellable, bounded `context.Context` through every call and handle every error.
+- Use the same embedding model and dimension for ingestion and querying; create a new collection and rebuild after a change.
+- Keep document IDs stable and non-empty, and do not use Qdrant's reserved metadata keys.
+- Before cutover, compare old and new collection counts and run retrieval and answer regression on a fixed query set.
+- Call `Store.Close` on shutdown. Use Qdrant's own `AddBatch` only for migrations or direct vector writes.
+
+## Related documentation
+
+- [RAG guide](rag-guide.en.md)
