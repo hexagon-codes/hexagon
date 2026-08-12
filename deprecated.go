@@ -188,17 +188,19 @@ const (
 //
 // 示例：
 //
-//	controller := hexagon.NewCostController(
+//	controller, err := hexagon.NewCostController(
 //	    hexagon.WithBudget(10.0),  // $10 预算
 //	    hexagon.WithMaxTokensTotal(100000),
 //	)
+//	if err != nil {
+//	    return err
+//	}
 var NewCostController = cost.NewController
 
 // 成本控制选项
 var (
 	WithBudget              = cost.WithBudget
 	WithMaxTokensPerRequest = cost.WithMaxTokensPerRequest
-	WithMaxTokensPerSession = cost.WithMaxTokensPerSession
 	WithMaxTokensTotal      = cost.WithMaxTokensTotal
 	WithRequestsPerMinute   = cost.WithRequestsPerMinute
 )

@@ -1,18 +1,24 @@
 // Package core 提供 Hexagon 框架的核心接口和类型
 //
 // 本文件实现 WithFallback 机制：
+//
 //   - Fallback: 降级处理
+//
 //   - Retry: 重试机制
+//
 //   - CircuitBreaker: 熔断器
+//
 //   - RunnableWithFallback: 带降级的 Runnable
 //
 //   - Resilience4j: 弹性模式
+//
 //   - Polly: 弹性和瞬态故障处理
 package core
 
 import (
 	"context"
 	"errors"
+	"math"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/util/circuit"
@@ -26,7 +32,7 @@ var (
 	ErrAllFallbacksFailed = errors.New("all fallbacks failed")
 
 	// ErrCircuitOpen 熔断器打开
-	ErrCircuitOpen = errors.New("circuit breaker is open")
+	ErrCircuitOpen = circuit.ErrCircuitOpen
 
 	// ErrMaxRetriesExceeded 超过最大重试次数
 	ErrMaxRetriesExceeded = errors.New("max retries exceeded")
@@ -262,16 +268,16 @@ func (r *RunnableWithFallback[I, O]) shouldFallback(err error) bool {
 
 // RetryConfig 重试配置
 type RetryConfig struct {
-	// MaxRetries 最大重试次数
+	// MaxRetries 最大重试次数，必须非负
 	MaxRetries int
 
-	// InitialDelay 初始延迟
+	// InitialDelay 初始延迟，必须非负；零值表示立即重试
 	InitialDelay time.Duration
 
-	// MaxDelay 最大延迟
+	// MaxDelay 最大延迟，必须非负；零值表示不等待
 	MaxDelay time.Duration
 
-	// Multiplier 延迟倍数
+	// Multiplier 延迟倍数；零值表示固定使用 InitialDelay
 	Multiplier float64
 
 	// Jitter 抖动比例 (0-1)
@@ -341,33 +347,59 @@ func (r *RunnableWithRetry[I, O]) OutputSchema() *Schema {
 //   - 总尝试次数：手写循环为 attempt 0..MaxRetries，即首次调用 + MaxRetries 次重试，
 //     共 MaxRetries+1 次。toolkit 的 MaxAttempts 即"总尝试次数"，故取 MaxRetries+1。
 //   - 退避曲线：手写循环首次重试等待 InitialDelay，之后每次乘以 Multiplier 并以
-//     MaxDelay 封顶；toolkit 在 Multiplier>0 时自动启用 ExponentialBackoff，其
-//     第 n 次（一基）延迟为 Delay*Multiplier^(n-1) 并由 MaxDelay 封顶，曲线一致。
+//     MaxDelay 封顶；此适配器显式选择 ExponentialBackoff，其第 n 次（一基）延迟为
+//     Delay*Multiplier^(n-1) 并由 MaxDelay 封顶，曲线一致。
+//     为兼容 toolkit v0.2.6 的既有行为，MaxDelay 为零时使用零固定延迟，
+//     Multiplier 为零时使用 InitialDelay 固定延迟；正值组合才使用指数退避。
+//     负值等非法配置仍交由 toolkit v0.3.4 的严格校验拒绝。
 //     手写循环不使用 Jitter 字段，故此处也不设置抖动，保持无抖动行为。
-//   - RetryOn → RetryIf：判定为不可重试时直接返回原始错误，语义一致。
-//   - OnRetry 计数：手写循环以零基传入（首次重试 attempt==0），故开启
-//     WithOnRetryZeroBased() 将 toolkit 默认的一基计数平移为零基。
+//   - RetryOn → If：判定为不可重试时直接返回原始错误，语义一致。
+//   - OnRetry 计数：手写循环以零基传入（首次重试 attempt==0），toolkit
+//     使用一基计数，故只在本适配器回调边界减一。
 //   - 最终错误可解包：手写循环重试耗尽直接返回原始 lastErr，调用方可
-//     errors.Is(err, 原始错误)。toolkit 默认用 %v 嵌入会丢失错误链，故开启
-//     WithUnwrapFinalError() 使最终错误多 %w 包装，errors.Is 同时命中
-//     ErrMaxAttemptsReached 与原始 lastErr。
+//     errors.Is(err, 原始错误)。toolkit 当前默认以双 %w 同时保留
+//     ErrMaxAttemptsReached 与原始 lastErr，无需额外 Option。
 func (r *RunnableWithRetry[I, O]) retryOptions() []retry.Option {
 	opts := []retry.Option{
 		retry.Attempts(r.config.MaxRetries + 1),
-		retry.Delay(r.config.InitialDelay),
-		retry.MaxDelay(r.config.MaxDelay),
-		retry.Multiplier(r.config.Multiplier),
-		// OnRetry 采用零基计数，对齐手写循环的 attempt 语义
-		retry.WithOnRetryZeroBased(),
-		// 重试耗尽时最终错误可被 errors.Is 解包到原始 lastErr
-		retry.WithUnwrapFinalError(),
+	}
+	switch {
+	case r.config.InitialDelay < 0 || r.config.MaxDelay < 0 || r.config.Multiplier < 0 ||
+		math.IsNaN(r.config.Multiplier) || math.IsInf(r.config.Multiplier, 0):
+		// 非法非零值继续下传，由 toolkit 统一返回 ErrInvalidConfig。
+		opts = append(opts,
+			retry.Delay(r.config.InitialDelay),
+			retry.MaxDelay(r.config.MaxDelay),
+			retry.Multiplier(r.config.Multiplier),
+			retry.DelayType(retry.ExponentialBackoff),
+		)
+	case r.config.MaxDelay == 0:
+		opts = append(opts,
+			retry.Delay(0),
+			retry.DelayType(retry.FixedDelay),
+		)
+	case r.config.Multiplier == 0:
+		opts = append(opts,
+			retry.Delay(r.config.InitialDelay),
+			retry.MaxDelay(r.config.MaxDelay),
+			retry.DelayType(retry.FixedDelay),
+		)
+	default:
+		opts = append(opts,
+			retry.Delay(r.config.InitialDelay),
+			retry.MaxDelay(r.config.MaxDelay),
+			retry.Multiplier(r.config.Multiplier),
+			retry.DelayType(retry.ExponentialBackoff),
+		)
 	}
 	if r.config.RetryOn != nil {
-		opts = append(opts, retry.RetryIf(r.config.RetryOn))
+		opts = append(opts, retry.If(r.config.RetryOn))
 	}
 	if r.config.OnRetry != nil {
-		// toolkit 的 OnRetry(n, err) 中 n 已按零基平移，与手写循环一致
-		opts = append(opts, retry.OnRetry(r.config.OnRetry))
+		// toolkit 的 n 为一基；Hexagon 的公开合同保持零基。
+		opts = append(opts, retry.OnRetry(func(n int, err error) {
+			r.config.OnRetry(n-1, err)
+		}))
 	}
 	return opts
 }
@@ -433,16 +465,18 @@ func (r *RunnableWithRetry[I, O]) BatchStream(ctx context.Context, inputs []I, o
 
 // ============== Circuit Breaker ==============
 
-// CircuitState 熔断器状态
-type CircuitState int
+const defaultCircuitBreakerHalfOpenMaxRequests = 3
+
+// CircuitState 熔断器状态，直接复用 toolkit 的唯一状态定义。
+type CircuitState = circuit.State
 
 const (
 	// CircuitClosed 关闭状态（正常）
-	CircuitClosed CircuitState = iota
+	CircuitClosed = circuit.StateClosed
 	// CircuitOpen 打开状态（熔断）
-	CircuitOpen
+	CircuitOpen = circuit.StateOpen
 	// CircuitHalfOpen 半开状态（尝试恢复）
-	CircuitHalfOpen
+	CircuitHalfOpen = circuit.StateHalfOpen
 )
 
 // CircuitBreakerConfig 熔断器配置
@@ -452,6 +486,9 @@ type CircuitBreakerConfig struct {
 
 	// SuccessThreshold 成功阈值（半开状态）
 	SuccessThreshold int
+
+	// HalfOpenMaxRequests 半开状态允许的最大并发探测数；为零时使用默认值 3。
+	HalfOpenMaxRequests int
 
 	// Timeout 熔断超时
 	Timeout time.Duration
@@ -463,68 +500,65 @@ type CircuitBreakerConfig struct {
 // DefaultCircuitBreakerConfig 默认熔断器配置
 func DefaultCircuitBreakerConfig() *CircuitBreakerConfig {
 	return &CircuitBreakerConfig{
-		FailureThreshold: 5,
-		SuccessThreshold: 3,
-		Timeout:          30 * time.Second,
+		FailureThreshold:    5,
+		SuccessThreshold:    3,
+		HalfOpenMaxRequests: defaultCircuitBreakerHalfOpenMaxRequests,
+		Timeout:             30 * time.Second,
 	}
 }
 
-// CircuitBreaker 熔断器
-//
-// 状态机委托 toolkit/util/circuit，避免与 toolkit 各维护一份私网/状态逻辑产生防护漂移。
-// 用法契约：Allow() 作门控检查（允许返回 true），随后**恰好**配对一次
-// RecordSuccess() 或 RecordFailure()（RunnableWithCircuitBreaker.Invoke/Stream 即如此）。
+// CircuitBreaker 是 toolkit 熔断器的领域配置适配器，不复制状态机。
 type CircuitBreaker struct {
-	config  *CircuitBreakerConfig
 	breaker *circuit.Breaker
 }
 
 // NewCircuitBreaker 创建熔断器
-func NewCircuitBreaker(config ...*CircuitBreakerConfig) *CircuitBreaker {
-	cfg := DefaultCircuitBreakerConfig()
+func NewCircuitBreaker(config ...*CircuitBreakerConfig) (*CircuitBreaker, error) {
+	cfg := *DefaultCircuitBreakerConfig()
 	if len(config) > 0 && config[0] != nil {
-		cfg = config[0]
+		cfg = *config[0]
+	}
+	if cfg.HalfOpenMaxRequests < 0 {
+		return nil, errors.New("core: circuit breaker half-open max requests must not be negative")
+	}
+	if cfg.HalfOpenMaxRequests == 0 {
+		cfg.HalfOpenMaxRequests = defaultCircuitBreakerHalfOpenMaxRequests
 	}
 
-	// 半开探测数取 SuccessThreshold（累计该数次成功即关闭），至少 1。
-	halfOpenMax := max(cfg.SuccessThreshold, 1)
 	opts := []circuit.Option{
 		circuit.WithThreshold(cfg.FailureThreshold),
 		circuit.WithSuccessThreshold(cfg.SuccessThreshold),
 		circuit.WithTimeout(cfg.Timeout),
-		circuit.WithHalfOpenMaxRequests(halfOpenMax),
+		circuit.WithHalfOpenMaxRequests(cfg.HalfOpenMaxRequests),
 	}
 	if cfg.OnStateChange != nil {
-		onChange := cfg.OnStateChange
-		opts = append(opts, circuit.WithOnStateChange(func(from, to circuit.State) {
-			onChange(CircuitState(from), CircuitState(to))
-		}))
+		opts = append(opts, circuit.WithOnStateChange(cfg.OnStateChange))
 	}
 
-	return &CircuitBreaker{
-		config:  cfg,
-		breaker: circuit.New(opts...),
+	breaker, err := circuit.New(opts...)
+	if err != nil {
+		return nil, err
 	}
+	return &CircuitBreaker{breaker: breaker}, nil
 }
 
 // State 获取当前状态
 func (cb *CircuitBreaker) State() CircuitState {
-	return CircuitState(cb.breaker.State())
+	return cb.breaker.State()
 }
 
-// Allow 检查是否允许执行（开路返回 false）
-func (cb *CircuitBreaker) Allow() bool {
-	return cb.breaker.Allow() == nil
+// Acquire 获取与一次执行严格绑定的许可。
+func (cb *CircuitBreaker) Acquire() (*circuit.Permit, error) {
+	permit, err := cb.breaker.Acquire()
+	if errors.Is(err, circuit.ErrCircuitOpen) || errors.Is(err, circuit.ErrTooManyRequests) {
+		return nil, ErrCircuitOpen
+	}
+	return permit, err
 }
 
-// RecordSuccess 记录成功（须与一次 Allow 配对）
-func (cb *CircuitBreaker) RecordSuccess() {
-	cb.breaker.Success()
-}
-
-// RecordFailure 记录失败（须与一次 Allow 配对）
-func (cb *CircuitBreaker) RecordFailure() {
-	cb.breaker.Failure()
+// Close 关闭熔断器并释放生命周期资源。
+func (cb *CircuitBreaker) Close() {
+	cb.breaker.Close()
 }
 
 // RunnableWithCircuitBreaker 带熔断器的 Runnable
@@ -534,11 +568,15 @@ type RunnableWithCircuitBreaker[I, O any] struct {
 }
 
 // WithCircuitBreaker 创建带熔断器的 Runnable
-func WithCircuitBreaker[I, O any](runnable Runnable[I, O], config ...*CircuitBreakerConfig) *RunnableWithCircuitBreaker[I, O] {
+func WithCircuitBreaker[I, O any](runnable Runnable[I, O], config ...*CircuitBreakerConfig) (*RunnableWithCircuitBreaker[I, O], error) {
+	breaker, err := NewCircuitBreaker(config...)
+	if err != nil {
+		return nil, err
+	}
 	return &RunnableWithCircuitBreaker[I, O]{
 		runnable: runnable,
-		breaker:  NewCircuitBreaker(config...),
-	}
+		breaker:  breaker,
+	}, nil
 }
 
 // Name 返回名称
@@ -563,51 +601,23 @@ func (r *RunnableWithCircuitBreaker[I, O]) OutputSchema() *Schema {
 
 // Invoke 执行（带熔断）
 func (r *RunnableWithCircuitBreaker[I, O]) Invoke(ctx context.Context, input I, opts ...Option) (O, error) {
-	if !r.breaker.Allow() {
-		var zero O
-		return zero, ErrCircuitOpen
-	}
-
-	result, err := r.runnable.Invoke(ctx, input, opts...)
-	if err != nil {
-		r.breaker.RecordFailure()
-		return result, err
-	}
-
-	r.breaker.RecordSuccess()
-	return result, nil
+	return executeWithCircuit(r.breaker, func() (O, error) {
+		return r.runnable.Invoke(ctx, input, opts...)
+	})
 }
 
 // Stream 流式执行（带熔断）
 func (r *RunnableWithCircuitBreaker[I, O]) Stream(ctx context.Context, input I, opts ...Option) (*StreamReader[O], error) {
-	if !r.breaker.Allow() {
-		return nil, ErrCircuitOpen
-	}
-
-	stream, err := r.runnable.Stream(ctx, input, opts...)
-	if err != nil {
-		r.breaker.RecordFailure()
-		return nil, err
-	}
-
-	r.breaker.RecordSuccess()
-	return stream, nil
+	return executeWithCircuit(r.breaker, func() (*StreamReader[O], error) {
+		return r.runnable.Stream(ctx, input, opts...)
+	})
 }
 
 // Batch 批量执行
 func (r *RunnableWithCircuitBreaker[I, O]) Batch(ctx context.Context, inputs []I, opts ...Option) ([]O, error) {
-	if !r.breaker.Allow() {
-		return nil, ErrCircuitOpen
-	}
-
-	results, err := r.runnable.Batch(ctx, inputs, opts...)
-	if err != nil {
-		r.breaker.RecordFailure()
-		return nil, err
-	}
-
-	r.breaker.RecordSuccess()
-	return results, nil
+	return executeWithCircuit(r.breaker, func() ([]O, error) {
+		return r.runnable.Batch(ctx, inputs, opts...)
+	})
 }
 
 // Collect 流收集
@@ -622,16 +632,26 @@ func (r *RunnableWithCircuitBreaker[I, O]) Transform(ctx context.Context, input 
 
 // BatchStream 批量流式
 func (r *RunnableWithCircuitBreaker[I, O]) BatchStream(ctx context.Context, inputs []I, opts ...Option) (*StreamReader[O], error) {
-	if !r.breaker.Allow() {
-		return nil, ErrCircuitOpen
-	}
+	return executeWithCircuit(r.breaker, func() (*StreamReader[O], error) {
+		return r.runnable.BatchStream(ctx, inputs, opts...)
+	})
+}
 
-	stream, err := r.runnable.BatchStream(ctx, inputs, opts...)
+func executeWithCircuit[T any](breaker *CircuitBreaker, run func() (T, error)) (result T, resultErr error) {
+	permit, err := breaker.Acquire()
 	if err != nil {
-		r.breaker.RecordFailure()
-		return nil, err
+		var zero T
+		if errors.Is(err, circuit.ErrCircuitOpen) || errors.Is(err, circuit.ErrTooManyRequests) {
+			return zero, ErrCircuitOpen
+		}
+		return zero, err
 	}
-
-	r.breaker.RecordSuccess()
-	return stream, nil
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			_ = permit.Complete(errors.New("circuit execution panicked")) //nolint:errcheck // 必须优先传播原始 panic。
+			panic(recovered)
+		}
+		resultErr = errors.Join(resultErr, permit.Complete(resultErr))
+	}()
+	return run()
 }

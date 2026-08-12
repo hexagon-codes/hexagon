@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"maps"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -849,9 +847,13 @@ func (s *Server) sendPushNotification(ctx context.Context, task *Task) {
 	if err != nil || config == nil {
 		return
 	}
+	notification, err := NewTaskStatusNotification(task)
+	if err != nil {
+		return
+	}
 
 	// 异步发送推送通知
-	go s.pushService.Push(context.Background(), config, task)
+	go s.pushService.Push(context.Background(), clonePushNotificationConfig(config), notification)
 }
 
 // writeResult 写入成功响应
@@ -882,64 +884,4 @@ func (s *Server) writeSSEEvent(w http.ResponseWriter, eventType string, data any
 // writeSSEError 写入 SSE 错误
 func (s *Server) writeSSEError(w http.ResponseWriter, err *Error) {
 	s.writeSSEEvent(w, EventTypeError, &ErrorEvent{Error: err})
-}
-
-// ============== PushService 接口 ==============
-
-// PushService 推送服务接口
-type PushService interface {
-	// Push 发送推送通知
-	Push(ctx context.Context, config *PushNotificationConfig, task *Task) error
-}
-
-// ============== HTTPPushService ==============
-
-// HTTPPushService HTTP 推送服务
-type HTTPPushService struct {
-	httpClient *http.Client
-}
-
-// NewHTTPPushService 创建 HTTP 推送服务
-func NewHTTPPushService() *HTTPPushService {
-	return &HTTPPushService{
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-	}
-}
-
-// Push 发送推送通知
-func (s *HTTPPushService) Push(ctx context.Context, config *PushNotificationConfig, task *Task) error {
-	if config.URL == "" {
-		return nil
-	}
-
-	// 构造推送数据
-	data, err := json.Marshal(task)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, config.URL, strings.NewReader(string(data)))
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("Content-Type", ContentTypeJSON)
-	if config.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+config.Token)
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("push failed: %d %s", resp.StatusCode, string(body))
-	}
-
-	return nil
 }

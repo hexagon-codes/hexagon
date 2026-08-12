@@ -1,12 +1,15 @@
 // Package prometheus 提供 Prometheus 指标导出
 //
-// 本包重新导出 toolkit/infra/prometheus 的实现，保持向后兼容性。
+// 本包直接复用 toolkit/infra/prometheus 的实现。
 //
 // 使用示例:
 //
-//	exporter := prometheus.NewExporter(
+//	exporter, err := prometheus.NewExporter(
 //	    prometheus.WithNamespace("myapp"),
 //	)
+//	if err != nil {
+//	    return err
+//	}
 //	http.Handle("/metrics", exporter.Handler())
 package prometheus
 
@@ -25,20 +28,20 @@ type (
 	// Registry 指标注册表
 	Registry = toolkitProm.Registry
 
-	// Collector 指标收集器
-	Collector = toolkitProm.Collector
+	// Factory 指标工厂
+	Factory = toolkitProm.Factory
 
-	// PrometheusCounter Prometheus Counter
-	PrometheusCounter = toolkitProm.PrometheusCounter
+	// Counter Prometheus 计数器
+	Counter = toolkitProm.Counter
 
-	// PrometheusGauge Prometheus Gauge
-	PrometheusGauge = toolkitProm.PrometheusGauge
+	// Gauge Prometheus 仪表
+	Gauge = toolkitProm.Gauge
 
-	// PrometheusHistogram Prometheus Histogram
-	PrometheusHistogram = toolkitProm.PrometheusHistogram
+	// Histogram Prometheus 直方图
+	Histogram = toolkitProm.Histogram
 
-	// PrometheusSummary Prometheus Summary
-	PrometheusSummary = toolkitProm.PrometheusSummary
+	// Summary Prometheus 摘要
+	Summary = toolkitProm.Summary
 
 	// MetricsAdapter 指标适配器
 	MetricsAdapter = toolkitProm.MetricsAdapter
@@ -58,18 +61,18 @@ var (
 	// NewRegistry 创建注册表
 	NewRegistry = toolkitProm.NewRegistry
 
-	// NewCollector 创建收集器
-	NewCollector = toolkitProm.NewCollector
+	// NewFactory 创建指标工厂
+	NewFactory = toolkitProm.NewFactory
 
 	// NewMetricsAdapter 创建指标适配器
 	NewMetricsAdapter = toolkitProm.NewMetricsAdapter
 )
 
-// 重新导出变量
+// 重新导出默认配置工厂
 var (
-	// DefaultBuckets 默认桶
+	// DefaultBuckets 返回默认桶
 	DefaultBuckets = toolkitProm.DefaultBuckets
 
-	// DefaultQuantiles 默认分位数
+	// DefaultQuantiles 返回默认分位数
 	DefaultQuantiles = toolkitProm.DefaultQuantiles
 )

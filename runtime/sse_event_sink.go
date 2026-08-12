@@ -47,11 +47,15 @@ type SSEEventSink struct {
 func NewSSEEventSink(w http.ResponseWriter) (*SSEEventSink, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return nil, fmt.Errorf("runtime/sse: ResponseWriter 不支持 http.Flusher")
+		return nil, fmt.Errorf("runtime/sse: response writer does not support http.Flusher")
 	}
 	// sse.NewWriter 设置 SSE 头部（Content-Type / Cache-Control / Connection /
 	// X-Accel-Buffering，与原手写一致）并提供标准事件帧格式 + 线程安全 flush。
-	return &SSEEventSink{sw: sse.NewWriter(w), w: w, flusher: flusher}, nil
+	writer, err := sse.NewWriter(w)
+	if err != nil {
+		return nil, fmt.Errorf("runtime/sse: create writer: %w", err)
+	}
+	return &SSEEventSink{sw: writer, w: w, flusher: flusher}, nil
 }
 
 // Emit 实现 EventSink。

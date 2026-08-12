@@ -11,18 +11,24 @@
 //
 // 快速使用：
 //
-//	ui := devui.New(devui.WithAddr(":8080"))
-//	defer ui.Stop(context.Background())
+//	ui := devui.New(devui.WithAddr("127.0.0.1:8080"))
+//	defer func() {
+//	    if err := ui.Stop(context.Background()); err != nil {
+//	        log.Printf("Dev UI shutdown failed: %v", err)
+//	    }
+//	}()
 //
-//	agent := hexagon.QuickStart(
-//	    hexagon.WithHooks(ui.HookManager()),
-//	)
-//
-//	go ui.Start()
-//	// 访问 http://localhost:8080
+//	ctx := hooks.ContextWithManager(context.Background(), ui.HookManager())
+//	go func() {
+//	    if err := ui.Start(); err != nil {
+//	        log.Printf("Dev UI stopped: %v", err)
+//	    }
+//	}()
+//	// 使用 ctx 执行 Agent，并访问 http://localhost:8080。
 package devui
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -133,16 +139,26 @@ func (e *Event) Clone() *Event {
 
 // eventPool 事件对象池
 // 使用 toolkit 的泛型对象池减少 GC 压力
-var eventPool = poolx.NewObjectPool(
-	func() *Event {
-		return &Event{
-			Data: make(map[string]any, 8), // 预分配常用容量
-		}
-	},
-	func(e **Event) {
-		(*e).Reset()
-	},
-)
+var eventPool = mustNewEventPool()
+
+// mustNewEventPool 使用静态已知合法的配置创建事件对象池。
+func mustNewEventPool() *poolx.ObjectPool[*Event] {
+	p, err := poolx.NewObjectPool(
+		func() *Event {
+			return &Event{
+				Data: make(map[string]any, 8), // 预分配常用容量
+			}
+		},
+		func(e **Event) {
+			(*e).Reset()
+		},
+	)
+	if err != nil {
+		panic(fmt.Errorf("create event pool: %w", err))
+	}
+
+	return p
+}
 
 // AcquireEvent 从对象池获取事件对象
 func AcquireEvent() *Event {

@@ -15,11 +15,13 @@ import (
 //
 // mws 是注入到该次 run 的 runtime 中间件（来自 agent 的 WithMiddleware）。
 //
-// ⚠️ 预算语义注意：中间件按"每次 run"作用。本函数每次调用都新建一个 run（全新 State），
-// 故对**多 run** 的 agent（PlanExecute/Reflection 的 planner/step/replan/critique 各是
-// 独立一次调用）而言，middleware.Budget 是**每次调用各自封顶**，而非 agent 全程累计；
-// 只有 ReActAgent（单次多轮 run）的 Budget 才是"整次执行累计上限"。logging/metrics/
-// 自定义等无状态中间件按调用作用，语义无歧义。需要"agent 全程累计预算"时另需共享累加器设计。
+// 预算语义取决于注入的中间件。本函数每次调用都新建一个 run（全新
+// State），因此底层 middleware.Budget 只按单 run 检查 token/墙钟/成本；
+// middleware.CostControl 则通过共享 Controller 的 RecordUsageFunc 在 AfterLLM 写入
+// 跨 run 累计账。首选 middleware.NewBudgetControl 同时组合这两层，使
+// PlanExecute/Reflection 的 planner/step/replan/critique 等独立 run 无需额外
+// 跨 run 累加器。调用方/provider 还应在每次真正发起 LLM 请求前，对同一
+// Controller 调用 CheckRequest 完成 token/频率预检；该预检不由中间件代替。
 func runCompletionWithRuntime(ctx context.Context, provider llm.Provider, runID string, messages []llm.Message, sink agentruntime.EventSink, mws ...agentruntime.Middleware) (*llm.CompletionResponse, error) {
 	if provider == nil {
 		return nil, fmt.Errorf("LLM provider not configured")

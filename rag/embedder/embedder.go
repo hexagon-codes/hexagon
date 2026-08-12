@@ -215,14 +215,8 @@ func (e *CachedEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 		return result, nil
 	}
 
-	// 使用 singleflight 防止并发请求相同文本时多次调用底层 Embedder
-	// 为整个批次创建聚合 hash key，避免大批量文本产生超长键
-	var batchKeyMaterial strings.Builder
-	batchKeyMaterial.Grow(len(toEmbed) * 64)
-	for _, text := range toEmbed {
-		batchKeyMaterial.WriteString(hashText(text))
-	}
-	batchKey := hash.SHA256(batchKeyMaterial.String())
+	// 使用 singleflight 防止并发请求相同文本时多次调用底层 Embedder。
+	batchKey := hashTexts(toEmbed)
 
 	embedResult, err, _ := e.sf.Do(batchKey, func() (interface{}, error) {
 		return e.embedder.Embed(ctx, toEmbed)
@@ -407,4 +401,14 @@ var _ vector.Embedder = (*FuncEmbedder)(nil)
 // hashText 计算文本的 SHA-256 指纹（复用 toolkit 的唯一实现）
 func hashText(text string) string {
 	return hash.SHA256(text)
+}
+
+// hashTexts 为整个批次生成固定长度的 SHA-256 指纹。
+func hashTexts(texts []string) string {
+	var material strings.Builder
+	material.Grow(len(texts) * 64)
+	for _, text := range texts {
+		material.WriteString(hashText(text))
+	}
+	return hash.SHA256(material.String())
 }

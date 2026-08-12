@@ -1,12 +1,9 @@
 // Package langfuse 提供 Langfuse 可观测平台集成
 //
 // Langfuse 是开源的 LLM 可观测平台，用于追踪和监控 LLM 应用。
-// 本包将 Hexagon 的 Hooks 系统与 Langfuse API 对接：
-//   - 自动追踪 Agent 执行过程
-//   - 记录 LLM 调用（输入/输出/Token 使用/延迟）
-//   - 记录工具调用
-//   - 记录检索操作
-//   - 支持异步批量上报
+// 本包提供 Langfuse 旧版事件摄取 API 的手工客户端，支持 Trace、Span、Generation
+// 事件与异步批量上报。新接入优先使用 observe/otel.NewLangfuseExporter，通过
+// OTLP 与 Hook Manager 统一采集；本包不会自动注册 Hexagon Hook。
 //
 // 使用示例：
 //
@@ -15,11 +12,15 @@
 //	    WithSecretKey("sk-xxx"),
 //	    WithHost("https://cloud.langfuse.com"),
 //	)
-//	defer client.Flush()
+//	defer client.Close()
 //
-//	// 注册到 Hooks 系统
-//	hooks.RegisterLLMHook(client.LLMHook())
-//	hooks.RegisterToolHook(client.ToolHook())
+//	client.TraceStart("trace-1", "agent.run", input, []string{"demo"})
+//	client.GenerationStart("generation-1", "trace-1", "", "llm.call", "gpt-4o", input)
+//	client.GenerationEnd("generation-1", "trace-1", output, &UsageBody{
+//	    Input:  100,
+//	    Output: 50,
+//	    Total:  150,
+//	})
 package langfuse
 
 import (

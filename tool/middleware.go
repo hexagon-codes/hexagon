@@ -49,7 +49,7 @@ type timeoutTool struct {
 
 func (t *timeoutTool) Name() string                       { return t.inner.Name() }
 func (t *timeoutTool) Description() string                { return t.inner.Description() }
-func (t *timeoutTool) Schema() *llm.Schema             { return t.inner.Schema() }
+func (t *timeoutTool) Schema() *llm.Schema                { return t.inner.Schema() }
 func (t *timeoutTool) Validate(args map[string]any) error { return t.inner.Validate(args) }
 
 func (t *timeoutTool) Execute(ctx context.Context, args map[string]any) (aitool.Result, error) {
@@ -83,7 +83,7 @@ type retryTool struct {
 
 func (t *retryTool) Name() string                       { return t.inner.Name() }
 func (t *retryTool) Description() string                { return t.inner.Description() }
-func (t *retryTool) Schema() *llm.Schema             { return t.inner.Schema() }
+func (t *retryTool) Schema() *llm.Schema                { return t.inner.Schema() }
 func (t *retryTool) Validate(args map[string]any) error { return t.inner.Validate(args) }
 
 func (t *retryTool) Execute(ctx context.Context, args map[string]any) (aitool.Result, error) {
@@ -97,6 +97,7 @@ func (t *retryTool) Execute(ctx context.Context, args map[string]any) (aitool.Re
 		retry.Delay(t.backoff),
 		retry.MaxDelay(30*time.Second),
 		retry.Multiplier(2.0),
+		retry.DelayType(retry.ExponentialBackoff),
 	)
 	return result, err
 }
@@ -134,7 +135,7 @@ type rateLimitTool struct {
 
 func (t *rateLimitTool) Name() string                       { return t.inner.Name() }
 func (t *rateLimitTool) Description() string                { return t.inner.Description() }
-func (t *rateLimitTool) Schema() *llm.Schema             { return t.inner.Schema() }
+func (t *rateLimitTool) Schema() *llm.Schema                { return t.inner.Schema() }
 func (t *rateLimitTool) Validate(args map[string]any) error { return t.inner.Validate(args) }
 
 func (t *rateLimitTool) Execute(ctx context.Context, args map[string]any) (aitool.Result, error) {

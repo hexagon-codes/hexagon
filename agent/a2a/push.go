@@ -4,59 +4,158 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net/http"
+	"reflect"
 	"sync"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/util/rate"
-	"github.com/hexagon-codes/toolkit/util/retry"
 )
+
+// ErrInvalidPushManagerConfig 表示推送管理器配置无效。
+var ErrInvalidPushManagerConfig = errors.New("invalid push manager config")
+
+// ErrInvalidPushNotification 表示推送通知无效。
+var ErrInvalidPushNotification = errors.New("invalid push notification")
 
 // ============== Push 通知 ==============
 
-// PushNotification 推送通知内容
+// PushNotification 表示构造后不可变的推送通知快照。
 type PushNotification struct {
-	// TaskID 任务 ID
-	TaskID string `json:"taskId"`
-
-	// Event 事件类型
-	Event string `json:"event"`
-
-	// Task 任务状态（完整状态）
-	Task *Task `json:"task,omitempty"`
-
-	// Status 任务状态（仅状态）
-	Status *TaskStatus `json:"status,omitempty"`
-
-	// Artifact 产物（仅产物事件）
-	Artifact *Artifact `json:"artifact,omitempty"`
-
-	// Timestamp 时间戳
-	Timestamp time.Time `json:"timestamp"`
+	taskID       string
+	eventType    string
+	taskPayload  json.RawMessage
+	artifactData json.RawMessage
+	timestamp    time.Time
 }
 
 // NewTaskStatusNotification 创建任务状态通知
-func NewTaskStatusNotification(task *Task) *PushNotification {
-	return &PushNotification{
-		TaskID:    task.ID,
-		Event:     EventTypeTaskStatus,
-		Task:      task,
-		Status:    &task.Status,
-		Timestamp: time.Now(),
+func NewTaskStatusNotification(task *Task) (*PushNotification, error) {
+	if task == nil {
+		return nil, fmt.Errorf("%w: task must not be nil", ErrInvalidPushNotification)
 	}
+	if task.ID == "" {
+		return nil, fmt.Errorf("%w: task ID must not be empty", ErrInvalidPushNotification)
+	}
+
+	payload, err := json.Marshal(task)
+	if err != nil {
+		return nil, fmt.Errorf("%w: marshal task: %w", ErrInvalidPushNotification, err)
+	}
+
+	return &PushNotification{
+		taskID:      task.ID,
+		eventType:   EventTypeTaskStatus,
+		taskPayload: payload,
+		timestamp:   time.Now().UTC(),
+	}, nil
 }
 
 // NewArtifactNotification 创建产物通知
-func NewArtifactNotification(taskID string, artifact *Artifact) *PushNotification {
-	return &PushNotification{
-		TaskID:    taskID,
-		Event:     EventTypeArtifact,
-		Artifact:  artifact,
-		Timestamp: time.Now(),
+func NewArtifactNotification(taskID string, artifact *Artifact) (*PushNotification, error) {
+	if taskID == "" {
+		return nil, fmt.Errorf("%w: task ID must not be empty", ErrInvalidPushNotification)
 	}
+	if artifact == nil {
+		return nil, fmt.Errorf("%w: artifact must not be nil", ErrInvalidPushNotification)
+	}
+
+	payload, err := json.Marshal(artifact)
+	if err != nil {
+		return nil, fmt.Errorf("%w: marshal artifact: %w", ErrInvalidPushNotification, err)
+	}
+
+	return &PushNotification{
+		taskID:       taskID,
+		eventType:    EventTypeArtifact,
+		artifactData: payload,
+		timestamp:    time.Now().UTC(),
+	}, nil
+}
+
+// MarshalJSON 输出唯一的规范化通知结构。
+func (n PushNotification) MarshalJSON() ([]byte, error) {
+	type notificationWire struct {
+		TaskID    string          `json:"taskId"`
+		Event     string          `json:"event"`
+		Task      json.RawMessage `json:"task,omitempty"`
+		Artifact  json.RawMessage `json:"artifact,omitempty"`
+		Timestamp time.Time       `json:"timestamp"`
+	}
+
+	return json.Marshal(notificationWire{
+		TaskID:    n.taskID,
+		Event:     n.eventType,
+		Task:      append(json.RawMessage(nil), n.taskPayload...),
+		Artifact:  append(json.RawMessage(nil), n.artifactData...),
+		Timestamp: n.timestamp,
+	})
+}
+
+// TaskID 返回通知所属任务 ID。
+func (n *PushNotification) TaskID() string {
+	if n == nil {
+		return ""
+	}
+	return n.taskID
+}
+
+// EventType 返回通知事件类型。
+func (n *PushNotification) EventType() string {
+	if n == nil {
+		return ""
+	}
+	return n.eventType
+}
+
+// Timestamp 返回通知创建时间。
+func (n *PushNotification) Timestamp() time.Time {
+	if n == nil {
+		return time.Time{}
+	}
+	return n.timestamp
+}
+
+// Task 返回任务快照副本；非任务事件返回 nil。
+func (n *PushNotification) Task() (*Task, error) {
+	if n == nil {
+		return nil, fmt.Errorf("%w: notification must not be nil", ErrInvalidPushNotification)
+	}
+	if len(n.taskPayload) == 0 {
+		return nil, nil
+	}
+
+	var task Task
+	if err := json.Unmarshal(n.taskPayload, &task); err != nil {
+		return nil, fmt.Errorf("decode task notification: %w", err)
+	}
+	return &task, nil
+}
+
+// Artifact 返回产物快照副本；非产物事件返回 nil。
+func (n *PushNotification) Artifact() (*Artifact, error) {
+	if n == nil {
+		return nil, fmt.Errorf("%w: notification must not be nil", ErrInvalidPushNotification)
+	}
+	if len(n.artifactData) == 0 {
+		return nil, nil
+	}
+
+	var artifact Artifact
+	if err := json.Unmarshal(n.artifactData, &artifact); err != nil {
+		return nil, fmt.Errorf("decode artifact notification: %w", err)
+	}
+	return &artifact, nil
+}
+
+// PushService 发送规范化推送通知。
+type PushService interface {
+	Push(ctx context.Context, config *PushNotificationConfig, notification *PushNotification) error
 }
 
 // ============== PushManager ==============
@@ -70,61 +169,78 @@ type PushManager struct {
 	// configs 推送配置 (taskID -> config)
 	configs map[string]*PushNotificationConfig
 
-	// retryConfig 重试配置
-	retryConfig RetryConfig
-
 	// rateLimiter 速率限制器（使用 toolkit 令牌桶实现）
 	rateLimiter *rate.TokenBucket
 
 	mu sync.RWMutex
 }
 
-// RetryConfig 重试配置
-type RetryConfig struct {
-	// MaxRetries 最大重试次数
-	MaxRetries int
-
-	// InitialDelay 初始延迟
-	InitialDelay time.Duration
-
-	// MaxDelay 最大延迟
-	MaxDelay time.Duration
-
-	// Multiplier 延迟乘数
-	Multiplier float64
-}
-
-// DefaultRetryConfig 默认重试配置
-var DefaultRetryConfig = RetryConfig{
-	MaxRetries:   3,
-	InitialDelay: 100 * time.Millisecond,
-	MaxDelay:     5 * time.Second,
-	Multiplier:   2.0,
+type pushManagerConfig struct {
+	rateLimit  int
+	rateWindow time.Duration
 }
 
 // PushManagerOption 推送管理器选项
-type PushManagerOption func(*PushManager)
+type PushManagerOption func(*pushManagerConfig)
 
-// NewPushManager 创建推送管理器
-func NewPushManager(service PushService, opts ...PushManagerOption) *PushManager {
-	m := &PushManager{
+// NewPushManager 创建推送管理器，并在返回前集中校验最终配置。
+func NewPushManager(service PushService, opts ...PushManagerOption) (*PushManager, error) {
+	if isNilValue(service) {
+		return nil, fmt.Errorf("%w: push service must not be nil", ErrInvalidPushManagerConfig)
+	}
+
+	config := pushManagerConfig{
+		rateLimit:  100,
+		rateWindow: time.Second,
+	}
+
+	for index, opt := range opts {
+		if opt == nil {
+			return nil, fmt.Errorf("%w: option %d must not be nil", ErrInvalidPushManagerConfig, index)
+		}
+		opt(&config)
+	}
+
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
+
+	ratePerSec := float64(config.rateLimit) / config.rateWindow.Seconds()
+	limiter, err := rate.NewTokenBucket(config.rateLimit, ratePerSec)
+	if err != nil {
+		return nil, fmt.Errorf("%w: create rate limiter: %w", ErrInvalidPushManagerConfig, err)
+	}
+
+	return &PushManager{
 		service:     service,
 		configs:     make(map[string]*PushNotificationConfig),
-		retryConfig: DefaultRetryConfig,
-		rateLimiter: rate.NewTokenBucket(100, 100), // 默认 100 qps
-	}
-
-	for _, opt := range opts {
-		opt(m)
-	}
-
-	return m
+		rateLimiter: limiter,
+	}, nil
 }
 
-// WithRetryConfig 设置重试配置
-func WithRetryConfig(config RetryConfig) PushManagerOption {
-	return func(m *PushManager) {
-		m.retryConfig = config
+// validate 校验所有选项应用后的最终配置。
+func (c pushManagerConfig) validate() error {
+	if c.rateLimit <= 0 {
+		return fmt.Errorf("%w: rate limit %d: %w", ErrInvalidPushManagerConfig, c.rateLimit, rate.ErrInvalidCapacity)
+	}
+	if c.rateWindow <= 0 {
+		return fmt.Errorf("%w: rate limit window %s: %w", ErrInvalidPushManagerConfig, c.rateWindow, rate.ErrInvalidWindow)
+	}
+	return nil
+}
+
+// isNilValue 仅对支持 nil 的动态类型调用 IsNil，避免反射 panic。
+func isNilValue(value any) bool {
+	if value == nil {
+		return true
+	}
+
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
 	}
 }
 
@@ -132,10 +248,9 @@ func WithRetryConfig(config RetryConfig) PushManagerOption {
 // limit: 窗口内允许的最大请求数
 // window: 时间窗口
 func WithRateLimit(limit int, window time.Duration) PushManagerOption {
-	return func(m *PushManager) {
-		// 计算每秒令牌生成速率
-		ratePerSec := float64(limit) / window.Seconds()
-		m.rateLimiter = rate.NewTokenBucket(limit, ratePerSec)
+	return func(c *pushManagerConfig) {
+		c.rateLimit = limit
+		c.rateWindow = window
 	}
 }
 
@@ -143,7 +258,7 @@ func WithRateLimit(limit int, window time.Duration) PushManagerOption {
 func (m *PushManager) SetConfig(taskID string, config *PushNotificationConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.configs[taskID] = config
+	m.configs[taskID] = clonePushNotificationConfig(config)
 }
 
 // GetConfig 获取推送配置
@@ -151,7 +266,7 @@ func (m *PushManager) GetConfig(taskID string) (*PushNotificationConfig, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	config, exists := m.configs[taskID]
-	return config, exists
+	return clonePushNotificationConfig(config), exists
 }
 
 // RemoveConfig 移除推送配置
@@ -162,9 +277,25 @@ func (m *PushManager) RemoveConfig(taskID string) {
 }
 
 // Push 发送推送通知
-func (m *PushManager) Push(ctx context.Context, taskID string, notification *PushNotification) error {
+func (m *PushManager) Push(ctx context.Context, notification *PushNotification) error {
+	if ctx == nil {
+		return fmt.Errorf("push context must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if notification == nil {
+		return fmt.Errorf("push notification must not be nil")
+	}
+
+	taskID := notification.TaskID()
+	if taskID == "" {
+		return fmt.Errorf("push notification task ID must not be empty")
+	}
+
 	m.mu.RLock()
 	config, exists := m.configs[taskID]
+	config = clonePushNotificationConfig(config)
 	m.mu.RUnlock()
 
 	if !exists || config == nil {
@@ -176,49 +307,104 @@ func (m *PushManager) Push(ctx context.Context, taskID string, notification *Pus
 		return fmt.Errorf("rate limit exceeded")
 	}
 
-	// 带重试的推送
-	return m.pushWithRetry(ctx, config, notification)
+	return m.service.Push(ctx, clonePushNotificationConfig(config), notification)
 }
 
 // PushTask 发送任务状态推送
 func (m *PushManager) PushTask(ctx context.Context, task *Task) error {
-	notification := NewTaskStatusNotification(task)
-	return m.Push(ctx, task.ID, notification)
+	notification, err := NewTaskStatusNotification(task)
+	if err != nil {
+		return err
+	}
+	return m.Push(ctx, notification)
 }
 
 // PushArtifact 发送产物推送
 func (m *PushManager) PushArtifact(ctx context.Context, taskID string, artifact *Artifact) error {
-	notification := NewArtifactNotification(taskID, artifact)
-	return m.Push(ctx, taskID, notification)
+	notification, err := NewArtifactNotification(taskID, artifact)
+	if err != nil {
+		return err
+	}
+	return m.Push(ctx, notification)
 }
 
-// pushWithRetry 带重试的推送
-// 使用 toolkit/util/retry 实现指数退避重试
-func (m *PushManager) pushWithRetry(ctx context.Context, config *PushNotificationConfig, notification *PushNotification) error {
-	return retry.DoWithContext(ctx, func() error {
-		return m.service.Push(ctx, config, notificationToTask(notification))
-	},
-		retry.Attempts(m.retryConfig.MaxRetries+1),
-		retry.Delay(m.retryConfig.InitialDelay),
-		retry.MaxDelay(m.retryConfig.MaxDelay),
-		retry.Multiplier(m.retryConfig.Multiplier),
-		retry.DelayType(retry.ExponentialBackoff),
-	)
-}
-
-// notificationToTask 将通知转换为任务（用于推送服务）
-func notificationToTask(n *PushNotification) *Task {
-	if n.Task != nil {
-		return n.Task
+// clonePushNotificationConfig 复制配置及其嵌套可变字段。
+func clonePushNotificationConfig(config *PushNotificationConfig) *PushNotificationConfig {
+	if config == nil {
+		return nil
 	}
 
-	return &Task{
-		ID:     n.TaskID,
-		Status: *n.Status,
+	cloned := *config
+	if config.Authentication != nil {
+		authentication := *config.Authentication
+		authentication.Schemes = append([]string(nil), config.Authentication.Schemes...)
+		cloned.Authentication = &authentication
 	}
+	return &cloned
 }
 
 // ============== WebhookPushService ==============
+
+const maxWebhookRetries = 10
+
+var (
+	// ErrInvalidWebhookPushConfig 表示 Webhook 推送配置无效。
+	ErrInvalidWebhookPushConfig = errors.New("invalid webhook push config")
+	// ErrInvalidAsyncPushConfig 表示异步推送配置无效。
+	ErrInvalidAsyncPushConfig = errors.New("invalid async push config")
+	// ErrPushServiceClosed 表示异步推送服务已关闭。
+	ErrPushServiceClosed = errors.New("push service closed")
+	// ErrPushQueueFull 表示异步推送队列已满。
+	ErrPushQueueFull = errors.New("push queue full")
+)
+
+// WebhookRetryConfig 定义 Webhook 的有限重试策略。
+type WebhookRetryConfig struct {
+	// MaxRetries 最大重试次数，不含首次请求。
+	MaxRetries int
+	// InitialDelay 首次重试前的等待时间。
+	InitialDelay time.Duration
+	// MaxDelay 单次退避等待上限。
+	MaxDelay time.Duration
+	// Multiplier 指数退避乘数。
+	Multiplier float64
+}
+
+// DefaultWebhookRetryConfig 返回默认 Webhook 重试配置快照。
+func DefaultWebhookRetryConfig() WebhookRetryConfig {
+	return WebhookRetryConfig{
+		MaxRetries:   3,
+		InitialDelay: 100 * time.Millisecond,
+		MaxDelay:     5 * time.Second,
+		Multiplier:   2,
+	}
+}
+
+// validate 校验 Webhook 重试配置及其资源上界。
+func (c WebhookRetryConfig) validate() error {
+	switch {
+	case c.MaxRetries < 0:
+		return fmt.Errorf("max retries must not be negative")
+	case c.MaxRetries > maxWebhookRetries:
+		return fmt.Errorf("max retries must not exceed %d", maxWebhookRetries)
+	case c.InitialDelay < 0:
+		return fmt.Errorf("initial delay must not be negative")
+	case c.MaxDelay <= 0:
+		return fmt.Errorf("max delay must be positive")
+	case c.MaxDelay < c.InitialDelay:
+		return fmt.Errorf("max delay must not be less than initial delay")
+	case c.Multiplier <= 0 || math.IsNaN(c.Multiplier) || math.IsInf(c.Multiplier, 0):
+		return fmt.Errorf("multiplier must be finite and positive")
+	default:
+		return nil
+	}
+}
+
+type webhookPushConfig struct {
+	httpClient     *http.Client
+	defaultHeaders map[string]string
+	retryConfig    WebhookRetryConfig
+}
 
 // WebhookPushService Webhook 推送服务
 // 通过 HTTP POST 发送推送通知到配置的 URL。
@@ -229,16 +415,16 @@ type WebhookPushService struct {
 	// defaultHeaders 默认请求头
 	defaultHeaders map[string]string
 
-	// signKey 签名密钥（用于请求签名）
-	signKey string
+	// retryConfig 有限重试配置
+	retryConfig WebhookRetryConfig
 }
 
 // WebhookPushOption Webhook 推送选项
-type WebhookPushOption func(*WebhookPushService)
+type WebhookPushOption func(*webhookPushConfig)
 
 // NewWebhookPushService 创建 Webhook 推送服务
-func NewWebhookPushService(opts ...WebhookPushOption) *WebhookPushService {
-	s := &WebhookPushService{
+func NewWebhookPushService(opts ...WebhookPushOption) (*WebhookPushService, error) {
+	config := webhookPushConfig{
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -246,46 +432,72 @@ func NewWebhookPushService(opts ...WebhookPushOption) *WebhookPushService {
 			"Content-Type": ContentTypeJSON,
 			"User-Agent":   "Hexagon-A2A-Push/1.0",
 		},
+		retryConfig: DefaultWebhookRetryConfig(),
 	}
 
-	for _, opt := range opts {
-		opt(s)
+	for index, opt := range opts {
+		if opt == nil {
+			return nil, fmt.Errorf("%w: option %d must not be nil", ErrInvalidWebhookPushConfig, index)
+		}
+		opt(&config)
+	}
+	if config.httpClient == nil {
+		return nil, fmt.Errorf("%w: HTTP client must not be nil", ErrInvalidWebhookPushConfig)
+	}
+	if err := config.retryConfig.validate(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidWebhookPushConfig, err)
 	}
 
-	return s
+	return &WebhookPushService{
+		httpClient:     config.httpClient,
+		defaultHeaders: maps.Clone(config.defaultHeaders),
+		retryConfig:    config.retryConfig,
+	}, nil
 }
 
 // WithPushHTTPClient 设置 HTTP 客户端
 func WithPushHTTPClient(client *http.Client) WebhookPushOption {
-	return func(s *WebhookPushService) {
-		s.httpClient = client
+	return func(config *webhookPushConfig) {
+		config.httpClient = client
 	}
 }
 
 // WithPushHeaders 设置默认请求头
 func WithPushHeaders(headers map[string]string) WebhookPushOption {
-	return func(s *WebhookPushService) {
-		maps.Copy(s.defaultHeaders, headers)
+	return func(config *webhookPushConfig) {
+		maps.Copy(config.defaultHeaders, headers)
 	}
 }
 
-// WithPushSignKey 设置签名密钥
-func WithPushSignKey(key string) WebhookPushOption {
-	return func(s *WebhookPushService) {
-		s.signKey = key
+// WithWebhookRetry 设置 Webhook 有限重试策略。
+func WithWebhookRetry(retryConfig WebhookRetryConfig) WebhookPushOption {
+	return func(config *webhookPushConfig) {
+		config.retryConfig = retryConfig
 	}
 }
 
 // Push 发送推送通知
-func (s *WebhookPushService) Push(ctx context.Context, config *PushNotificationConfig, task *Task) error {
+func (s *WebhookPushService) Push(ctx context.Context, config *PushNotificationConfig, notification *PushNotification) error {
+	if ctx == nil {
+		return fmt.Errorf("push context must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if config == nil {
+		return fmt.Errorf("push config must not be nil")
+	}
+	if notification == nil {
+		return fmt.Errorf("push notification must not be nil")
+	}
 	if config.URL == "" {
 		return nil
 	}
 
-	// 序列化任务
-	body, err := json.Marshal(task)
+	// 序列化规范化通知
+	body, err := json.Marshal(notification)
 	if err != nil {
-		return fmt.Errorf("marshal task failed: %w", err)
+		return fmt.Errorf("marshal push notification: %w", err)
 	}
 
 	// 创建请求
@@ -336,9 +548,6 @@ type AsyncPushService struct {
 	// queue 推送队列
 	queue chan *pushRequest
 
-	// workers 工作协程数
-	workers int
-
 	// wg 等待组
 	wg sync.WaitGroup
 
@@ -347,42 +556,98 @@ type AsyncPushService struct {
 
 	// cancel 取消函数
 	cancel context.CancelFunc
+
+	// stateMu 保护生命周期状态与入队线性化边界
+	stateMu sync.RWMutex
+
+	// state 当前生命周期状态
+	state asyncPushState
+
+	// closeOnce 保证关闭协议只执行一次
+	closeOnce sync.Once
+
+	// closed 在工作协程全部退出后关闭
+	closed chan struct{}
 }
+
+type asyncPushState uint8
+
+const (
+	asyncPushStateRunning asyncPushState = iota
+	asyncPushStateClosing
+	asyncPushStateClosed
+)
 
 // pushRequest 推送请求
 type pushRequest struct {
-	config *PushNotificationConfig
-	task   *Task
+	config       *PushNotificationConfig
+	notification *PushNotification
 }
 
 // NewAsyncPushService 创建异步推送服务
-func NewAsyncPushService(underlying PushService, queueSize, workers int) *AsyncPushService {
+func NewAsyncPushService(underlying PushService, queueSize, workers int) (*AsyncPushService, error) {
+	if isNilValue(underlying) {
+		return nil, fmt.Errorf("%w: underlying service must not be nil", ErrInvalidAsyncPushConfig)
+	}
+	if queueSize <= 0 {
+		return nil, fmt.Errorf("%w: queue size must be positive", ErrInvalidAsyncPushConfig)
+	}
+	if workers <= 0 {
+		return nil, fmt.Errorf("%w: workers must be positive", ErrInvalidAsyncPushConfig)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &AsyncPushService{
 		underlying: underlying,
 		queue:      make(chan *pushRequest, queueSize),
-		workers:    workers,
 		ctx:        ctx,
 		cancel:     cancel,
+		state:      asyncPushStateRunning,
+		closed:     make(chan struct{}),
 	}
 
 	// 启动工作协程
+	s.wg.Add(workers)
 	for range workers {
-		s.wg.Add(1)
 		go s.worker()
 	}
 
-	return s
+	return s, nil
 }
 
 // Push 异步发送推送
-func (s *AsyncPushService) Push(_ context.Context, config *PushNotificationConfig, task *Task) error {
+func (s *AsyncPushService) Push(ctx context.Context, config *PushNotificationConfig, notification *PushNotification) error {
+	if ctx == nil {
+		return fmt.Errorf("push context must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if config == nil {
+		return fmt.Errorf("push config must not be nil")
+	}
+	if notification == nil {
+		return fmt.Errorf("push notification must not be nil")
+	}
+
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	if s.state != asyncPushStateRunning {
+		return ErrPushServiceClosed
+	}
+
+	request := &pushRequest{
+		config:       clonePushNotificationConfig(config),
+		notification: notification,
+	}
 	select {
-	case s.queue <- &pushRequest{config: config, task: task}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case s.queue <- request:
 		return nil
 	default:
-		return fmt.Errorf("push queue full")
+		return ErrPushQueueFull
 	}
 }
 
@@ -399,24 +664,53 @@ func (s *AsyncPushService) worker() {
 				return
 			}
 			// 忽略错误，异步推送失败不影响主流程
-			_ = s.underlying.Push(s.ctx, req.config, req.task)
+			_ = s.underlying.Push(s.ctx, req.config, req.notification)
 		}
 	}
 }
 
 // Close 关闭异步推送服务
 func (s *AsyncPushService) Close() {
-	s.cancel()
-	close(s.queue)
-	s.wg.Wait()
+	if s == nil {
+		return
+	}
+
+	s.closeOnce.Do(func() {
+		s.stateMu.Lock()
+		s.state = asyncPushStateClosing
+		s.cancel()
+		s.stateMu.Unlock()
+
+		s.wg.Wait()
+
+		// 服务关闭后清空未投递快照，及时释放其引用。
+		for {
+			select {
+			case <-s.queue:
+				continue
+			default:
+				s.stateMu.Lock()
+				s.state = asyncPushStateClosed
+				close(s.closed)
+				s.stateMu.Unlock()
+				return
+			}
+		}
+	})
+
+	<-s.closed
 }
 
 // ============== 便捷函数 ==============
 
 // NewDefaultPushService 创建默认推送服务
-func NewDefaultPushService() PushService {
+func NewDefaultPushService() (*AsyncPushService, error) {
+	webhook, err := NewWebhookPushService()
+	if err != nil {
+		return nil, fmt.Errorf("create default webhook push service: %w", err)
+	}
 	return NewAsyncPushService(
-		NewWebhookPushService(),
+		webhook,
 		1000, // 队列大小
 		10,   // 工作协程数
 	)

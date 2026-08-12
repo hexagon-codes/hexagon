@@ -7,15 +7,26 @@
 //
 // 使用示例:
 //
-//	// 创建 OTel 追踪器
-//	tracer := otel.NewOTelHexagonTracer(
-//	    otel.WithServiceName("my-agent"),
-//	    otel.WithEndpoint("localhost:4317"),
-//	)
+//	manager := hooks.NewManager()
+//	tracing, err := otel.SetupTracing(manager, otel.WithTracerServiceName("my-agent"))
+//	if err != nil {
+//	    return err
+//	}
+//	defer func() {
+//	    if err := tracing.Shutdown(context.Background()); err != nil {
+//	        log.Printf("OpenTelemetry shutdown failed: %v", err)
+//	    }
+//	}()
 //
-//	// 注册追踪钩子
-//	hooks.RegisterRunHook(otel.NewTracingRunHook(tracer))
-//	hooks.RegisterToolHook(otel.NewTracingToolHook(tracer))
+//	exporter, err := otel.NewOTLPExporter("https://otel.example.com/v1/traces")
+//	if err != nil {
+//	    return err
+//	}
+//	// SetExporter 调用开始后，导出器所有权转移给 tracing。
+//	if err := tracing.SetExporter(ctx, exporter); err != nil {
+//	    return err
+//	}
+//	ctx = hooks.ContextWithManager(ctx, manager)
 package otel
 
 import (
@@ -25,9 +36,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	toolkitObserve "github.com/hexagon-codes/toolkit/infra/observe"
+
 	"github.com/hexagon-codes/hexagon/hooks"
 	"github.com/hexagon-codes/hexagon/observe/tracer"
-	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // ============== OTelHexagonTracer ==============
@@ -35,8 +47,7 @@ import (
 // OTelHexagonTracer 实现 Hexagon Tracer 接口的 OTel 追踪器
 // 将 Hexagon 的追踪抽象映射到 OTel 标准
 type OTelHexagonTracer struct {
-	config     *TracerConfig
-	otelTracer *OTelTracer
+	otelTracer *Tracer
 	spans      sync.Map   // traceID -> []*OTelHexagonSpan
 	spansMu    sync.Mutex // 保护对 spans 中切片值的「读-改-写」追加操作
 	closed     int32
@@ -47,10 +58,7 @@ type TracerConfig struct {
 	ServiceName    string
 	ServiceVersion string
 	Environment    string
-	Endpoint       string
 	SamplingRate   float64
-	Exporters      []Exporter
-	Propagator     Propagator
 }
 
 // TracerOption 追踪器选项
@@ -77,31 +85,10 @@ func WithTracerEnvironment(env string) TracerOption {
 	}
 }
 
-// WithTracerEndpoint 设置 OTLP 端点
-func WithTracerEndpoint(endpoint string) TracerOption {
-	return func(c *TracerConfig) {
-		c.Endpoint = endpoint
-	}
-}
-
 // WithTracerSamplingRate 设置采样率
 func WithTracerSamplingRate(rate float64) TracerOption {
 	return func(c *TracerConfig) {
 		c.SamplingRate = rate
-	}
-}
-
-// WithTracerExporters 设置导出器
-func WithTracerExporters(exporters ...Exporter) TracerOption {
-	return func(c *TracerConfig) {
-		c.Exporters = exporters
-	}
-}
-
-// WithTracerPropagator 设置传播器
-func WithTracerPropagator(propagator Propagator) TracerOption {
-	return func(c *TracerConfig) {
-		c.Propagator = propagator
 	}
 }
 
@@ -117,22 +104,26 @@ func NewOTelHexagonTracer(opts ...TracerOption) *OTelHexagonTracer {
 	}
 
 	// 创建底层 OTel 追踪器
-	otelOpts := []OTelOption{
+	otelOpts := []Option{
 		WithServiceName(config.ServiceName),
 		WithServiceVersion(config.ServiceVersion),
 		WithEnvironment(config.Environment),
 		WithSamplingRate(config.SamplingRate),
 	}
-	if config.Endpoint != "" {
-		otelOpts = append(otelOpts, WithEndpoint(config.Endpoint))
-	}
-
-	otelTracer := NewOTelTracer(otelOpts...)
+	otelTracer := NewTracer(otelOpts...)
 
 	return &OTelHexagonTracer{
-		config:     config,
 		otelTracer: otelTracer,
 	}
+}
+
+// SetExporter 设置并将导出器所有权交给底层追踪器。
+//
+// 端点及认证等配置应在调用前通过 NewOTLPExporter 等可失败构造器完成校验。
+// 调用开始即转移 exporter 所有权，无论返回 nil 还是 error，调用方都不得继续使用
+// 或关闭 exporter。
+func (t *OTelHexagonTracer) SetExporter(ctx context.Context, exporter Exporter) error {
+	return t.otelTracer.SetExporter(ctx, exporter)
 }
 
 // StartSpan 开始一个新的 Span
@@ -148,47 +139,47 @@ func (t *OTelHexagonTracer) StartSpan(ctx context.Context, name string, opts ...
 		opt(config)
 	}
 
-	// 获取或创建 Trace ID
-	traceID := t.ExtractTraceID(ctx)
-	if traceID == "" {
-		traceID = idgen.NanoID()
-	}
-
-	// 创建 Span ID
-	spanID := idgen.ShortID()
-
 	// 获取父 Span
 	var parentSpanID string
 	if parentSpan := tracer.SpanFromContext(ctx); parentSpan != nil {
 		parentSpanID = parentSpan.SpanID()
 	}
 
-	// 创建 Hexagon Span
+	attributes := make(map[string]any, len(config.Attributes)+1)
+	for key, value := range config.Attributes {
+		attributes[key] = value
+	}
+	attributes["hexagon.span.kind"] = spanKindString(config.Kind)
+
+	// 由 toolkit 创建并持有实际导出的 Span，Hexagon Span 仅负责接口适配与本地快照。
+	otelOpts := []toolkitObserve.SpanOption{toolkitObserve.WithAttributes(attributes)}
+	if !config.StartTime.IsZero() {
+		otelOpts = append(otelOpts, toolkitObserve.WithStartTime(config.StartTime))
+	}
+	ctx, otelSpan := t.otelTracer.StartSpan(ctx, name, otelOpts...)
+
 	span := &OTelHexagonSpan{
 		tracer:       t,
-		traceID:      traceID,
-		spanID:       spanID,
+		otelSpan:     otelSpan,
+		traceID:      otelSpan.TraceID(),
+		spanID:       otelSpan.SpanID(),
 		parentSpanID: parentSpanID,
 		name:         name,
 		kind:         config.Kind,
-		attributes:   config.Attributes,
+		attributes:   attributes,
 		events:       make([]spanEvent, 0),
 		startTime:    config.StartTime,
-		recording:    true,
+		recording:    otelSpan.IsRecording(),
 	}
 
 	if span.startTime.IsZero() {
 		span.startTime = time.Now()
 	}
 
-	// 设置 Span 类型属性
-	span.SetAttribute("hexagon.span.kind", spanKindString(config.Kind))
-
 	// 将 Span 存储到追踪器
-	t.storeSpan(traceID, span)
+	t.storeSpan(span.traceID, span)
 
 	// 将 Span 添加到 context
-	ctx = t.InjectTraceID(ctx, traceID)
 	ctx = tracer.ContextWithSpan(ctx, span)
 
 	return ctx, span
@@ -196,26 +187,19 @@ func (t *OTelHexagonTracer) StartSpan(ctx context.Context, name string, opts ...
 
 // ExtractTraceID 从 context 中提取 Trace ID
 func (t *OTelHexagonTracer) ExtractTraceID(ctx context.Context) string {
-	if traceID, ok := ctx.Value(traceIDKey{}).(string); ok {
-		return traceID
-	}
-	return ""
+	return t.otelTracer.ExtractTraceID(ctx)
 }
 
 // InjectTraceID 将 Trace ID 注入到 context 中
 func (t *OTelHexagonTracer) InjectTraceID(ctx context.Context, traceID string) context.Context {
-	return context.WithValue(ctx, traceIDKey{}, traceID)
+	return t.otelTracer.InjectTraceID(ctx, traceID)
 }
 
 // Shutdown 关闭追踪器
 func (t *OTelHexagonTracer) Shutdown(ctx context.Context) error {
-	if !atomic.CompareAndSwapInt32(&t.closed, 0, 1) {
-		return nil
-	}
-	if t.otelTracer != nil {
-		return t.otelTracer.Shutdown(ctx)
-	}
-	return nil
+	// closed 仅阻止创建新 Span；生命周期等待与错误记忆统一交给 toolkit。
+	atomic.StoreInt32(&t.closed, 1)
+	return t.otelTracer.Shutdown(ctx)
 }
 
 // GetSpans 获取指定 Trace ID 的所有 Span
@@ -252,8 +236,6 @@ func (t *OTelHexagonTracer) storeSpan(traceID string, span *OTelHexagonSpan) {
 	t.spans.Store(traceID, []*OTelHexagonSpan{span})
 }
 
-type traceIDKey struct{}
-
 // ============== OTelHexagonSpan ==============
 
 // spanEvent Span 事件
@@ -266,6 +248,7 @@ type spanEvent struct {
 // OTelHexagonSpan 实现 tracer.Span 接口
 type OTelHexagonSpan struct {
 	tracer       *OTelHexagonTracer
+	otelSpan     toolkitObserve.Span
 	traceID      string
 	spanID       string
 	parentSpanID string
@@ -281,6 +264,7 @@ type OTelHexagonSpan struct {
 	startTime    time.Time
 	endTime      time.Time
 	recording    bool
+	ended        bool
 	mu           sync.RWMutex
 }
 
@@ -297,54 +281,81 @@ func (s *OTelHexagonSpan) TraceID() string {
 // SetName 设置 Span 名称
 func (s *OTelHexagonSpan) SetName(name string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.name = name
+	otelSpan := s.otelSpan
+	s.mu.Unlock()
+	if otelSpan != nil {
+		otelSpan.SetName(name)
+	}
 }
 
 // SetInput 设置输入
 func (s *OTelHexagonSpan) SetInput(input any) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.input = input
+	otelSpan := s.otelSpan
+	s.mu.Unlock()
+	if otelSpan != nil {
+		otelSpan.SetInput(input)
+	}
 }
 
 // SetOutput 设置输出
 func (s *OTelHexagonSpan) SetOutput(output any) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.output = output
+	otelSpan := s.otelSpan
+	s.mu.Unlock()
+	if otelSpan != nil {
+		otelSpan.SetOutput(output)
+	}
 }
 
 // SetTokenUsage 设置 Token 使用量
 func (s *OTelHexagonSpan) SetTokenUsage(usage tracer.TokenUsage) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.tokenUsage = usage
 	s.attributes[tracer.AttrLLMPromptTokens] = usage.PromptTokens
 	s.attributes[tracer.AttrLLMCompletionTokens] = usage.CompletionTokens
 	s.attributes[tracer.AttrLLMTotalTokens] = usage.TotalTokens
+	otelSpan := s.otelSpan
+	s.mu.Unlock()
+	if otelSpan != nil {
+		otelSpan.SetTokenUsage(toolkitObserve.TokenUsage{
+			PromptTokens:     usage.PromptTokens,
+			CompletionTokens: usage.CompletionTokens,
+			TotalTokens:      usage.TotalTokens,
+		})
+	}
 }
 
 // SetAttribute 设置属性
 func (s *OTelHexagonSpan) SetAttribute(key string, value any) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.attributes[key] = value
+	otelSpan := s.otelSpan
+	s.mu.Unlock()
+	if otelSpan != nil {
+		otelSpan.SetAttribute(key, value)
+	}
 }
 
 // SetAttributes 批量设置属性
 func (s *OTelHexagonSpan) SetAttributes(attrs map[string]any) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for k, v := range attrs {
 		s.attributes[k] = v
+	}
+	otelSpan := s.otelSpan
+	s.mu.Unlock()
+	if otelSpan != nil {
+		otelSpan.SetAttributes(attrs)
 	}
 }
 
 // AddEvent 添加事件
 func (s *OTelHexagonSpan) AddEvent(name string, attrs ...any) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	event := spanEvent{
 		Name:       name,
@@ -360,6 +371,11 @@ func (s *OTelHexagonSpan) AddEvent(name string, attrs ...any) {
 	}
 
 	s.events = append(s.events, event)
+	otelSpan := s.otelSpan
+	s.mu.Unlock()
+	if otelSpan != nil {
+		otelSpan.AddEvent(name, attrs...)
+	}
 }
 
 // RecordError 记录错误
@@ -368,7 +384,6 @@ func (s *OTelHexagonSpan) RecordError(err error) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	s.attributes[tracer.AttrErrorType] = fmt.Sprintf("%T", err)
 	s.attributes[tracer.AttrErrorMessage] = err.Error()
@@ -383,25 +398,41 @@ func (s *OTelHexagonSpan) RecordError(err error) {
 			"exception.message": err.Error(),
 		},
 	})
+	otelSpan := s.otelSpan
+	s.mu.Unlock()
+	if otelSpan != nil {
+		otelSpan.RecordError(err)
+		otelSpan.SetStatus(toolkitObserve.StatusCodeError, err.Error())
+	}
 }
 
 // SetStatus 设置状态
 func (s *OTelHexagonSpan) SetStatus(code tracer.StatusCode, message string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.statusCode = code
 	s.statusMsg = message
+	otelSpan := s.otelSpan
+	s.mu.Unlock()
+	if otelSpan != nil {
+		otelSpan.SetStatus(toToolkitStatusCode(code), message)
+	}
 }
 
 // End 结束 Span
 func (s *OTelHexagonSpan) End() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.recording {
+	if s.ended {
+		s.mu.Unlock()
 		return
 	}
+	s.ended = true
 	s.recording = false
 	s.endTime = time.Now()
+	otelSpan := s.otelSpan
+	s.mu.Unlock()
+	if otelSpan != nil {
+		otelSpan.End()
+	}
 }
 
 // EndWithError 结束 Span 并记录错误
@@ -473,6 +504,18 @@ func spanKindString(kind tracer.SpanKind) string {
 		return "embedding"
 	default:
 		return "unknown"
+	}
+}
+
+// toToolkitStatusCode 将 Hexagon 状态显式映射到 toolkit 状态，避免依赖枚举数值偶然一致。
+func toToolkitStatusCode(code tracer.StatusCode) toolkitObserve.StatusCode {
+	switch code {
+	case tracer.StatusCodeOK:
+		return toolkitObserve.StatusCodeOK
+	case tracer.StatusCodeError:
+		return toolkitObserve.StatusCodeError
+	default:
+		return toolkitObserve.StatusCodeUnset
 	}
 }
 

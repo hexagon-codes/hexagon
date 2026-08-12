@@ -21,16 +21,20 @@ import (
 //
 // 使用示例：
 //
-//	ui := devui.New(devui.WithAddr(":8080"))
-//	defer ui.Stop(context.Background())
+//	ui := devui.New(devui.WithAddr("127.0.0.1:8080"))
+//	defer func() {
+//	    if err := ui.Stop(context.Background()); err != nil {
+//	        log.Printf("Dev UI shutdown failed: %v", err)
+//	    }
+//	}()
 //
-//	// 获取 Hook Manager 和 Tracer 用于集成
-//	agent := hexagon.QuickStart(
-//	    hexagon.WithHooks(ui.HookManager()),
-//	)
-//
-//	go ui.Start()
-//	// 访问 http://localhost:8080
+//	ctx := hooks.ContextWithManager(context.Background(), ui.HookManager())
+//	go func() {
+//	    if err := ui.Start(); err != nil {
+//	        log.Printf("Dev UI stopped: %v", err)
+//	    }
+//	}()
+//	// 使用 ctx 执行 Agent，并访问 http://localhost:8080。
 type DevUI struct {
 	server        *http.Server
 	collector     *Collector

@@ -142,22 +142,32 @@ type Config struct {
 	// Middleware 注入到底层 runtime 的中间件链（按序在每步 BeforeLLM/AfterLLM/
 	// BeforeTool/AfterTool/Finalize 触发）。这是 runtime 中间件扩展点在 Agent 层的出口。
 	//
-	// 典型用途——接入运行时预算（token+墙钟+成本三维 fail-closed 单一强制点）：
+	// 典型用途——共享同一个 cost.Controller 接入统一预算控制：
 	//
-	//	ctrl := cost.NewController(cost.WithBudget(10.0))
-	//	agent := NewReAct(WithLLM(p), WithMiddleware(middleware.Budget{
-	//	    Limits: middleware.BudgetLimits{MaxCostUSD: 10.0, MaxTokens: 100000},
-	//	    Cost:   ctrl.BudgetCostFunc(), // 成本估算所有权仍在 cost.Controller
-	//	}))
+	//	ctrl, err := cost.NewController(cost.WithBudget(10.0))
+	//	if err != nil {
+	//	    return nil, err
+	//	}
+	//	// 在 provider/调用方每次真正发起 LLM 请求前执行：
+	//	if err := ctrl.CheckRequest(ctx, estimatedTokens); err != nil {
+	//	    return nil, err
+	//	}
+	//	agent := NewReAct(WithLLM(p), WithMiddleware(middleware.NewBudgetControl(
+	//	    middleware.BudgetControlConfig{
+	//	        Limits: middleware.BudgetLimits{MaxCostUSD: 10.0, MaxTokens: 100000},
+	//	        Cost:   ctrl.BudgetCostFunc(),
+	//	        Record: ctrl.RecordUsageFunc(),
+	//	    },
+	//	)))
 	//
 	// 为空时（默认）底层 runner 不挂任何中间件，行为不变。
 	//
-	// ⚠️ Budget 语义按 agent 类型不同：中间件按"每次 runtime run"作用。
-	//   - ReActAgent：单次多轮 run → Budget 是**整次执行的累计上限**。
-	//   - PlanExecute / Reflection：planner / step / replan / critique 各是一次独立 run
-	//     → Budget 退化为**每次 LLM 调用各自封顶**，非 agent 全程累计。
-	// logging / metrics / 自定义等无状态中间件不受此影响（按调用作用语义一致）。
-	// 需要"多 run agent 全程累计预算"时，须另行设计跨 run 共享累加器。
+	// NewBudgetControl 是首选入口，内部组合两层语义：Budget 按每次 runtime run
+	// 检查 token/墙钟/成本，CostControl 通过 RecordUsageFunc 把每次 LLM 响应写入
+	// 共享 Controller，因而对 PlanExecute/Reflection 等多 run agent 也提供全程累计
+	// 封顶。CheckRequest 是发请求前的 token/频率预检，不由中间件代替；三者
+	// 应共享同一 Controller。直接挂 Budget 或 CostControl 仅适合明确只需底层
+	// per-run 或 cross-run 单层语义的高级用法。
 	Middleware []agentruntime.Middleware
 
 	// Durable 可选：开启可持久化/可恢复执行（经 WithCheckpointer 设置）。
@@ -256,9 +266,11 @@ func WithRole(role Role) Option {
 
 // WithMiddleware 追加注入到底层 runtime 的中间件（runtime 中间件扩展点在 Agent 层的出口）。
 //
-// 最常见用途是接入运行时预算 middleware.Budget（token+墙钟+成本三维单一 fail-closed 强制点）；
-// 成本维度通过 cost.Controller.BudgetCostFunc() 注入，成本估算所有权仍在 security/cost，
-// Agent 不引入对 security/cost 的硬依赖。
+// 预算控制首选 middleware.NewBudgetControl：用 cost.Controller.BudgetCostFunc()
+// 提供单 run 成本估算，用 RecordUsageFunc() 提供跨 run 累计记账，并在
+// provider/调用方的每次 LLM 外呼前调用 CheckRequest() 完成 token/频率预检。
+// NewBudgetControl 底层组合 per-run Budget 与 cross-run CostControl；三者共享同一
+// Controller 时，多 run agent 无需额外累加器。Agent 仍不引入对 security/cost 的硬依赖。
 func WithMiddleware(mws ...agentruntime.Middleware) Option {
 	return func(c *Config) {
 		c.Middleware = append(c.Middleware, mws...)

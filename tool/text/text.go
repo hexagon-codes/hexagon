@@ -19,6 +19,15 @@ import (
 	"github.com/hexagon-codes/toolkit/util/hash"
 )
 
+type textHashInput struct {
+	Text      string `json:"text" description:"要计算哈希的文本"`
+	Algorithm string `json:"algorithm" description:"哈希算法: md5, sha256"`
+}
+
+type textHashOutput struct {
+	Hash string `json:"hash"`
+}
+
 // Tools 返回文本处理工具集合
 func Tools() []tool.Tool {
 	return []tool.Tool{
@@ -152,12 +161,7 @@ func Tools() []tool.Tool {
 		tool.NewFunc(
 			"text_hash",
 			"计算文本哈希值 (MD5, SHA256)",
-			func(ctx context.Context, input struct {
-				Text      string `json:"text" description:"要计算哈希的文本"`
-				Algorithm string `json:"algorithm" description:"哈希算法: md5, sha256"`
-			}) (struct {
-				Hash string `json:"hash"`
-			}, error) {
+			func(ctx context.Context, input textHashInput) (textHashOutput, error) {
 				var hashValue string
 				switch strings.ToLower(input.Algorithm) {
 				case "md5":
@@ -168,13 +172,9 @@ func Tools() []tool.Tool {
 					// 复用 toolkit 的等价实现
 					hashValue = hash.SHA256(input.Text)
 				default:
-					return struct {
-						Hash string `json:"hash"`
-					}{}, fmt.Errorf("unknown algorithm: %s", input.Algorithm)
+					return textHashOutput{}, fmt.Errorf("unknown algorithm: %s", input.Algorithm)
 				}
-				return struct {
-					Hash string `json:"hash"`
-				}{Hash: hashValue}, nil
+				return textHashOutput{Hash: hashValue}, nil
 			},
 		),
 

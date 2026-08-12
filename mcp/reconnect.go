@@ -17,13 +17,13 @@ import (
 //
 // 退避序列：第 n 次重试等待 min(InitialDelay × Multiplier^(n-1), MaxDelay)。
 type ReconnectConfig struct {
-	// MaxAttempts 最大尝试次数（含首次），<=0 时退化为 1 次
+	// MaxAttempts 最大尝试次数（含首次）；零值表示执行一次、零次重试
 	MaxAttempts int
-	// InitialDelay 首次重试前的等待
+	// InitialDelay 首次重试前的等待；零值使用默认值
 	InitialDelay time.Duration
-	// MaxDelay 退避上限
+	// MaxDelay 退避上限；零值使用默认值
 	MaxDelay time.Duration
-	// Multiplier 退避倍数（指数退避）
+	// Multiplier 退避倍数（指数退避）；零值使用默认值
 	Multiplier float64
 }
 
@@ -69,24 +69,35 @@ func (s *MCPToolSet) Reconnect(ctx context.Context) error {
 
 // reconnectWithBackoff 按指数退避重试初始化握手，恢复连接（不刷新工具列表）。
 //
-// 对配置做规范化兜底：MaxAttempts<1 退化为 1（至少尝试一次，否则底层 retry 会一次
-// 不跑直接返回错误）；退避倍数/初始延迟为零时给出合理默认，避免热自旋重试。
+// 仅补齐未设置的零值字段；显式负数及非有限值原样交由 Toolkit 严格校验。
 func (s *MCPToolSet) reconnectWithBackoff(ctx context.Context, cfg *ReconnectConfig) error {
-	attempts := max(cfg.MaxAttempts, 1)
-	delay := cfg.InitialDelay
-	if delay <= 0 {
-		delay = 500 * time.Millisecond
-	}
-	multiplier := cfg.Multiplier
-	if multiplier < 1 {
-		multiplier = 2.0
-	}
+	normalized := normalizeReconnectConfig(cfg)
 	return retry.DoWithContext(ctx, func() error {
 		return s.client.Initialize(ctx)
 	},
-		retry.Attempts(attempts),
-		retry.Delay(delay),
-		retry.MaxDelay(cfg.MaxDelay),
-		retry.Multiplier(multiplier),
+		retry.Attempts(normalized.MaxAttempts),
+		retry.Delay(normalized.InitialDelay),
+		retry.MaxDelay(normalized.MaxDelay),
+		retry.Multiplier(normalized.Multiplier),
+		retry.DelayType(retry.ExponentialBackoff),
 	)
+}
+
+// normalizeReconnectConfig 将 Hexagon 的可选字段转换为 Toolkit 所需的完整配置。
+func normalizeReconnectConfig(cfg *ReconnectConfig) ReconnectConfig {
+	normalized := *cfg
+	defaults := DefaultReconnectConfig()
+	if normalized.MaxAttempts == 0 {
+		normalized.MaxAttempts = 1
+	}
+	if normalized.InitialDelay == 0 {
+		normalized.InitialDelay = defaults.InitialDelay
+	}
+	if normalized.MaxDelay == 0 {
+		normalized.MaxDelay = defaults.MaxDelay
+	}
+	if normalized.Multiplier == 0 {
+		normalized.Multiplier = defaults.Multiplier
+	}
+	return normalized
 }

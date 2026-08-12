@@ -43,5 +43,5 @@ func NewLangfuseExporter(cfg LangfuseConfig) (*OTLPExporter, error) {
 		headers["Authorization"] = "Basic " + token
 	}
 
-	return NewOTLPExporter(cfg.Endpoint, WithOTLPHeaders(headers)), nil
+	return NewOTLPExporter(cfg.Endpoint, WithOTLPHeaders(headers))
 }

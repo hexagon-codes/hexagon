@@ -1,12 +1,11 @@
 // Package otel 提供 OpenTelemetry 集成
 //
-// 本包重新导出 toolkit/infra/otel 的实现，保持向后兼容性。
+// 本包直接复用 toolkit/infra/otel 的实现。
 //
 // 使用示例:
 //
-//	tracer := otel.NewOTelTracer(
+//	tracer := otel.NewTracer(
 //	    otel.WithServiceName("my-service"),
-//	    otel.WithEndpoint("localhost:4317"),
 //	)
 //	defer tracer.Shutdown(context.Background())
 package otel
@@ -17,17 +16,17 @@ import (
 
 // 重新导出类型
 type (
-	// OTelTracer OpenTelemetry 追踪器
-	OTelTracer = toolkitOtel.OTelTracer
+	// Tracer OpenTelemetry 追踪器
+	Tracer = toolkitOtel.Tracer
 
-	// OTelConfig OpenTelemetry 配置
-	OTelConfig = toolkitOtel.OTelConfig
+	// Config OpenTelemetry 配置
+	Config = toolkitOtel.Config
 
-	// OTelOption 配置选项
-	OTelOption = toolkitOtel.OTelOption
+	// Option 配置选项
+	Option = toolkitOtel.Option
 
-	// OTelSpan OpenTelemetry Span
-	OTelSpan = toolkitOtel.OTelSpan
+	// Span 表示 OpenTelemetry 跨度。
+	Span = toolkitOtel.Span
 
 	// SpanData 导出数据
 	SpanData = toolkitOtel.SpanData
@@ -92,11 +91,11 @@ type (
 
 // 重新导出函数
 var (
-	// NewOTelTracer 创建 OpenTelemetry 追踪器
-	NewOTelTracer = toolkitOtel.NewOTelTracer
+	// NewTracer 创建 OpenTelemetry 追踪器
+	NewTracer = toolkitOtel.NewTracer
 
-	// DefaultOTelConfig 返回默认配置
-	DefaultOTelConfig = toolkitOtel.DefaultOTelConfig
+	// DefaultConfig 返回默认配置
+	DefaultConfig = toolkitOtel.DefaultConfig
 
 	// WithServiceName 设置服务名称
 	WithServiceName = toolkitOtel.WithServiceName
@@ -107,14 +106,8 @@ var (
 	// WithEnvironment 设置环境
 	WithEnvironment = toolkitOtel.WithEnvironment
 
-	// WithEndpoint 设置端点
-	WithEndpoint = toolkitOtel.WithEndpoint
-
 	// WithSamplingRate 设置采样率
 	WithSamplingRate = toolkitOtel.WithSamplingRate
-
-	// WithBatchConfig 设置批量配置
-	WithBatchConfig = toolkitOtel.WithBatchConfig
 
 	// NewConsoleExporter 创建控制台导出器
 	NewConsoleExporter = toolkitOtel.NewConsoleExporter
@@ -127,6 +120,12 @@ var (
 
 	// WithOTLPBatchSize 设置 OTLP 批量大小
 	WithOTLPBatchSize = toolkitOtel.WithOTLPBatchSize
+
+	// WithOTLPBatchTimeout 设置 OTLP 定时刷新间隔
+	WithOTLPBatchTimeout = toolkitOtel.WithOTLPBatchTimeout
+
+	// WithOTLPMaxQueueSize 设置 OTLP 队列容量上限
+	WithOTLPMaxQueueSize = toolkitOtel.WithOTLPMaxQueueSize
 
 	// NewJaegerExporter 创建 Jaeger 导出器
 	NewJaegerExporter = toolkitOtel.NewJaegerExporter
@@ -151,4 +150,17 @@ var (
 
 	// NewCompositePropagator 创建组合传播器
 	NewCompositePropagator = toolkitOtel.NewCompositePropagator
+)
+
+var (
+	// ErrTracerShutdown 表示追踪器已经关闭，不能再接管新的导出器。
+	ErrTracerShutdown = toolkitOtel.ErrTracerShutdown
+	// ErrExporterShutdown 表示 OTLP 导出器已经关闭。
+	ErrExporterShutdown = toolkitOtel.ErrExporterShutdown
+	// ErrExporterQueueFull 表示 OTLP 导出队列已满。
+	ErrExporterQueueFull = toolkitOtel.ErrExporterQueueFull
+	// ErrInvalidExporterConfig 表示 OTLP 导出器配置无效。
+	ErrInvalidExporterConfig = toolkitOtel.ErrInvalidExporterConfig
+	// ErrInvalidSpan 表示待导出的 Span 无效。
+	ErrInvalidSpan = toolkitOtel.ErrInvalidSpan
 )

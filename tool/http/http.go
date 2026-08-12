@@ -82,7 +82,7 @@ func NewHTTPTool(opts ...Option) *HTTPTool {
 			return fmt.Errorf("重定向次数过多（最大 5 次）")
 		}
 		if !t.allowPrivate {
-			if err := validateURLSafety(req.URL); err != nil {
+			if err := validateURLSafety(req.Context(), req.URL); err != nil {
 				return fmt.Errorf("重定向目标不安全: %w", err)
 			}
 		}
@@ -169,7 +169,7 @@ func (t *HTTPTool) request(ctx context.Context, method, rawURL string, headers m
 		if err != nil {
 			return RequestOutput{}, fmt.Errorf("无效的 URL: %w", err)
 		}
-		if err := validateURLSafety(parsedURL); err != nil {
+		if err := validateURLSafety(ctx, parsedURL); err != nil {
 			return RequestOutput{}, fmt.Errorf("URL 安全检查失败: %w", err)
 		}
 	}
@@ -345,13 +345,13 @@ func (t *GraphQLTool) Tool() tool.Tool {
 
 // validateURLSafety 验证 URL 是否安全，防止 SSRF 攻击
 // 禁止访问内网地址、元数据服务、非 HTTP(S) 协议等
-func validateURLSafety(u *url.URL) error {
-	// scheme 限制：仅允许 http/https。toolkit ssrf.ValidateURL 不校验协议，故在此保留。
+func validateURLSafety(ctx context.Context, u *url.URL) error {
+	// 在本层保留明确的协议错误，再交由统一 SSRF 策略完成规范与地址校验。
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
 		return fmt.Errorf("不允许的协议: %s（仅支持 http/https）", u.Scheme)
 	}
 	// SSRF 核心校验（元数据/localhost 阻断 + DNS 解析逐 IP 私网检查，抗 DNS rebinding）
 	// 复用 toolkit/net/ssrf，避免在多处各维护一份私网名单产生防护漂移。
-	return ssrf.ValidateURL(u.String())
+	return ssrf.ValidateURL(ctx, u.String())
 }

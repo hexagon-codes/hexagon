@@ -236,7 +236,7 @@ func NewBatcher(provider Provider, config ...*Config) *Batcher {
 	// 限流场景下令牌桶容量与速率均取 RateLimit（每秒请求数）。
 	var limiter *rate.TokenBucket
 	if cfg.RateLimit > 0 {
-		limiter = rate.NewTokenBucket(cfg.RateLimit, float64(cfg.RateLimit))
+		limiter = rate.MustNewTokenBucket(cfg.RateLimit, float64(cfg.RateLimit))
 	}
 
 	return &Batcher{
@@ -476,40 +476,17 @@ func (b *Batcher) processRequest(pending *pendingRequest) {
 	var resp *Response
 	var err error
 
-	// lastCallErr 记录 provider.Complete 最近一次返回的原始错误。
-	//
-	// 不能依赖 retry.DoWithContext 的返回值来还原原始错误：
-	//   - 不可重试早退路径（RetryIf=false）返回的是【裸错误】（无 %w 包装），
-	//     对它调用 errors.Unwrap 得到 nil，会把真实原因（如 "invalid api key"）误丢。
-	//   - 重试耗尽路径返回 fmt.Errorf("%w: %v", ErrMaxAttemptsReached, lastErr)，
-	//     Unwrap 只能拿到 ErrMaxAttemptsReached 哨兵，原始原因（如 timeout）从错误链中丢失。
-	// 当前 toolkit v0.0.6 的 retry 尚未提供 WithUnwrapFinalError/WithReturnLastError
-	// 补偿选项，因此在本包内通过闭包捕获最近一次回调错误，保证原始失败原因不丢。
-	var lastCallErr error
-
 	// 使用 toolkit/util/retry 实现重试逻辑
 	err = retry.DoWithContext(ctx, func() error {
 		var callErr error
 		resp, callErr = b.provider.Complete(ctx, pending.request)
-		lastCallErr = callErr
 		return callErr
 	},
 		retry.Attempts(b.config.MaxRetries+1),
 		retry.Delay(b.config.RetryDelay),
 		retry.DelayType(retry.LinearBackoff),
-		retry.RetryIf(func(err error) bool { return isRetryableError(err) }),
+		retry.If(isRetryableError),
 	)
-	// 归一化错误：优先保留 provider 返回的原始失败原因，
-	// 仅在确实拿不到任何原始错误时才回退到 ErrBatchFailed 哨兵。
-	if err != nil && resp == nil {
-		switch {
-		case lastCallErr != nil:
-			err = lastCallErr
-		default:
-			err = fmt.Errorf("%w: %v", ErrBatchFailed, err)
-		}
-	}
-
 	latency := time.Since(startTime)
 
 	if resp == nil {

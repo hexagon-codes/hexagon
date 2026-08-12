@@ -75,8 +75,8 @@ func SubmitWait(fn func()) error {
 	return globalPool.SubmitWait(fn)
 }
 
-// SubmitWithContext 带 context 提交任务
-func SubmitWithContext(ctx context.Context, fn func()) error {
+// SubmitWithContext 提交接收 context 的协作式任务
+func SubmitWithContext(ctx context.Context, fn func(context.Context)) error {
 	initGlobalPool()
 	return globalPool.SubmitWithContext(ctx, fn)
 }
@@ -184,10 +184,13 @@ type ObjectPool[T any] struct {
 }
 
 // NewObjectPool 创建对象池
-func NewObjectPool[T any](factory func() T, reset func(*T)) *ObjectPool[T] {
-	return &ObjectPool[T]{
-		pool: poolx.NewObjectPool(factory, reset),
+func NewObjectPool[T any](factory func() T, reset func(*T)) (*ObjectPool[T], error) {
+	p, err := poolx.NewObjectPool(factory, reset)
+	if err != nil {
+		return nil, err
 	}
+
+	return &ObjectPool[T]{pool: p}, nil
 }
 
 // Get 获取对象
