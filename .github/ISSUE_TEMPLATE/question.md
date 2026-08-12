@@ -30,10 +30,11 @@ assignees: ''
 
 ## 环境信息
 
-- Go 版本: [例如 1.21.0]
-- Hexagon 版本: [例如 v1.0.0]
+- `go version` 输出:
+- `go env GOOS GOARCH GOTOOLCHAIN GOWORK` 输出:
+- `go list -m github.com/hexagon-codes/hexagon` 输出（使用未发布代码时请提供 commit SHA）:
 
 ## 检查清单
 
 - [ ] 我已阅读过文档
-- [ ] 我已搜索过现有 Issues 和 Discussions
+- [ ] 我已搜索过现有 Issues

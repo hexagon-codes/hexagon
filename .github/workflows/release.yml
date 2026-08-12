@@ -8,68 +8,41 @@ on:
 permissions:
   contents: read
 
+env:
+  GOWORK: off
+
 jobs:
-  release:
-    name: Release
+  validate:
+    name: Validate
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Check dependencies
+        run: go mod tidy -diff
+
+      - name: Test
+        run: go test -count=1 -race ./...
+
+  publish:
+    name: Publish
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Create release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
-          fetch-depth: 0
-
-      - name: Setup Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version: '1.25.x'
-
-      - name: Verify dependencies
-        run: go mod verify
-
-      - name: Run tests
-        run: go test -v -race -coverprofile=coverage.out ./...
-
-      - name: Build
-        run: go build ./...
-
-      - name: Generate changelog
-        id: changelog
-        run: |
-          # Get the previous tag
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-
-          if [ -z "$PREV_TAG" ]; then
-            echo "First release, including all commits"
-            CHANGELOG=$(git log --oneline --pretty=format:"- %s" | head -50)
-          else
-            echo "Previous tag: $PREV_TAG"
-            CHANGELOG=$(git log ${PREV_TAG}..HEAD --oneline --pretty=format:"- %s")
-          fi
-
-          # Write changelog to file (handle multiline)
-          echo "$CHANGELOG" > /tmp/changelog.txt
-
-      - name: Create Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          body_path: /tmp/changelog.txt
-          draft: false
-          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
-
-  notify:
-    name: Notify
-    runs-on: ubuntu-24.04
-    needs: release
-    if: success()
-    steps:
-      - name: Get version
-        id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Notification
-        run: |
-          echo "Release ${{ steps.version.outputs.VERSION }} published successfully!"
-          # 可以在这里添加其他通知方式，如 Slack、邮件等

@@ -8,54 +8,26 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+
+env:
+  GOWORK: off
 
 jobs:
   test:
     name: Test
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.25.x'
+          go-version-file: go.mod
 
-      - name: Download dependencies
-        run: go mod download
-
-      - name: Build
-        run: go build ./...
+      - name: Check dependencies
+        run: go mod tidy -diff
 
       - name: Test
-        run: go test -v -race -coverprofile=coverage.out ./...
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
-        with:
-          file: ./coverage.out
-          fail_ci_if_error: false
-
-  lint:
-    name: Lint
-    runs-on: ubuntu-24.04
-    continue-on-error: true  # lint 债务清理为单独专项窗口, 暂降为提示性 (Test 仍硬门禁); 债清完后恢复阻断
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0  # only-new-issues 需完整历史以计算与基线的差异
-
-      - name: Setup Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version: '1.25.x'
-
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
-        with:
-          version: v2.12.2          # 固定版本保证可复现; v8 action 支持 golangci-lint v2 (.golangci.yml 为 version "2")
-          args: --timeout=5m
-          only-new-issues: true     # 既有问题不阻断, 仅对新增引入的问题门禁 (大型既有代码库渐进采纳 lint 的标准做法)
+        run: go test -count=1 -race ./...

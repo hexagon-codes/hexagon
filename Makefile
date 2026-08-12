@@ -64,7 +64,7 @@ help:
 	@echo "  make              - 格式化、检查并测试代码"
 	@echo "  make build        - 构建项目"
 	@echo "  make test         - 运行测试"
-	@echo "  make test-coverage- 运行测试并生成覆盖率报告"
+	@echo "  make test-coverage  运行测试并生成覆盖率报告"
 	@echo "  make lint         - 代码静态检查"
 	@echo "  make fmt          - 格式化代码"
 	@echo "  make vet          - Go vet 检查"

@@ -49,8 +49,9 @@ func main() {
 ## 环境信息
 
 - OS: [例如 macOS 14.0, Ubuntu 22.04]
-- Go 版本: [例如 1.21.0]
-- Hexagon 版本: [例如 v1.0.0]
+- `go version` 输出:
+- `go env GOOS GOARCH GOTOOLCHAIN GOWORK` 输出:
+- `go list -m github.com/hexagon-codes/hexagon` 输出（使用未发布代码时请提供 commit SHA）:
 
 ## 额外信息
 
