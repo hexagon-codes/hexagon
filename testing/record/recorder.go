@@ -191,6 +191,19 @@ func (r *Recorder) CountTokens(messages []llm.Message) (int, error) {
 	return r.provider.CountTokens(messages)
 }
 
+// CountTokensContext 使用底层 Provider 的可取消能力计算 Token 数量。
+// 若底层仅支持旧接口，则快速返回不支持错误，不执行无法中途取消的同步降级。
+func (r *Recorder) CountTokensContext(ctx context.Context, messages []llm.Message) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	counter, ok := r.provider.(llm.ContextTokenCounter)
+	if !ok {
+		return 0, llm.ErrContextTokenCountingUnsupported
+	}
+	return counter.CountTokensContext(ctx, messages)
+}
+
 // Cassette 返回录制的会话
 func (r *Recorder) Cassette() *Cassette {
 	r.mu.Lock()
@@ -205,7 +218,10 @@ func (r *Recorder) Save(path string) error {
 	return r.cassette.Save(path)
 }
 
-var _ llm.Provider = (*Recorder)(nil)
+var (
+	_ llm.Provider            = (*Recorder)(nil)
+	_ llm.ContextTokenCounter = (*Recorder)(nil)
+)
 
 // ============== Replayer ==============
 
@@ -329,6 +345,30 @@ func (r *Replayer) CountTokens(messages []llm.Message) (int, error) {
 	return total, nil
 }
 
+// CountTokensContext 使用回退 Provider 的可取消能力或本地估算计算 Token 数量。
+// 回退 Provider 仅支持旧接口时快速返回不支持错误，避免伪装调用期间可取消。
+func (r *Replayer) CountTokensContext(ctx context.Context, messages []llm.Message) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if r.fallback != nil {
+		counter, ok := r.fallback.(llm.ContextTokenCounter)
+		if !ok {
+			return 0, llm.ErrContextTokenCountingUnsupported
+		}
+		return counter.CountTokensContext(ctx, messages)
+	}
+
+	total := 0
+	for _, msg := range messages {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		total += len(msg.Content) / 4
+	}
+	return total, nil
+}
+
 // Stats 返回统计信息
 func (r *Replayer) Stats() (hits, misses int) {
 	r.mu.Lock()
@@ -336,7 +376,10 @@ func (r *Replayer) Stats() (hits, misses int) {
 	return r.hitCount, r.missCount
 }
 
-var _ llm.Provider = (*Replayer)(nil)
+var (
+	_ llm.Provider            = (*Replayer)(nil)
+	_ llm.ContextTokenCounter = (*Replayer)(nil)
+)
 
 // ============== 辅助函数 ==============
 

@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-08-14
+
+### Fixed
+- **testing/record**：`Recorder` 与 `Replayer` 现保留 ai-core 的可取消 Token 计数能力。支持 `llm.ContextTokenCounter` 的底层 Provider 会收到原始 context 与消息；仅支持旧接口的底层或回退 Provider 会快速返回 `llm.ErrContextTokenCountingUnsupported`，不再隐式执行无法中途取消的同步计数。无回退 Provider 的 `Replayer` 继续使用既有本地估算，并响应 context 取消。
+
 ## [0.5.12] - 2026-08-13
 
 > **BREAKING / 版本策略例外：** 本批次包含相对 v0.5.9 的公开 API、最低 Go 版本与 Qdrant 持久数据合同变更。v0.5.10 与 v0.5.11 已错误地以 patch 版本发布，且提交拓扑与版本顺序倒置。维护者确认当前框架尚无外部使用者，批准 v0.5.12 作为一次性例外并撤回这两个异常版本；该例外不改变后续 v0.5.x patch 的兼容性承诺。
