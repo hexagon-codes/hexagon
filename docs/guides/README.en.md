@@ -9,7 +9,7 @@ This directory indexes Hexagon guides for getting started, agents, RAG, orchestr
 | Module | Role | Current Root-Module Declaration |
 |--------|------|---------------------------------|
 | **hexagon** | AI Agent framework core | Go `1.25.12` |
-| [**ai-core**](https://github.com/hexagon-codes/ai-core) | Core AI capability library | `v0.2.7` |
+| [**ai-core**](https://github.com/hexagon-codes/ai-core) | Core AI capability library | `v0.2.10` |
 | [**toolkit**](https://github.com/hexagon-codes/toolkit) | General-purpose Go toolkit | `v0.3.4` |
 
 This table is a snapshot of the current root module. Treat [`go.mod`](../../go.mod) as the single source of truth for subsequent dependency updates.

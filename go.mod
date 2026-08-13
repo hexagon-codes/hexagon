@@ -3,7 +3,7 @@ module github.com/hexagon-codes/hexagon
 go 1.25.12
 
 require (
-	github.com/hexagon-codes/ai-core v0.2.7
+	github.com/hexagon-codes/ai-core v0.2.10
 	github.com/hexagon-codes/toolkit v0.3.4
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/redis/go-redis/v9 v9.18.0

@@ -9,7 +9,7 @@
 | 模块 | 定位 | 根模块当前声明 |
 |------|------|----------------|
 | **hexagon** | AI Agent 框架核心 | Go `1.25.12` |
-| [**ai-core**](https://github.com/hexagon-codes/ai-core) | AI 基础能力库 | `v0.2.7` |
+| [**ai-core**](https://github.com/hexagon-codes/ai-core) | AI 基础能力库 | `v0.2.10` |
 | [**toolkit**](https://github.com/hexagon-codes/toolkit) | Go 通用工具库 | `v0.3.4` |
 
 上表是当前根模块的依赖快照，后续更新以 [`go.mod`](../../go.mod) 为唯一准确信息源。

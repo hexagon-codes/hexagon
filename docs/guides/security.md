@@ -199,7 +199,7 @@ func (a *BudgetedAgent) Invoke(
 
 `cost.DefaultPricing()` 每次返回独立快照，修改快照不会污染包级默认值。内置价格只是静态估算；生产环境应依据实际供应商和模型价格用 `cost.WithPricing` 覆盖。未知模型使用 `default` 定价。`EstimateCost` 遇到无效输入或不可表示的成本时返回正无穷，以便无 `error` 签名的预算检查安全拒绝。
 
-当前桥接直接消费 ai-core v0.2.7 的 `llm.Usage`；Controller 内部使用 toolkit v0.3.4 的滑动窗口限流器，限流器构造失败会统一作为 Controller 配置错误返回。
+当前桥接直接消费 ai-core v0.2.10 的 `llm.Usage`；Controller 内部使用 toolkit v0.3.4 的滑动窗口限流器，限流器构造失败会统一作为 Controller 配置错误返回。
 
 ### 错误识别
 

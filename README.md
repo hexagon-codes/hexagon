@@ -42,7 +42,7 @@ Hexagon 与以下 AI Agent 开发相关仓库协同使用：
 | **toolkit** | Go 通用工具库 (lang/crypto/net/cache/util) | [github.com/hexagon-codes/toolkit](https://github.com/hexagon-codes/toolkit) |
 | **hexagon-ui** | Dev UI 前端 (Vue 3 + TypeScript) | [github.com/hexagon-codes/hexagon-ui](https://github.com/hexagon-codes/hexagon-ui) |
 
-> 当前根模块构建基线：Go 1.25.12、ai-core v0.2.7、toolkit v0.3.4。`examples/` 是独立 Go module，其依赖版本以 `examples/go.mod` 为准，不随根模块自动同步。
+> 当前根模块构建基线：Go 1.25.12、ai-core v0.2.10、toolkit v0.3.4。`examples/` 是独立 Go module，其依赖版本以 `examples/go.mod` 为准，不随根模块自动同步。
 
 ### 🧠 ai-core — AI 基础能力库
 

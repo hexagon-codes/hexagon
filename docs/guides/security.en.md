@@ -199,7 +199,7 @@ When calling `RecordUsage` directly, `cost.TokenUsage` follows these rules:
 
 `cost.DefaultPricing()` returns a fresh snapshot on each call, so mutating one snapshot cannot change package defaults. Built-in prices are static estimates; production applications should override them with current provider and model prices through `cost.WithPricing`. Unknown models use the `default` price. `EstimateCost` returns positive infinity for invalid input or non-representable cost, allowing an API without an `error` return to fail closed.
 
-The bridge consumes ai-core v0.2.7's `llm.Usage` directly. The Controller uses toolkit v0.3.4's sliding-window limiter internally; limiter-construction failures are normalized as Controller configuration errors.
+The bridge consumes ai-core v0.2.10's `llm.Usage` directly. The Controller uses toolkit v0.3.4's sliding-window limiter internally; limiter-construction failures are normalized as Controller configuration errors.
 
 ### Error Identification
 

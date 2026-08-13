@@ -7,7 +7,7 @@
 > **BREAKING / 发布级别：** 本批次包含公开 API、最低 Go 版本与 Qdrant 持久数据合同变更。Hexagon 仍处于 v0.x 阶段，因此相对最新已发布的 v0.5.9，下一版本必须至少为 **v0.6.0**，不得作为 v0.5.x patch 发布。
 
 ### Changed
-- 根模块依赖相对 v0.5.9 升级：ai-core v0.2.4 → **v0.2.7**、toolkit v0.2.6 → **v0.3.4**；最低 Go 版本由 **1.25.7** 提升至 **1.25.12**。本次只更新 Hexagon 根模块；`examples` 是独立模块，继续使用其当前已发布版本依赖，不作调整。
+- 根模块依赖相对 v0.5.9 升级：ai-core v0.2.4 → **v0.2.10**、toolkit v0.2.6 → **v0.3.4**；最低 Go 版本由 **1.25.7** 提升至 **1.25.12**。本次只更新 Hexagon 根模块；`examples` 是独立模块，继续使用其当前已发布版本依赖，不作调整。
 - **CI/CD**：工作流收敛为根模块 `CI` 与 `Release` 两条链路。CI 在 `GOWORK=off` 下只执行 `go mod tidy -diff` 和全量 `go test -count=1 -race ./...`；Release 将只读验证与写权限发布拆成独立 job，并在验证通过后生成 GitHub Release。
 - **CI/CD 降噪**：删除不具备可靠阻断能力的 API compatibility 和浮动下游分支工作流，以及 Codecov、非阻断 lint、重复的 build/download、手工 changelog 和空通知步骤；Dependabot 改为每月分组更新，每类最多保留一个 PR。
 

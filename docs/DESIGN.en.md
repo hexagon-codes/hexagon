@@ -98,7 +98,7 @@ Hexagon is a complete AI Agent development ecosystem consisting of multiple repo
 
 ```
 hexagon
-├── ai-core v0.2.7
+├── ai-core v0.2.10
 │   └── toolkit v0.3.4
 └── toolkit v0.3.4
 ```
@@ -789,14 +789,14 @@ hexagon/
 
 ```
 hexagon (Go >= 1.25.12)
-├── ai-core v0.2.7
+├── ai-core v0.2.10
 │   └── toolkit v0.3.4
 └── toolkit v0.3.4
 ```
 
 ### ai-core — AI Capabilities Library
 
-`github.com/hexagon-codes/ai-core` `v0.2.7` (Go >= 1.25.12)
+`github.com/hexagon-codes/ai-core` `v0.2.10` (Go >= 1.25.12)
 
 Provides core abstractions for LLM, Tool, Memory, Schema, Stream, and vector storage:
 
