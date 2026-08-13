@@ -47,16 +47,20 @@ Please be kind and respectful. We are committed to creating an open, inclusive c
 
 #### Development Workflow
 
-1. Run the required gates used by the `CI / Test` job:
+1. Run the required root-module CI gates:
    ```bash
+   test -z "$(git ls-files -z -- '*.go' | xargs -0 gofmt -l)"
    GOWORK=off go mod tidy -diff
-   GOWORK=off go test -count=1 -race ./...
+   GOWORK=off go vet ./...
+   GOWORK=off go test -count=1 ./...
+   GOWORK=off go test -count=1 -race ./...   # current Go version
+   GOWORK=off govulncheck ./...
    ```
 
-2. Run optional local development checks as needed. These commands are useful locally but are not current CI gates:
+2. Run optional local development checks as needed:
    ```bash
    make fmt      # format code
-   make lint     # static analysis (requires golangci-lint locally)
+   make lint     # additional static analysis (requires golangci-lint locally)
    ```
 
 3. Write tests to cover your changes
@@ -148,7 +152,7 @@ hexagon/
 
 1. PR title should follow Conventional Commits format
 2. Fill in all required fields in the PR template
-3. Ensure the `CI / Test` check passes
+3. Ensure both `CI / Test` version checks pass
 4. Wait for code review
 5. Make changes based on feedback
 6. Delete your branch after merging
@@ -162,11 +166,11 @@ Version numbers follow [Semantic Versioning](https://semver.org/):
 - MINOR: backward-compatible new features
 - PATCH: backward-compatible bug fixes
 
-A Git tag matching `v*` triggers the release workflow:
+This repository has no automated release workflow. To publish:
 
-1. `Release / Validate` runs `go mod tidy -diff` and the full race-enabled test suite
-2. After validation passes, `Release / Publish` creates the GitHub Release and generates release notes
-3. A tag containing `-` (for example, `v0.6.0-rc.1`) is published as a prerelease
+1. Merge the release metadata and confirm both `CI / Test` version checks succeed for the target commit
+2. Create and push an immutable SemVer tag on that commit
+3. The tag publishes the Go module; maintainers may create a GitHub Release manually when needed
 
 See [COMPATIBILITY.md](COMPATIBILITY.md) for compatibility and BREAKING-change rules during v0.x.
 

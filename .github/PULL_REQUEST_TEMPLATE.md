@@ -46,8 +46,10 @@
 - [ ] 我已更新相关文档
 - [ ] 我的更改没有产生新的警告
 - [ ] 我已添加测试证明修复有效或新功能正常工作
-- [ ] `GOWORK=off go mod tidy -diff` 无差异
-- [ ] `GOWORK=off go test -count=1 -race ./...` 通过
+- [ ] 已跟踪 Go 文件的 `gofmt -l` 无输出，且 `GOWORK=off go mod tidy -diff` 无差异
+- [ ] `GOWORK=off go vet ./...` 与普通测试通过
+- [ ] 当前 Go 版本的 `GOWORK=off go test -count=1 -race ./...` 通过
+- [ ] `GOWORK=off govulncheck ./...` 通过
 - [ ] 如果修改了 workflow，所有第三方 Action 均固定到完整 commit SHA
 - [ ] 任何依赖的更改已经合并和发布
 

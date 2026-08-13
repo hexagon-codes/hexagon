@@ -772,7 +772,7 @@ hexagon/
 ├── bench/                        # Benchmarks
 ├── examples/                     # Example code (standalone module)
 ├── deploy/                       # Deployment configs (Docker Compose/Helm)
-├── .github/workflows/            # CI and Release workflows
+├── .github/workflows/            # Root-module CI workflow
 ├── docs/                         # Public documentation
 ├── internal/                     # Internal implementation
 │

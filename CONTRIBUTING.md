@@ -47,16 +47,20 @@
 
 #### 开发流程
 
-1. 运行与 `CI / Test` 作业一致的必需门禁：
+1. 运行与根模块 CI 一致的必需门禁：
    ```bash
+   test -z "$(git ls-files -z -- '*.go' | xargs -0 gofmt -l)"
    GOWORK=off go mod tidy -diff
-   GOWORK=off go test -count=1 -race ./...
+   GOWORK=off go vet ./...
+   GOWORK=off go test -count=1 ./...
+   GOWORK=off go test -count=1 -race ./...   # 当前 Go 版本
+   GOWORK=off govulncheck ./...
    ```
 
-2. 按需运行本地辅助检查。这些命令方便开发，但不是当前 CI 门禁：
+2. 按需运行本地辅助检查：
    ```bash
    make fmt      # 格式化代码
-   make lint     # 静态检查（需要本地安装 golangci-lint）
+   make lint     # 额外静态检查（需要本地安装 golangci-lint）
    ```
 
 3. 编写测试覆盖你的更改
@@ -148,7 +152,7 @@ hexagon/
 
 1. PR 标题使用 Conventional Commits 格式
 2. 填写 PR 模板中的所有必填项
-3. 确保 `CI / Test` 检查通过
+3. 确保两个 `CI / Test` 版本检查通过
 4. 等待代码审查
 5. 根据反馈修改
 6. 合并后删除分支
@@ -162,11 +166,11 @@ hexagon/
 - MINOR: 向后兼容的功能新增
 - PATCH: 向后兼容的 Bug 修复
 
-发布由匹配 `v*` 的 Git 标签触发：
+本仓没有自动发布工作流。发布步骤为：
 
-1. `Release / Validate` 执行 `go mod tidy -diff` 和全量 race 测试
-2. 验证通过后，`Release / Publish` 创建 GitHub Release 并自动生成发布说明
-3. 标签名称包含 `-`（例如 `v0.6.0-rc.1`）时发布为预发布版本
+1. 合并发布元数据并确认目标提交的两个 `CI / Test` 版本检查成功
+2. 在该提交上创建并推送不可变的 SemVer tag
+3. Go 模块以该 tag 发布；GitHub Release 如有需要由维护者人工创建
 
 v0.x 阶段的兼容性与 BREAKING 约定见 [COMPATIBILITY.md](COMPATIBILITY.md)。
 

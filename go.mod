@@ -2,6 +2,8 @@ module github.com/hexagon-codes/hexagon
 
 go 1.25.12
 
+retract [v0.5.10, v0.5.11]
+
 require (
 	github.com/hexagon-codes/ai-core v0.2.10
 	github.com/hexagon-codes/toolkit v0.3.4

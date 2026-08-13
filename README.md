@@ -489,7 +489,7 @@ hexagon/
 ├── config/             # 配置管理
 ├── evaluate/           # 评估系统 (agenteval/rag/metrics)
 ├── testing/            # 测试工具 (Mock/Record/E2E/Integration)
-├── .github/workflows/  # CI 与发布 (依赖一致性/race/GitHub Release)
+├── .github/workflows/  # 根模块 CI（质量检查/双版本测试/race/漏洞扫描）
 ├── deploy/             # 部署配置 (Docker Compose/Helm Chart)
 ├── examples/           # 示例代码 (独立 module)
 ├── hexagon.go          # 顶层 API（核心入口符号）
@@ -682,8 +682,8 @@ make fmt     # 格式化
 
 ### CI 与发布
 
-- 推送到 `main` 和提交 Pull Request 时，CI 使用根模块的 Go 版本执行 `go mod tidy -diff` 和 `go test -count=1 -race ./...`。
-- 推送 `v*` tag 时，发布流程先重复上述验证，再以隔离的写权限任务创建 GitHub Release。
+- 推送到 `main` 和提交 Pull Request 时，单一 CI 在 Go 1.25.12 下执行格式、依赖一致性、`go vet`、普通测试和 `govulncheck`，并在 Go 1.26.5 下补充一次 race 测试。
+- 本仓没有自动发布工作流；维护者只在目标提交的 CI 成功后创建不可变 SemVer tag，Go 模块以该 tag 发布。
 - `examples/` 是独立 module，不在根模块 `./...` 的测试范围内；修改示例时应以 `examples/go.mod` 为基线单独验证。
 
 ## 🤝 贡献

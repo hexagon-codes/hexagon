@@ -7,7 +7,7 @@ This directory contains two kinds of configuration:
 - `docker-compose.yml`: starts only the local Qdrant, Redis, and PostgreSQL infrastructure.
 - `helm/hexagon/`: a Helm template for integrating a custom Hexagon application image with Kubernetes.
 
-The Hexagon repository is a Go library. It does not currently include an application Dockerfile or provide directly deployable application or DevUI executables. The current release workflow creates GitHub Releases only; it does not build or publish container images.
+The Hexagon repository is a Go library. It does not currently include an application Dockerfile or provide directly deployable application or DevUI executables. Releases use immutable SemVer tags; the repository does not automatically create GitHub Releases or build and publish container images.
 
 ## Docker Compose: Local Infrastructure
 
@@ -157,4 +157,4 @@ When `secrets.openaiApiKey` or `secrets.deepseekApiKey` is non-empty, the chart 
 
 ### Verification Responsibility
 
-The current CI validates only Go dependency consistency and race tests. It does not render, install, or publish the Helm chart. In an environment with Helm installed and access to the target Kubernetes cluster, inspect the rendered manifests and verify the image contract before installing or upgrading the Release.
+The current CI validates root-module formatting, dependency consistency, `go vet`, minimum/current Go tests, race detection, and vulnerability scanning. It does not render, install, or publish the Helm chart. In an environment with Helm installed and access to the target Kubernetes cluster, inspect the rendered manifests and verify the image contract before installing or upgrading the Release.

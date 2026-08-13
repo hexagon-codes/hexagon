@@ -4,12 +4,15 @@
 
 ## [Unreleased]
 
-> **BREAKING / 发布级别：** 本批次包含公开 API、最低 Go 版本与 Qdrant 持久数据合同变更。Hexagon 仍处于 v0.x 阶段，因此相对最新已发布的 v0.5.9，下一版本必须至少为 **v0.6.0**，不得作为 v0.5.x patch 发布。
+## [0.5.12] - 2026-08-13
+
+> **BREAKING / 版本策略例外：** 本批次包含相对 v0.5.9 的公开 API、最低 Go 版本与 Qdrant 持久数据合同变更。v0.5.10 与 v0.5.11 已错误地以 patch 版本发布，且提交拓扑与版本顺序倒置。维护者确认当前框架尚无外部使用者，批准 v0.5.12 作为一次性例外并撤回这两个异常版本；该例外不改变后续 v0.5.x patch 的兼容性承诺。
 
 ### Changed
 - 根模块依赖相对 v0.5.9 升级：ai-core v0.2.4 → **v0.2.10**、toolkit v0.2.6 → **v0.3.4**；最低 Go 版本由 **1.25.7** 提升至 **1.25.12**。本次只更新 Hexagon 根模块；`examples` 是独立模块，继续使用其当前已发布版本依赖，不作调整。
-- **CI/CD**：工作流收敛为根模块 `CI` 与 `Release` 两条链路。CI 在 `GOWORK=off` 下只执行 `go mod tidy -diff` 和全量 `go test -count=1 -race ./...`；Release 将只读验证与写权限发布拆成独立 job，并在验证通过后生成 GitHub Release。
-- **CI/CD 降噪**：删除不具备可靠阻断能力的 API compatibility 和浮动下游分支工作流，以及 Codecov、非阻断 lint、重复的 build/download、手工 changelog 和空通知步骤；Dependabot 改为每月分组更新，每类最多保留一个 PR。
+- **CI**：工作流收敛为单一根模块门禁。Go 1.25.12 验证格式、依赖一致性、`go vet`、普通测试与 `govulncheck`；Go 1.26.5 只补充一次 race 测试。删除重复验证并持有写权限的自动 GitHub Release 工作流，发布只使用已通过 CI 的不可变 SemVer tag。
+- **CI 降噪**：删除不具备可靠阻断能力的 API compatibility 和浮动下游分支工作流，以及 Codecov、非阻断 lint、重复的 build/download、手工 changelog 和空通知步骤；Dependabot 改为每月分组更新，每类最多保留一个 PR。
+- **版本治理**：在 `go.mod` 中撤回 v0.5.10 与 v0.5.11，防止消费者继续选择提交拓扑倒置且不符合既定 patch 合同的版本。
 
 ### BREAKING
 - **Go 构建基线**：根模块最低 Go 版本提升至 **1.25.12**；使用更早 Go 工具链的调用方须先升级工具链。

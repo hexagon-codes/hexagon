@@ -11,23 +11,70 @@ permissions:
 
 env:
   GOWORK: off
+  GOTOOLCHAIN: local
+  GOFLAGS: -mod=readonly
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
-    name: Test
+    name: Test (Go ${{ matrix.go }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - go: '1.25.12'
+            quality: true
+            race: false
+          - go: '1.26.5'
+            quality: false
+            race: true
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: go.sum
+
+      - name: Check formatting
+        if: matrix.quality
+        shell: bash
+        run: |
+          unformatted="$(git ls-files -z -- '*.go' | xargs -0 gofmt -l)"
+          if [[ -n "$unformatted" ]]; then
+            printf 'The following files are not gofmt formatted:\n%s\n' "$unformatted"
+            exit 1
+          fi
 
       - name: Check dependencies
+        if: matrix.quality
         run: go mod tidy -diff
 
+      - name: Vet
+        if: matrix.quality
+        run: go vet ./...
+
       - name: Test
+        if: ${{ !matrix.race }}
+        run: go test -count=1 ./...
+
+      - name: Test with race detector
+        if: matrix.race
         run: go test -count=1 -race ./...
+
+      - name: Install govulncheck
+        if: matrix.quality
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      - name: Check vulnerabilities
+        if: matrix.quality
+        run: govulncheck ./...

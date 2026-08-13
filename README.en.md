@@ -490,7 +490,7 @@ hexagon/
 ├── config/             # Configuration management
 ├── evaluate/           # Evaluation system (agenteval/rag/metrics)
 ├── testing/            # Testing utilities (Mock/Record/E2E/Integration)
-├── .github/workflows/  # CI and release (dependency consistency/race/GitHub Release)
+├── .github/workflows/  # Root-module CI (quality/two Go versions/race/vulnerability scan)
 ├── deploy/             # Deployment configs (Docker Compose/Helm Chart)
 ├── examples/           # Example code (standalone module)
 ├── hexagon.go          # Top-level API (core entry symbols)
@@ -680,8 +680,8 @@ make fmt     # format
 
 ### CI and Release
 
-- On pushes to `main` and pull requests, CI uses the root module's Go version to run `go mod tidy -diff` and `go test -count=1 -race ./...`.
-- On `v*` tags, the release workflow repeats those checks before creating a GitHub Release in a separate job with write permission.
+- On pushes to `main` and pull requests, the single CI workflow runs formatting, dependency consistency, `go vet`, regular tests, and `govulncheck` with Go 1.25.12, then adds one race-enabled test run with Go 1.26.5.
+- This repository has no automated release workflow. Maintainers create an immutable SemVer tag only after CI succeeds for the target commit; that tag publishes the Go module.
 - `examples/` is a standalone module and is outside the root module's `./...` test scope; validate example changes separately against `examples/go.mod`.
 
 ## 🤝 Contributing

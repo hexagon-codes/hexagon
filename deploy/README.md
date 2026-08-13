@@ -7,7 +7,7 @@
 - `docker-compose.yml`：仅用于启动本地 Qdrant、Redis 和 PostgreSQL 基础设施。
 - `helm/hexagon/`：用于把自定义 Hexagon 应用镜像接入 Kubernetes 的 Helm 模板。
 
-Hexagon 本仓库是 Go 库。当前仓库不包含应用 Dockerfile，也不提供可直接部署的应用或 DevUI 可执行程序；当前发布流程只创建 GitHub Release，不构建或推送容器镜像。
+Hexagon 本仓库是 Go 库。当前仓库不包含应用 Dockerfile，也不提供可直接部署的应用或 DevUI 可执行程序；发布使用不可变 SemVer tag，不自动创建 GitHub Release，也不构建或推送容器镜像。
 
 ## Docker Compose：本地基础设施
 
@@ -157,4 +157,4 @@ Qdrant、Redis 和 PostgreSQL 默认由 Chart 创建。若改用外部服务，�
 
 ### 验证责任
 
-当前 CI 只验证 Go 依赖一致性和 race 测试，不渲染、安装或发布 Helm Chart。使用者应在装有 Helm 且可访问目标 Kubernetes 集群的环境中，先检查渲染结果和镜像契约，再执行安装或升级。
+当前 CI 验证根模块格式、依赖一致性、`go vet`、最低/当前 Go 版本测试、race 与漏洞扫描，但不渲染、安装或发布 Helm Chart。使用者应在装有 Helm 且可访问目标 Kubernetes 集群的环境中，先检查渲染结果和镜像契约，再执行安装或升级。

@@ -9,15 +9,16 @@ hexagon 是 Hexagon 生态的 **AI Agent 框架（L2）**，向下依赖 toolkit
 - 内部包（`internal/`）、未导出标识符、`examples/`、`docs/` 不在契约内。
 
 ## 当前发布判定
-- 相对最新已发布的 v0.5.9，当前待发布内容包含公开 API、最低 Go 版本和 Qdrant 持久数据合同的破坏式变更。
-- 因此下一版本必须至少为 **v0.6.0**，不得作为 v0.5.x patch 发布；具体迁移项以 CHANGELOG 的 Unreleased `BREAKING` 段为准。
+- v0.5.10 与 v0.5.11 已包含相对 v0.5.9 的公开 API、最低 Go 版本和 Qdrant 持久数据合同变更，但以 patch 版本发布，且两者的提交拓扑与版本顺序倒置。
+- 维护者确认当前框架尚无外部使用者，批准 **v0.5.12** 作为一次性版本策略例外：保留上述合同变化，撤回 v0.5.10 与 v0.5.11，并以 v0.5.12 建立唯一可消费基线。迁移项见 CHANGELOG 的 v0.5.12 `BREAKING` 段。
+- 该例外不改变后续兼容性承诺；v0.5.12 之后的 v0.5.x patch 不得再包含破坏式合同变化。
 
 ## 仓库门禁
-- 根 CI 固定设置 `GOWORK=off`，只按根 `go.mod` 验证 `go mod tidy -diff` 与 `go test -count=1 -race ./...`，避免本地 workspace 或其他模块掩盖发布依赖问题。
-- Tag 发布在同样的 `GOWORK=off` 根模块边界重新验证后才执行发布；验证 job 只读，写权限仅授予不检出仓库代码的发布 job。
+- 根 CI 固定设置 `GOWORK=off`、`GOTOOLCHAIN=local` 与 `-mod=readonly`，只按根 `go.mod` 验证格式、依赖一致性、`go vet`、最低 Go 版本测试、当前 Go 版本 race 测试和 `govulncheck`，避免本地 workspace 或其他模块掩盖发布依赖问题。
+- 本仓没有自动发布工作流。维护者只在目标提交的根 CI 成功后创建不可变 SemVer tag；Go 模块以该 tag 发布，GitHub Release 为可选的人工元数据。
 - `examples/` 是独立 Go module，不属于根模块发布表面，也不进入根 CI；其依赖本次保持不变。以后若修改 `examples/`，应在该模块目录按其自身 `go.mod` 单独 build/test。
 - 本仓不运行绑定 `main`、`latest` 等浮动外部分支的下游门禁，也不以临时 `go.work` 覆盖作为发布验收证据。
-- 公共 API、最低 Go 版本或持久数据合同发生变化时，必须在评审中判定 SemVer 级别，并同步 CHANGELOG；当前精简 CI 不自动执行 `gorelease`。
+- 公共 API、最低 Go 版本或持久数据合同发生变化时，必须在评审中判定 SemVer 级别，并同步 CHANGELOG；精简 CI 不自动执行 `gorelease` 或具名消费者测试。
 
 ## 弃用流程
 - 弃用先标 `// Deprecated: 用 X 替代。将在 vN 移除。`，保留 ≥1 个 minor 周期，CHANGELOG 记录，到期才删。
