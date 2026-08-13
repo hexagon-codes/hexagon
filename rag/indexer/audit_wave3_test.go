@@ -341,7 +341,8 @@ func TestMemoryGraphStore_UpdateEntityRenameStaleName(t *testing.T) {
 // graph.go:428 DeleteEntity 原本删除了 s.relations 中的关系, 并删除了被删实体自己的
 // outEdges/inEdges, 但 *没有* 从另一端实体的 inEdges/outEdges 中移除这些 relID。
 // 后果: GetRelations(邻居) 时按 relID 查 s.relations 已为 nil 会被 ok 过滤掉 (尚可忍受),
-//       但 GetNeighbors / GetSubgraph 遍历邻居边列表时残留 relID 会持续累积, 内存泄漏式残留。
+//
+//	但 GetNeighbors / GetSubgraph 遍历邻居边列表时残留 relID 会持续累积, 内存泄漏式残留。
 func TestMemoryGraphStore_DeleteEntityDanglingEdges(t *testing.T) {
 	store := NewMemoryGraphStore()
 	ctx := context.Background()
@@ -1027,4 +1028,3 @@ func TestComputeChecksum_NonEmptyNeverSentinel(t *testing.T) {
 		t.Error("非空内容不应返回哨兵值 'empty'")
 	}
 }
-

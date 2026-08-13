@@ -14,8 +14,8 @@ type concurrentMockProvider struct {
 	calls atomic.Int64
 }
 
-func (p *concurrentMockProvider) Name() string             { return "concurrent-mock" }
-func (p *concurrentMockProvider) Models() []llm.ModelInfo  { return []llm.ModelInfo{{Name: "m"}} }
+func (p *concurrentMockProvider) Name() string                           { return "concurrent-mock" }
+func (p *concurrentMockProvider) Models() []llm.ModelInfo                { return []llm.ModelInfo{{Name: "m"}} }
 func (p *concurrentMockProvider) CountTokens([]llm.Message) (int, error) { return 1, nil }
 func (p *concurrentMockProvider) Stream(context.Context, llm.CompletionRequest) (*llm.Stream, error) {
 	return nil, nil

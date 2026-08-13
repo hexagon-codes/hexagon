@@ -954,10 +954,10 @@ func TestBoolOutputParser_PunctuationStillTrue(t *testing.T) {
 // stubFunc 是用于注册表测试的最小 Function 实现。
 type stubFunc struct{ name string }
 
-func (s *stubFunc) Name() string                { return s.name }
-func (s *stubFunc) Description() string          { return "" }
-func (s *stubFunc) InputSchema() *llm.Schema     { return nil }
-func (s *stubFunc) OutputSchema() *llm.Schema    { return nil }
+func (s *stubFunc) Name() string              { return s.name }
+func (s *stubFunc) Description() string       { return "" }
+func (s *stubFunc) InputSchema() *llm.Schema  { return nil }
+func (s *stubFunc) OutputSchema() *llm.Schema { return nil }
 func (s *stubFunc) Invoke(ctx context.Context, input map[string]any) (any, error) {
 	return s.name, nil
 }

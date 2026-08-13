@@ -807,8 +807,8 @@ func TestNewExtended_AllTypes(t *testing.T) {
 		{TypeCompactAndRefine, "compact_and_refine_synthesizer"},
 		{TypeAsyncTreeSummarize, "async_tree_summarize_synthesizer"},
 		{TypeCustomPrompt, "custom_prompt_synthesizer"},
-		{TypeRefine, "refine_synthesizer"},     // 回退到 New
-		{"bogus", "compact_synthesizer"},       // 回退到 New 默认
+		{TypeRefine, "refine_synthesizer"}, // 回退到 New
+		{"bogus", "compact_synthesizer"},   // 回退到 New 默认
 	}
 	for _, tc := range tests {
 		s := NewExtended(tc.typ)

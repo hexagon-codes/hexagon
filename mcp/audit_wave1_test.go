@@ -125,7 +125,7 @@ func TestSchemaToMCP_NestedAndEmptySlices(t *testing.T) {
 			},
 		},
 		{
-			name: "Unicode 描述保留",
+			name:  "Unicode 描述保留",
 			input: &llm.Schema{Type: "string", Description: "中文描述🚀émoji"},
 			check: func(t *testing.T, js *JSONSchema) {
 				if js.Description != "中文描述🚀émoji" {

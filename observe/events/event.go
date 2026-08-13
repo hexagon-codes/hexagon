@@ -36,10 +36,10 @@ const (
 // Data 是任意 key → value（值可序列化为 JSON）；用 map 而非 typed struct 是为了
 // 兼容现有点位（trace_id、tool_name、duration_ms 等异质字段不必引入新类型）。
 type Event struct {
-	Type      string         `json:"type"`              // 事件类型，如 "tool.call.completed"、"llm.failover"
-	Severity  Severity       `json:"severity"`          // 严重级别
-	Source    string         `json:"source"`            // 事件来源模块，如 "engine.tool_executor"
-	Timestamp time.Time      `json:"timestamp"`         // 发出时刻（UTC）
+	Type      string         `json:"type"`      // 事件类型，如 "tool.call.completed"、"llm.failover"
+	Severity  Severity       `json:"severity"`  // 严重级别
+	Source    string         `json:"source"`    // 事件来源模块，如 "engine.tool_executor"
+	Timestamp time.Time      `json:"timestamp"` // 发出时刻（UTC）
 	TraceID   string         `json:"trace_id,omitempty"`
 	SessionID string         `json:"session_id,omitempty"`
 	Data      map[string]any `json:"data,omitempty"`

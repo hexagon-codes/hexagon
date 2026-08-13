@@ -54,7 +54,7 @@ func (p *guardedToolsProvider) Complete(_ context.Context, req llm.CompletionReq
 func (p *guardedToolsProvider) Stream(_ context.Context, _ llm.CompletionRequest) (*llm.Stream, error) {
 	return nil, nil
 }
-func (p *guardedToolsProvider) Models() []llm.ModelInfo               { return nil }
+func (p *guardedToolsProvider) Models() []llm.ModelInfo                  { return nil }
 func (p *guardedToolsProvider) CountTokens(_ []llm.Message) (int, error) { return 0, nil }
 
 // 用 staticSelector（同 runner_test.go 风格）模拟 provider 选择

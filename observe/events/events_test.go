@@ -247,7 +247,9 @@ func splitLines(data []byte) [][]byte {
 	return out
 }
 
-func readAll(r interface{ Read(p []byte) (n int, err error) }) ([]byte, error) {
+func readAll(r interface {
+	Read(p []byte) (n int, err error)
+}) ([]byte, error) {
 	buf := make([]byte, 0, 1024)
 	tmp := make([]byte, 1024)
 	for {

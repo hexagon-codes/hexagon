@@ -1,13 +1,19 @@
 // Package agent 提供 AI Agent 核心功能
 //
 // 本文件实现 Agent 能力协商功能：
+//
 //   - 能力声明：Agent 声明自己的能力
+//
 //   - 能力查询：查询 Agent 的能力
+//
 //   - 能力匹配：匹配任务需求与 Agent 能力
+//
 //   - 能力协商：多 Agent 能力协商
 //
 //   - A2A Protocol: Agent 能力协商
+//
 //   - OpenAPI: 接口描述规范
+//
 //   - WSDL: 服务描述语言
 package agent
 

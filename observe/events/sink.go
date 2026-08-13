@@ -24,7 +24,7 @@ type Sink interface {
 type NoopSink struct{}
 
 // NewNoopSink 创建一个 NoopSink。
-func NewNoopSink() *NoopSink                                 { return &NoopSink{} }
+func NewNoopSink() *NoopSink                                { return &NoopSink{} }
 func (n *NoopSink) Submit(_ context.Context, _ Event) error { return nil }
 func (n *NoopSink) Close() error                            { return nil }
 

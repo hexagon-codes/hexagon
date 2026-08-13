@@ -843,10 +843,10 @@ func TestReplayer_BreakpointWithoutHandler(t *testing.T) {
 func TestDefaultCompare(t *testing.T) {
 	rep := &Replayer{}
 	cases := []struct {
-		name           string
-		expected       any
-		actual         any
-		wantMatch      bool
+		name      string
+		expected  any
+		actual    any
+		wantMatch bool
 	}{
 		{"相同字符串", "x", "x", true},
 		{"不同字符串", "x", "y", false},

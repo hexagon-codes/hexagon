@@ -431,7 +431,7 @@ func TestEstimateTokens(t *testing.T) {
 
 func TestEstimateTokens_UnicodeNotByteBased(t *testing.T) {
 	// 验证按 rune 而非 byte 计数：中文 1 字 3 byte，若按 byte 会严重高估
-	cn := "你"          // 1 rune, 3 bytes
+	cn := "你" // 1 rune, 3 bytes
 	if got := estimateTokens(cn); got != 1 {
 		t.Errorf("单中文 estimateTokens = %d, want 1（按 rune 而非 byte）", got)
 	}

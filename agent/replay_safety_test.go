@@ -16,10 +16,10 @@ type safeTool struct {
 	safety ReplaySafety
 }
 
-func (t *safeTool) Name() string                                          { return t.name }
-func (t *safeTool) Description() string                                    { return "" }
-func (t *safeTool) Schema() *schema.Schema                                 { return &schema.Schema{Type: "object"} }
-func (t *safeTool) Validate(map[string]any) error                         { return nil }
+func (t *safeTool) Name() string                  { return t.name }
+func (t *safeTool) Description() string           { return "" }
+func (t *safeTool) Schema() *schema.Schema        { return &schema.Schema{Type: "object"} }
+func (t *safeTool) Validate(map[string]any) error { return nil }
 func (t *safeTool) Execute(context.Context, map[string]any) (tool.Result, error) {
 	return tool.Result{Success: true}, nil
 }
@@ -29,8 +29,8 @@ func (t *safeTool) ReplaySafety() ReplaySafety { return t.safety }
 type plainTool struct{ name string }
 
 func (t *plainTool) Name() string                  { return t.name }
-func (t *plainTool) Description() string            { return "" }
-func (t *plainTool) Schema() *schema.Schema         { return &schema.Schema{Type: "object"} }
+func (t *plainTool) Description() string           { return "" }
+func (t *plainTool) Schema() *schema.Schema        { return &schema.Schema{Type: "object"} }
 func (t *plainTool) Validate(map[string]any) error { return nil }
 func (t *plainTool) Execute(context.Context, map[string]any) (tool.Result, error) {
 	return tool.Result{Success: true}, nil

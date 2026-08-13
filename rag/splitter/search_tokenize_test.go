@@ -94,8 +94,8 @@ func TestIsCJK(t *testing.T) {
 		{'杭', true},
 		{'a', false},
 		{'1', false},
-		{'の', true},  // Hiragana
-		{'カ', true},  // Katakana
+		{'の', true}, // Hiragana
+		{'カ', true}, // Katakana
 		{' ', false},
 		{'，', false},
 	}
