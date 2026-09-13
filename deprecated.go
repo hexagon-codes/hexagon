@@ -609,6 +609,10 @@ var NewMCPServer = mcp.NewMCPServerV2
 type (
 	// MCPServerV2 是基于官方 SDK 的 MCP 服务器
 	MCPServerV2 = mcp.ServerV2
+	// MCPProtocolError 标记 MCP 会话失败的协议阶段。
+	MCPProtocolError = mcp.ProtocolError
+	// MCPStdioConnectError 保留 stdio 子进程失败的阶段、退出状态和脱敏诊断。
+	MCPStdioConnectError = mcp.StdioConnectError
 )
 
 // ============== 跨会话持久记忆 ==============

@@ -127,14 +127,14 @@ func ConnectMCPServerV2(ctx context.Context, transport sdkmcp.Transport) ([]tool
 
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("连接 MCP Server 失败: %w", err)
+		return nil, nil, &ProtocolError{Stage: "initialize", Cause: err}
 	}
 
 	// 获取工具列表
 	toolsResult, err := session.ListTools(ctx, &sdkmcp.ListToolsParams{})
 	if err != nil {
 		session.Close()
-		return nil, nil, fmt.Errorf("获取 MCP 工具列表失败: %w", err)
+		return nil, nil, &ProtocolError{Stage: "tools/list", Cause: err}
 	}
 
 	// 包装为 ai-core tool.Tool
@@ -175,11 +175,34 @@ func ConnectStdioServerV2(ctx context.Context, command string, args ...string) (
 //	    map[string]string{"MYSQL_HOST": "localhost"}, "-y", "@benborla29/mcp-server-mysql")
 func ConnectStdioServerV2WithEnv(ctx context.Context, command string, env map[string]string, args ...string) ([]tool.Tool, func(), error) {
 	cmd := buildStdioCmd(ctx, command, env, args...)
+	// stdio 子进程的 stderr 是唯一可靠的启动诊断通道；限制容量并脱敏后
+	// 再交给上层，避免把凭据或无限刷屏内容带入日志/API。
+	diagnostic := &diagnosticBuffer{limit: maxStdioDiagnosticBytes}
+	cmd.Stderr = diagnostic
 	transport := &sdkmcp.CommandTransport{Command: cmd}
 
 	tools, closer, err := ConnectMCPServerV2(ctx, transport)
 	if err != nil {
-		return nil, nil, err
+		// SDK 在部分初始化错误（例如不支持的协议版本）下不会自动关闭
+		// 已启动的子进程；这里统一收口，避免失败连接泄漏为孤儿进程。
+		if cmd.Process != nil && cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+		stdioErr := &StdioConnectError{
+			Stage:  protocolStage(err),
+			Cause:  err,
+			Stderr: diagnostic.String(),
+		}
+		if state := cmd.ProcessState; state != nil {
+			stdioErr.HasExitCode = true
+			stdioErr.ExitCode = state.ExitCode()
+			if state.ExitCode() < 0 {
+				stdioErr.HasExitCode = false
+				stdioErr.Signal = state.String()
+			}
+		}
+		return nil, nil, stdioErr
 	}
 
 	cleanup := func() {
