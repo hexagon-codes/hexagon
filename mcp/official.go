@@ -78,6 +78,9 @@ func (t *MCPProxyToolV2) Execute(ctx context.Context, args map[string]any) (tool
 		err := fmt.Errorf("MCP 工具 %s 返回错误: %s", t.mcpTool.Name, output)
 		return tool.NewErrorResult(err), err
 	}
+	if len(texts) == 0 && result.StructuredContent != nil {
+		return tool.NewResult(result.StructuredContent), nil
+	}
 
 	return tool.NewResult(output), nil
 }
@@ -106,6 +109,23 @@ func (sc *sessionCloser) Close() error {
 	return sc.session.Close()
 }
 
+// connectingTransport 在初始化失败时保留关闭入口；进程仍由 SDK 连接负责回收。
+type connectingTransport struct {
+	sdkmcp.Transport
+	connection sdkmcp.Connection
+	closeErr   error
+}
+
+func (t *connectingTransport) Connect(ctx context.Context) (sdkmcp.Connection, error) {
+	conn, err := t.Transport.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// 返回原始连接，保留 SDK 内部的协议协商与会话扩展接口。
+	t.connection = conn
+	return conn, nil
+}
+
 // ConnectMCPServerV2 使用官方 SDK 连接 MCP Server 并获取工具列表
 //
 // 返回的 []tool.Tool 可直接用于 Hexagon Agent。
@@ -125,21 +145,27 @@ func ConnectMCPServerV2(ctx context.Context, transport sdkmcp.Transport) ([]tool
 		Version: "1.0.0",
 	}, nil)
 
-	session, err := client.Connect(ctx, transport, nil)
+	tracked, ok := transport.(*connectingTransport)
+	if !ok {
+		tracked = &connectingTransport{Transport: transport}
+	}
+	session, err := client.Connect(ctx, tracked, nil)
 	if err != nil {
-		return nil, nil, &ProtocolError{Stage: "initialize", Cause: err}
+		stage := "connect"
+		if tracked.connection != nil {
+			stage = "initialize"
+			tracked.closeErr = tracked.connection.Close()
+		}
+		return nil, nil, &ProtocolError{Stage: stage, Cause: err}
 	}
 
-	// 获取工具列表
-	toolsResult, err := session.ListTools(ctx, &sdkmcp.ListToolsParams{})
-	if err != nil {
-		session.Close()
-		return nil, nil, &ProtocolError{Stage: "tools/list", Cause: err}
-	}
-
-	// 包装为 ai-core tool.Tool
-	tools := make([]tool.Tool, 0, len(toolsResult.Tools))
-	for _, mcpTool := range toolsResult.Tools {
+	// SDK 迭代器读取全部分页，避免只向应用暴露第一页工具。
+	tools := make([]tool.Tool, 0)
+	for mcpTool, err := range session.Tools(ctx, nil) {
+		if err != nil {
+			tracked.closeErr = session.Close()
+			return nil, nil, &ProtocolError{Stage: "tools/list", Cause: err}
+		}
 		proxyTool := &MCPProxyToolV2{
 			mcpTool:      mcpTool,
 			session:      session,
@@ -179,28 +205,30 @@ func ConnectStdioServerV2WithEnv(ctx context.Context, command string, env map[st
 	// 再交给上层，避免把凭据或无限刷屏内容带入日志/API。
 	diagnostic := &diagnosticBuffer{limit: maxStdioDiagnosticBytes}
 	cmd.Stderr = diagnostic
-	transport := &sdkmcp.CommandTransport{Command: cmd}
+	// 后代进程可能继承 stderr；限制进程退出后的管道排空等待。
+	cmd.WaitDelay = 5 * time.Second
+	transport := &connectingTransport{Transport: &sdkmcp.CommandTransport{Command: cmd}}
 
 	tools, closer, err := ConnectMCPServerV2(ctx, transport)
 	if err != nil {
-		// SDK 在部分初始化错误（例如不支持的协议版本）下不会自动关闭
-		// 已启动的子进程；这里统一收口，避免失败连接泄漏为孤儿进程。
-		if cmd.Process != nil && cmd.ProcessState == nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
 		stdioErr := &StdioConnectError{
 			Stage:  protocolStage(err),
 			Cause:  err,
 			Stderr: diagnostic.String(),
 		}
-		if state := cmd.ProcessState; state != nil {
+		// 只读取已完成关闭的结果，避免访问 SDK 回收线程正在写入的 ProcessState。
+		var exitErr *exec.ExitError
+		if transport.connection != nil && errors.As(transport.closeErr, &exitErr) {
+			state := exitErr.ProcessState
 			stdioErr.HasExitCode = true
 			stdioErr.ExitCode = state.ExitCode()
 			if state.ExitCode() < 0 {
 				stdioErr.HasExitCode = false
 				stdioErr.Signal = state.String()
 			}
+		} else if transport.connection != nil && transport.closeErr == nil {
+			stdioErr.HasExitCode = true
+			stdioErr.ExitCode = 0
 		}
 		return nil, nil, stdioErr
 	}
@@ -239,7 +267,7 @@ func buildStdioCmd(ctx context.Context, command string, env map[string]string, a
 //	tools, closer, err := mcp.ConnectSSEServerV2(ctx, "http://localhost:8080/sse")
 //	defer closer.Close()
 func ConnectSSEServerV2(ctx context.Context, endpoint string) ([]tool.Tool, io.Closer, error) {
-	transport := &sdkmcp.SSEClientTransport{Endpoint: endpoint}
+	transport := &sdkmcp.SSEClientTransport{Endpoint: endpoint, HTTPClient: newMCPHTTPClient()}
 	return ConnectMCPServerV2(ctx, transport)
 }
 
@@ -252,8 +280,70 @@ func ConnectSSEServerV2(ctx context.Context, endpoint string) ([]tool.Tool, io.C
 //	tools, closer, err := mcp.ConnectStreamableServerV2(ctx, "http://localhost:8080/mcp")
 //	defer closer.Close()
 func ConnectStreamableServerV2(ctx context.Context, endpoint string) ([]tool.Tool, io.Closer, error) {
-	transport := &sdkmcp.StreamableClientTransport{Endpoint: endpoint}
+	transport := &sdkmcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: newMCPHTTPClient()}
 	return ConnectMCPServerV2(ctx, transport)
+}
+
+func newMCPHTTPClient() *http.Client {
+	client := *http.DefaultClient
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	client.Transport = &mcpCleanupTransport{base: base}
+	return &client
+}
+
+// SDK 的取消通知和会话关闭请求脱离调用上下文，仅为这两类收尾请求设置时限。
+type mcpCleanupTransport struct {
+	base http.RoundTripper
+}
+
+func (t *mcpCleanupTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	cleanup := req.Method == http.MethodDelete
+	if !cleanup && req.Method == http.MethodPost && req.GetBody != nil {
+		body, err := req.GetBody()
+		if err == nil {
+			var message struct {
+				Method string `json:"method"`
+			}
+			// 取消通知很短；不复制或解码正常工具调用的大参数。
+			if json.NewDecoder(io.LimitReader(body, 4<<10)).Decode(&message) == nil {
+				cleanup = message.Method == "notifications/cancelled"
+			}
+			_ = body.Close()
+		}
+	}
+	if !cleanup {
+		return t.base.RoundTrip(req)
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), 5*time.Second)
+	response, err := t.base.RoundTrip(req.Clone(ctx))
+	if err != nil || response == nil {
+		cancel()
+		return response, err
+	}
+	if req.Method == http.MethodDelete {
+		// SDK 仅使用关闭请求的错误，响应体由这里释放。
+		if response.Body != nil {
+			_ = response.Body.Close()
+		}
+		response.Body = http.NoBody
+		cancel()
+	} else {
+		response.Body = &mcpCleanupBody{ReadCloser: response.Body, cancel: cancel}
+	}
+	return response, err
+}
+
+type mcpCleanupBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *mcpCleanupBody) Close() error {
+	defer b.cancel()
+	return b.ReadCloser.Close()
 }
 
 // ============== MCP Server V2 (暴露 Hexagon Tool) ==============
