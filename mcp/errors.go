@@ -117,8 +117,9 @@ func (b *diagnosticBuffer) String() string {
 }
 
 var (
-	credentialAssignmentPattern = regexp.MustCompile(`(?i)(password|passwd|pass|token|secret|api[_-]?key|authorization|credential)(\s*[:=]\s*)([^\s,;]+)`)
+	credentialAssignmentPattern = regexp.MustCompile(`(?i)((?:password|passwd|pass|token|secret|api[_-]?key|authorization|credential)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:bearer|basic)\s+[^\s,;]+|[^\s,;]+)`)
 	urlCredentialPattern        = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)([^/@\s]+)@`)
+	authSchemePattern           = regexp.MustCompile(`(?i)\b(bearer|basic)(\s+)[^\s,;]+`)
 )
 
 func sanitizeDiagnostic(raw string) string {
@@ -126,10 +127,11 @@ func sanitizeDiagnostic(raw string) string {
 	if s == "" {
 		return ""
 	}
-	s = credentialAssignmentPattern.ReplaceAllString(s, `$1$2[REDACTED]`)
 	s = urlCredentialPattern.ReplaceAllString(s, `$1[REDACTED]@`)
+	s = credentialAssignmentPattern.ReplaceAllString(s, `$1[REDACTED]`)
+	s = authSchemePattern.ReplaceAllString(s, `$1$2[REDACTED]`)
 	if len(s) > maxDiagnosticTextBytes {
-		s = s[:maxDiagnosticTextBytes] + "…"
+		s = strings.ToValidUTF8(s[:maxDiagnosticTextBytes], "") + "…"
 	}
 	return s
 }
