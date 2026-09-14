@@ -47,15 +47,21 @@ Please be kind and respectful. We are committed to creating an open, inclusive c
 
 #### Development Workflow
 
-1. Run the required root-module CI gates:
+1. Run the gates with the same toolchain split as root CI. Use the minimum version declared in `go.mod` for formatting and full vet plus regular tests:
    ```bash
+   export GOWORK=off GOTOOLCHAIN=local GOFLAGS=-mod=readonly
    test -z "$(git ls-files -z -- '*.go' | xargs -0 gofmt -l)"
-   GOWORK=off go mod tidy -diff
-   GOWORK=off go vet ./...
-   GOWORK=off go test -count=1 ./...
-   GOWORK=off go test -count=1 -race ./...   # current Go version
-   GOWORK=off govulncheck ./...
+   go test -count=1 -vet=all ./...
    ```
+
+   Switch to the latest stable Go toolchain for race tests and vulnerability checks. Use the `govulncheck` tool version pinned in `.github/workflows/ci.yml`:
+   ```bash
+   export GOWORK=off GOTOOLCHAIN=local GOFLAGS=-mod=readonly
+   go test -count=1 -race ./...
+   govulncheck ./...
+   ```
+
+   Run `GOWORK=off go mod tidy` when changing dependencies and review the resulting diff. CI validates dependency resolution in read-only mode; redundant historical `go.sum` entries are not a gate.
 
 2. Run optional local development checks as needed:
    ```bash
@@ -152,7 +158,7 @@ hexagon/
 
 1. PR title should follow Conventional Commits format
 2. Fill in all required fields in the PR template
-3. Ensure both `CI / Test` version checks pass
+3. Ensure both `CI / Test (Go minimum)` and `CI / Test (Go stable)` checks pass
 4. Wait for code review
 5. Make changes based on feedback
 6. Delete your branch after merging
@@ -166,9 +172,11 @@ Version numbers follow [Semantic Versioning](https://semver.org/):
 - MINOR: backward-compatible new features
 - PATCH: backward-compatible bug fixes
 
+The documentation and release metadata in this revision target **v0.5.14**. `hexagon.Version` is resolved from build-time `injectedVersion`, then Go module build info; an unknown development version remains `unknown`. Keep the fallback independent of release numbers. For workspace builds, derive the injected version from the Hexagon checkout's `git describe --tags --dirty` output.
+
 This repository has no automated release workflow. To publish:
 
-1. Merge the release metadata and confirm both `CI / Test` version checks succeed for the target commit
+1. Merge the release metadata and confirm both `CI / Test (Go minimum)` and `CI / Test (Go stable)` checks succeed for the target commit
 2. Create and push an immutable SemVer tag on that commit
 3. The tag publishes the Go module; maintainers may create a GitHub Release manually when needed
 

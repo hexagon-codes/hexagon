@@ -4,12 +4,14 @@
 
 本目录汇总 Hexagon 的入门、Agent、RAG、编排、协作、插件和运维指南。指南用于说明常见用法；导出 API、依赖版本和实际行为分别以当前源码、[`go.mod`](../../go.mod) 和测试为准。
 
+文档对应 **v0.5.14**。[MCP API 参考](../API.md#mcp) 覆盖连接、结构化诊断、工具发现与资源清理。
+
 ## 生态与当前基线
 
 | 模块 | 定位 | 根模块当前声明 |
 |------|------|----------------|
 | **hexagon** | AI Agent 框架核心 | Go `1.25.12` |
-| [**ai-core**](https://github.com/hexagon-codes/ai-core) | AI 基础能力库 | `v0.2.10` |
+| [**ai-core**](https://github.com/hexagon-codes/ai-core) | AI 基础能力库 | `v0.2.11` |
 | [**toolkit**](https://github.com/hexagon-codes/toolkit) | Go 通用工具库 | `v0.3.4` |
 
 上表是当前根模块的依赖快照，后续更新以 [`go.mod`](../../go.mod) 为唯一准确信息源。

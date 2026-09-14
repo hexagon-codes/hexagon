@@ -96,6 +96,9 @@ Adjust the commands if you changed ports, users, or passwords.
 
 ## Helm: Application-Integration Template
 
+The chart metadata is `version: 0.1.3` / `appVersion: "0.5.14"`. The chart version is independent of the Hexagon Go module version. `appVersion` records the target framework version; it does not select an image tag or indicate that an image exists. Set `app.image.repository` and `app.image.tag` to the application image you actually built.
+
+
 `helm/hexagon/` can generate the following Kubernetes resources:
 
 - a Hexagon application Deployment and Service;

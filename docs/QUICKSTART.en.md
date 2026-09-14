@@ -4,6 +4,8 @@
 
 This guide helps you get started with the Hexagon AI Agent framework in 30 minutes.
 
+Documentation version: **v0.5.14**. See the [changelog](../CHANGELOG.md) for release changes and the [MCP API reference](API.en.md#mcp) for connection and cleanup contracts.
+
 ## Project Overview
 
 **Hexagon** is named after the Chinese internet term "hexagonal warrior" (六边形战士), referring to balanced coverage across multiple capabilities. The framework focuses on six core dimensions — **ease of use, performance, extensibility, task orchestration, observability, and security** — and provides Go developers with an AI Agent framework.

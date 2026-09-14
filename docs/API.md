@@ -2,13 +2,14 @@
 
 # Hexagon API 参考文档
 
-本文档提供 Hexagon 框架的完整 API 参考。
+本文档提供 Hexagon **v0.5.14** 的 API 参考。
 
 ## 目录
 
 - [顶层 API](#顶层-api)
 - [Agent](#agent)
 - [Tool](#tool)
+- [MCP](#mcp)
 - [RAG](#rag)
 - [Graph 编排](#graph-编排)
 - [Team 多 Agent](#team-多-agent)
@@ -226,6 +227,68 @@ calculator := hexagon.NewTool("calculator", "执行加法计算",
         return input.A + input.B, nil
     },
 )
+```
+
+---
+
+## MCP
+
+`github.com/hexagon-codes/hexagon/mcp` 的 V2 入口使用官方 Go SDK。以下合同对应 **v0.5.14**；顶层兼容别名继续可用，新代码可直接导入 `mcp` 子包。
+
+### 连接与资源所有权
+
+| 入口 | 连接方式 | 成功后的清理方式 |
+|------|----------|------------------|
+| `ConnectMCPServerV2(ctx, transport)` | 自定义官方 SDK transport | 返回 `io.Closer`，使用完毕后 `Close()` |
+| `ConnectStdioServerV2(ctx, command, args...)` | 本地 stdio 子进程 | 返回 `cleanup func()` |
+| `ConnectStdioServerV2WithEnv(ctx, command, env, args...)` | stdio，并合并额外环境变量 | 返回 `cleanup func()` |
+| `ConnectSSEServerV2(ctx, endpoint)` | SSE | 返回 `io.Closer` |
+| `ConnectStreamableServerV2(ctx, endpoint)` | Streamable HTTP | 返回 `io.Closer` |
+
+所有入口均返回 `[]tool.Tool`、清理入口和 `error`。先检查错误，只有成功后才注册清理；失败时返回 nil 清理入口，内部负责关闭已建立的连接或会话。成功会话由调用方持有，`ctx` 应覆盖所需会话生命周期；stdio 子进程受该 context 控制，不应直接使用即将结束的短请求 context 承载长期会话。
+
+工具发现读取全部分页；成功调用优先返回文本，无文本而存在 `structuredContent` 时保留结构化结果。MCP `isError` 仍返回失败的 `tool.Result` 和非 nil 错误。
+
+stdio 的进程回收由 SDK 负责，`WaitDelay` 为 5 秒；SSE/Streamable HTTP 便捷入口仅对取消通知与 DELETE 收尾请求各设置 5 秒时限。这不是普通工具调用、连接初始化或所有自定义 transport 的统一超时；调用方仍通过 context 控制业务截止时间。重试策略与多个 MCP 服务器的工具归属由消费方管理。
+
+### 连接诊断
+
+| 类型/字段 | 含义 |
+|-----------|------|
+| `ProtocolError.Stage` | `connect`：建立传输；`initialize`：握手；`tools/list`：工具发现 |
+| `StdioConnectError.Stage` | stdio 失败对应的协议阶段；命令无法启动属于 `connect` |
+| `StdioConnectError.ExitCode` / `HasExitCode` | 仅在 `HasExitCode` 为 true 时读取退出码；否则退出码未知或进程被信号结束 |
+| `StdioConnectError.Signal` | 可用的进程信号/状态摘要 |
+| `StdioConnectError.Stderr` | 有限长度并经过已支持凭据模式脱敏的 stderr 诊断 |
+| `Cause` / `Unwrap()` | 保留原始错误链；用 `errors.Is` 判断取消等原因，用 `errors.As` 读取结构化诊断 |
+
+不要按完整错误字符串分类，也不要把原始 `Cause` 或环境变量映射直接写入用户日志。下面示例只记录阶段和诊断摘要，且只在连接成功后注册清理：
+
+```go
+import (
+    "context"
+    "errors"
+    "log"
+
+    "github.com/hexagon-codes/hexagon/mcp"
+)
+
+func listMCPTools(ctx context.Context, command string, args ...string) error {
+    tools, cleanup, err := mcp.ConnectStdioServerV2(ctx, command, args...)
+    if err != nil {
+        var diagnostic *mcp.StdioConnectError
+        if errors.As(err, &diagnostic) {
+            log.Printf("MCP connection failed: stage=%s stderr=%s", diagnostic.Stage, diagnostic.Stderr)
+        }
+        return err
+    }
+    defer cleanup()
+
+    for _, t := range tools {
+        log.Printf("MCP tool: %s", t.Name())
+    }
+    return nil
+}
 ```
 
 ---

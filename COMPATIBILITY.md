@@ -9,12 +9,18 @@ hexagon 是 Hexagon 生态的 **AI Agent 框架（L2）**，向下依赖 toolkit
 - 内部包（`internal/`）、未导出标识符、`examples/`、`docs/` 不在契约内。
 
 ## 当前发布判定
+
+- 本次文档与发布元数据对应 **v0.5.14**，更新范围为兼容的 MCP 诊断/生命周期修复、工具分页与结构化结果修复，以及 CI 判定修正；不提升最低 Go 版本，不要求迁移持久数据。
+- 根模块基线为 Go **1.25.12**、ai-core **v0.2.11** 与 toolkit **v0.3.4**。`ProtocolError` / `StdioConnectError` 为新增类型；现有连接入口的签名保持不变，调用方通过 `errors.As` 读取诊断、通过 `errors.Is` 判断底层原因，不应依赖错误字符串的固定格式。
+- 发布版本来自目标提交的不可变 tag；开发构建使用构建注入或 module build info，未知时保留 `unknown`。文档或 Helm `appVersion` 的更新不代表 tag、镜像或 GitHub Release 已发布。
+
+## 历史版本策略例外
 - v0.5.10 与 v0.5.11 已包含相对 v0.5.9 的公开 API、最低 Go 版本和 Qdrant 持久数据合同变更，但以 patch 版本发布，且两者的提交拓扑与版本顺序倒置。
 - 维护者确认当前框架尚无外部使用者，批准 **v0.5.12** 作为一次性版本策略例外：保留上述合同变化，撤回 v0.5.10 与 v0.5.11，并以 v0.5.12 建立唯一可消费基线。迁移项见 CHANGELOG 的 v0.5.12 `BREAKING` 段。
 - 该例外不改变后续兼容性承诺；v0.5.12 之后的 v0.5.x patch 不得再包含破坏式合同变化。
 
 ## 仓库门禁
-- 根 CI 固定设置 `GOWORK=off`、`GOTOOLCHAIN=local` 与 `-mod=readonly`，只按根 `go.mod` 验证格式、依赖一致性、`go vet`、最低 Go 版本测试、当前 Go 版本 race 测试和 `govulncheck`，避免本地 workspace 或其他模块掩盖发布依赖问题。
+- 根 CI 固定设置 `GOWORK=off`、`GOTOOLCHAIN=local` 与 `GOFLAGS=-mod=readonly`，避免本地 workspace 或其他模块掩盖发布依赖问题。最低 Go 版本从根 `go.mod` 读取，检查格式并以 `go test -count=1 -vet=all ./...` 执行完整 vet 和普通测试；最新稳定 Go 版本执行 race 和 `govulncheck`。实际缺失或不一致的依赖仍失败，冗余历史 `go.sum` 条目不作为门禁。
 - 本仓没有自动发布工作流。维护者只在目标提交的根 CI 成功后创建不可变 SemVer tag；Go 模块以该 tag 发布，GitHub Release 为可选的人工元数据。
 - `examples/` 是独立 Go module，不属于根模块发布表面，也不进入根 CI；其依赖本次保持不变。以后若修改 `examples/`，应在该模块目录按其自身 `go.mod` 单独 build/test。
 - 本仓不运行绑定 `main`、`latest` 等浮动外部分支的下游门禁，也不以临时 `go.work` 覆盖作为发布验收证据。

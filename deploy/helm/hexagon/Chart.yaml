@@ -2,8 +2,8 @@ apiVersion: v2
 name: hexagon
 description: Hexagon - Go 生态全能型 AI Agent 框架
 type: application
-version: 0.1.2
-appVersion: "0.4.6"
+version: 0.1.3
+appVersion: "0.5.14"
 keywords:
   - ai
   - agent

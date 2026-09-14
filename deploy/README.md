@@ -96,6 +96,9 @@ docker compose exec redis redis-cli ping
 
 ## Helm：应用接入模板
 
+Chart 元数据为 `version: 0.1.3` / `appVersion: "0.5.14"`。Chart 版本独立于 Hexagon Go 模块版本；`appVersion` 记录目标框架版本，不决定镜像 tag，也不表示对应镜像已存在。`app.image.repository` 与 `app.image.tag` 应显式指向实际构建的应用镜像。
+
+
 `helm/hexagon/` 可以生成以下 Kubernetes 资源：
 
 - Hexagon 应用 Deployment 和 Service；

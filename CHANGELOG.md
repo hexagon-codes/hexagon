@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+## [0.5.14] - 2026-09-14
+
+### Added
+
+- **mcp**：新增 `ProtocolError` 与 `StdioConnectError`，通过 `errors.As` 提供 `connect`、`initialize`、`tools/list` 阶段和可用的子进程退出状态、有限 stderr 摘要；`Unwrap` 保留原始错误链，调用方可继续使用 `errors.Is` 判断取消等原因。
+
+### Fixed
+
+- **MCP 工具发现与结果**：通过官方 SDK 迭代器读取全部分页工具；成功结果只有 `structuredContent`、没有文本内容时保留结构化输出。
+- **MCP 连接生命周期**：初始化失败时关闭已建立的传输，工具枚举失败时关闭会话；stdio 子进程由 SDK 统一回收，设置 5 秒 `WaitDelay`，避免继承 stderr 的子进程使清理无界等待。退出状态从 SDK 连接关闭结果取得。
+- **MCP 网络收尾**：SSE 和 Streamable HTTP 便捷入口为取消通知和会话 DELETE 请求分别设置 5 秒时限，释放响应体；不把普通工具调用或长连接统一限制为 5 秒。
+- **CI 依赖判定**：只读模块模式继续验证实际依赖；不再用 `go mod tidy -diff` 阻断仅含冗余历史校验和的提交。
+
+### Changed
+
+- 根模块 ai-core 依赖由 **v0.2.10** 更新至 **v0.2.11**；最低 Go 版本仍为 **1.25.12**，toolkit 仍为 **v0.3.4**，`examples/` 独立模块依赖不变。
+- **CI**：最低 Go 版本从 `go.mod` 读取，执行格式检查及 `go test -count=1 -vet=all ./...`；最新稳定 Go 版本承担 race 和 `govulncheck`，不再固定当前版工具链。依赖更新仍应执行 `go mod tidy`，普通业务发版无需修改 workflow 或工具版本。
+- **文档与部署元数据**：同步中英文依赖基线、贡献/发布流程、MCP API 与生命周期说明；Helm Chart 更新为 **0.1.3**，`appVersion` 更新为 **0.5.14**。Chart 仍是自定义应用接入模板，不表示仓库已发布对应容器镜像。
+
+### Security
+
+- **MCP 诊断**：补齐引号包裹的凭据字段、URL 凭据以及 Bearer/Basic 认证文本的脱敏，诊断截断保持有效 UTF-8；不序列化传入的环境变量映射。
+
 ## [0.5.13] - 2026-08-14
 
 ### Fixed

@@ -135,7 +135,9 @@ Starting with ai-core v0.2.7, new Qdrant collections default to SHA-256-derived 
 - `ParallelAgent`, `SequentialAgent`, and `LoopAgent` primitives
 
 **MCP protocol** (`github.com/hexagon-codes/hexagon/mcp`)
-- MCP protocol support
+- V2 connections support stdio, SSE, and Streamable HTTP. Callers own successful sessions and close them explicitly; failed initialization and discovery clean up internally.
+- v0.5.14 adds `ProtocolError` and `StdioConnectError` without changing existing connection signatures. Use `errors.As` / `errors.Is`; error strings are not stable classification keys.
+- Tool discovery includes all pages, and successful structured-only results are retained. See the [MCP API reference](API.en.md#mcp) for lifecycle limits and diagnostic fields.
 
 ### Deprecated
 
@@ -228,12 +230,12 @@ Packages under `internal/` are not public and may change at any time.
 The current dependency topology of the Hexagon root module is:
 
 - L0: `toolkit v0.3.4`.
-- L1: `ai-core v0.2.10`, which itself also requires `toolkit v0.3.4`.
+- L1: `ai-core v0.2.11`, which itself also requires `toolkit v0.3.4`.
 - L2: the Hexagon root module directly requires both versions and resolves one toolkit version under Go's minimal version selection.
 
 | Dependency | Version | Description |
 |-----|------|------|
-| `github.com/hexagon-codes/ai-core` | v0.2.10 | AI capability library |
+| `github.com/hexagon-codes/ai-core` | v0.2.11 | AI capability library |
 | `github.com/hexagon-codes/toolkit` | v0.3.4 | Go general-purpose toolkit |
 
 The root module requires Go 1.25.12 or later. The `examples/` module maintains its own `go.mod` and pins published versions; it is outside this table and must not be assumed to move in lockstep with the root module. Public API changes in dependencies must first be adapted and regression-tested in Hexagon, then shipped under Hexagon's own version.

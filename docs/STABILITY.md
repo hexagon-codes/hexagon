@@ -136,7 +136,9 @@ ai-core v0.2.7 起，Qdrant 新集合默认使用 SHA-256 派生 UUIDv8 point ID
 - `ParallelAgent`、`SequentialAgent`、`LoopAgent` 原语
 
 **MCP 协议** (`github.com/hexagon-codes/hexagon/mcp`)
-- MCP 协议支持
+- V2 连接支持 stdio、SSE 与 Streamable HTTP。成功会话由调用方显式关闭；初始化和发现失败时由内部完成清理。
+- v0.5.14 新增 `ProtocolError` 与 `StdioConnectError`，不改变既有连接签名；使用 `errors.As` / `errors.Is`，错误字符串不作为稳定分类键。
+- 工具发现覆盖全部分页，成功的纯结构化结果保留。生命周期时限与诊断字段见 [MCP API 参考](API.md#mcp)。
 
 ### Deprecated (已弃用)
 
@@ -229,12 +231,12 @@ import "github.com/hexagon-codes/hexagon/observe/metrics"     // 指标
 Hexagon 根模块的当前依赖拓扑如下：
 
 - L0：`toolkit v0.3.4`。
-- L1：`ai-core v0.2.10`，其自身也要求 `toolkit v0.3.4`。
+- L1：`ai-core v0.2.11`，其自身也要求 `toolkit v0.3.4`。
 - L2：Hexagon 根模块直接要求上述两个版本，并以 Go module 最小版本选择规则解析为单一 toolkit 版本。
 
 | 依赖 | 版本 | 说明 |
 |-----|------|------|
-| `github.com/hexagon-codes/ai-core` | v0.2.10 | AI 基础能力库 |
+| `github.com/hexagon-codes/ai-core` | v0.2.11 | AI 基础能力库 |
 | `github.com/hexagon-codes/toolkit` | v0.3.4 | Go 通用工具库 |
 
 根模块要求 Go 1.25.12 或更高版本。`examples/` 的 `go.mod` 独立维护并固定已发布版本，不属于上表，也不应据此推断与根模块 lockstep。依赖公开 API 的变化须先在 Hexagon 完成适配和回归，再随 Hexagon 自身版本发布。

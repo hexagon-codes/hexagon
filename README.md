@@ -42,7 +42,7 @@ Hexagon 与以下 AI Agent 开发相关仓库协同使用：
 | **toolkit** | Go 通用工具库 (lang/crypto/net/cache/util) | [github.com/hexagon-codes/toolkit](https://github.com/hexagon-codes/toolkit) |
 | **hexagon-ui** | Dev UI 前端 (Vue 3 + TypeScript) | [github.com/hexagon-codes/hexagon-ui](https://github.com/hexagon-codes/hexagon-ui) |
 
-> 当前根模块构建基线：Go 1.25.12、ai-core v0.2.10、toolkit v0.3.4。`examples/` 是独立 Go module，其依赖版本以 `examples/go.mod` 为准，不随根模块自动同步。
+> 文档对应版本：**v0.5.14**（[变更记录](CHANGELOG.md)）。当前根模块构建基线：Go 1.25.12、ai-core v0.2.11、toolkit v0.3.4。`examples/` 是独立 Go module，其依赖版本以 `examples/go.mod` 为准，不随根模块自动同步。
 
 ### 🧠 ai-core — AI 基础能力库
 
@@ -681,6 +681,9 @@ make fmt     # 格式化
 ```
 
 ### CI 与发布
+
+v0.5.14 的 MCP 更新覆盖分页工具发现、仅含结构化内容的工具结果、类型化连接诊断及失败连接回收。错误字段和会话生命周期见 [MCP API 参考](docs/API.md#mcp)。
+
 
 - 推送到 `main` 和提交 Pull Request 时，单一 CI 使用 `go.mod` 声明的最低 Go 版本检查格式，并通过 `go test -count=1 -vet=all ./...` 执行完整 vet 和普通测试；最新稳定 Go 版本执行 race 测试和 `govulncheck`。
 - CI 使用 `GOWORK=off`、`GOTOOLCHAIN=local` 和 `GOFLAGS=-mod=readonly`，验证已发布依赖及声明的 Go 兼容性。依赖更新后仍建议执行 `go mod tidy`，但不再因 `go.sum` 中无用的历史校验和阻断提交。

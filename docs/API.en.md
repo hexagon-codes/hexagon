@@ -2,13 +2,14 @@
 
 # Hexagon API Reference
 
-This document provides the complete API reference for the Hexagon framework.
+This document provides the API reference for Hexagon **v0.5.14**.
 
 ## Table of Contents
 
 - [Top-Level API](#top-level-api)
 - [Agent](#agent)
 - [Tool](#tool)
+- [MCP](#mcp)
 - [RAG](#rag)
 - [Graph Orchestration](#graph-orchestration)
 - [Team Multi-Agent](#team-multi-agent)
@@ -226,6 +227,68 @@ calculator := hexagon.NewTool("calculator", "Perform addition",
         return input.A + input.B, nil
     },
 )
+```
+
+---
+
+## MCP
+
+The V2 entry points in `github.com/hexagon-codes/hexagon/mcp` use the official Go SDK. These contracts apply to **v0.5.14**. Existing top-level compatibility aliases remain available; new code can import the `mcp` package directly.
+
+### Connections and Resource Ownership
+
+| Entry point | Transport | Cleanup after success |
+|-------------|-----------|-----------------------|
+| `ConnectMCPServerV2(ctx, transport)` | Custom official SDK transport | Call `Close()` on the returned `io.Closer` |
+| `ConnectStdioServerV2(ctx, command, args...)` | Local stdio subprocess | Call the returned `cleanup func()` |
+| `ConnectStdioServerV2WithEnv(ctx, command, env, args...)` | Stdio with additional environment variables | Call the returned `cleanup func()` |
+| `ConnectSSEServerV2(ctx, endpoint)` | SSE | Returned `io.Closer` |
+| `ConnectStreamableServerV2(ctx, endpoint)` | Streamable HTTP | Returned `io.Closer` |
+
+Each entry point returns `[]tool.Tool`, a cleanup handle, and an `error`. Check the error before registering cleanup: failed connections return a nil cleanup handle and close any established connection or session internally. The caller owns a successful session. Its context should cover the required session lifetime; the stdio subprocess is bound to that context, so a short-lived request context must not own a long-lived session.
+
+Tool discovery reads every page. Successful calls return text when present, or preserve `structuredContent` when no text is available. An MCP `isError` response still returns an unsuccessful `tool.Result` and a non-nil error.
+
+The SDK owns stdio process cleanup, with a 5-second `WaitDelay`. The SSE and Streamable HTTP convenience functions apply a separate 5-second limit to cancellation notifications and DELETE cleanup requests. This is not a shared timeout for ordinary tool calls, initialization, or arbitrary custom transports; callers still use context deadlines for business operations. Consumers own retry policy and tool identity across multiple MCP servers.
+
+### Connection Diagnostics
+
+| Type or field | Meaning |
+|---------------|---------|
+| `ProtocolError.Stage` | `connect`: transport establishment; `initialize`: handshake; `tools/list`: tool discovery |
+| `StdioConnectError.Stage` | The corresponding stdio failure stage; a command that cannot start fails during `connect` |
+| `StdioConnectError.ExitCode` / `HasExitCode` | Read the exit code only when `HasExitCode` is true; otherwise it is unknown or the process ended from a signal |
+| `StdioConnectError.Signal` | Available process signal/status summary |
+| `StdioConnectError.Stderr` | Bounded stderr diagnostics with supported credential patterns redacted |
+| `Cause` / `Unwrap()` | Original error chain; use `errors.Is` for cancellation and other causes, and `errors.As` for typed diagnostics |
+
+Do not classify errors by their complete string or log the raw `Cause` or environment map. This example logs only the stage and diagnostic summary and registers cleanup only after a successful connection:
+
+```go
+import (
+    "context"
+    "errors"
+    "log"
+
+    "github.com/hexagon-codes/hexagon/mcp"
+)
+
+func listMCPTools(ctx context.Context, command string, args ...string) error {
+    tools, cleanup, err := mcp.ConnectStdioServerV2(ctx, command, args...)
+    if err != nil {
+        var diagnostic *mcp.StdioConnectError
+        if errors.As(err, &diagnostic) {
+            log.Printf("MCP connection failed: stage=%s stderr=%s", diagnostic.Stage, diagnostic.Stderr)
+        }
+        return err
+    }
+    defer cleanup()
+
+    for _, t := range tools {
+        log.Printf("MCP tool: %s", t.Name())
+    }
+    return nil
+}
 ```
 
 ---

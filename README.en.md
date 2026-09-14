@@ -42,7 +42,7 @@ Hexagon works with the following repositories for AI Agent development:
 | **toolkit** | Go general-purpose toolkit (lang/crypto/net/cache/util) | [github.com/hexagon-codes/toolkit](https://github.com/hexagon-codes/toolkit) |
 | **hexagon-ui** | Dev UI frontend (Vue 3 + TypeScript) | [github.com/hexagon-codes/hexagon-ui](https://github.com/hexagon-codes/hexagon-ui) |
 
-> Current root-module baseline: Go 1.25.12, ai-core v0.2.10, and toolkit v0.3.4. `examples/` is a standalone Go module; its dependency versions are defined by `examples/go.mod` and are not automatically synchronized with the root module.
+> Documentation version: **v0.5.14** ([changes](CHANGELOG.md)). Current root-module baseline: Go 1.25.12, ai-core v0.2.11, and toolkit v0.3.4. `examples/` is a standalone Go module; its dependency versions are defined by `examples/go.mod` and are not automatically synchronized with the root module.
 
 ### 🧠 ai-core — AI Capability Library
 
@@ -679,6 +679,9 @@ make fmt     # format
 ```
 
 ### CI and Release
+
+The v0.5.14 MCP changes cover complete paginated tool discovery, structured-only tool results, typed connection diagnostics, and cleanup after failed connections. See the [MCP API reference](docs/API.en.md#mcp) for error fields and session ownership.
+
 
 - On pushes to `main` and pull requests, the single CI workflow uses the minimum Go version declared in `go.mod` for formatting checks and `go test -count=1 -vet=all ./...` for full vet analysis and regular tests. The latest stable Go version runs race-enabled tests and `govulncheck`.
 - CI sets `GOWORK=off`, `GOTOOLCHAIN=local`, and `GOFLAGS=-mod=readonly` to validate published dependencies and declared Go compatibility. Run `go mod tidy` after dependency updates, but unused historical checksums in `go.sum` no longer block CI.

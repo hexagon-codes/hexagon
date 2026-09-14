@@ -47,15 +47,21 @@
 
 #### 开发流程
 
-1. 运行与根模块 CI 一致的必需门禁：
+1. 按根 CI 的工具链分工验证。先使用 `go.mod` 声明的最低 Go 版本检查格式，并执行完整 vet 与普通测试：
    ```bash
+   export GOWORK=off GOTOOLCHAIN=local GOFLAGS=-mod=readonly
    test -z "$(git ls-files -z -- '*.go' | xargs -0 gofmt -l)"
-   GOWORK=off go mod tidy -diff
-   GOWORK=off go vet ./...
-   GOWORK=off go test -count=1 ./...
-   GOWORK=off go test -count=1 -race ./...   # 当前 Go 版本
-   GOWORK=off govulncheck ./...
+   go test -count=1 -vet=all ./...
    ```
+
+   再切换到最新稳定 Go 工具链运行 race 和漏洞检查；`govulncheck` 工具版本使用 `.github/workflows/ci.yml` 当前固定值：
+   ```bash
+   export GOWORK=off GOTOOLCHAIN=local GOFLAGS=-mod=readonly
+   go test -count=1 -race ./...
+   govulncheck ./...
+   ```
+
+   修改依赖时执行 `GOWORK=off go mod tidy` 并审阅差异。CI 通过只读模式验证依赖解析，不把 `go.sum` 冗余历史条目作为门禁。
 
 2. 按需运行本地辅助检查：
    ```bash
@@ -152,7 +158,7 @@ hexagon/
 
 1. PR 标题使用 Conventional Commits 格式
 2. 填写 PR 模板中的所有必填项
-3. 确保两个 `CI / Test` 版本检查通过
+3. 确保`CI / Test (Go minimum)` 与 `CI / Test (Go stable)` 两项检查通过
 4. 等待代码审查
 5. 根据反馈修改
 6. 合并后删除分支
@@ -166,9 +172,11 @@ hexagon/
 - MINOR: 向后兼容的功能新增
 - PATCH: 向后兼容的 Bug 修复
 
+本次文档与发布元数据对应 **v0.5.14**。`hexagon.Version` 按构建注入的 `injectedVersion`、Go module build info 顺序解析；无法取得真实版本的开发构建保留 `unknown`，不把发布版本写死到 fallback。workspace 构建应从 Hexagon 源码目录的 `git describe --tags --dirty` 取得注入值。
+
 本仓没有自动发布工作流。发布步骤为：
 
-1. 合并发布元数据并确认目标提交的两个 `CI / Test` 版本检查成功
+1. 合并发布元数据并确认目标提交的 `CI / Test (Go minimum)` 与 `CI / Test (Go stable)` 两项检查成功
 2. 在该提交上创建并推送不可变的 SemVer tag
 3. Go 模块以该 tag 发布；GitHub Release 如有需要由维护者人工创建
 
