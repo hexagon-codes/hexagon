@@ -4,6 +4,11 @@
 
 ## v0.6.0（2026-11-02）
 
+- **agent**：补齐 Deep、ReAct、Sequential、Parallel、Loop、Reflection、Supervisor、SelfDiscovery、PlanExecute 的 Transform 关闭、取消及上游错误传播，保留各自 Run 算法。
+- **graph**：流事件缓冲预留终止错误槽位；取消不再随机丢失 Error，消费者停止读取后取消仍可退出。
+- **a2a**：Stop 关闭自行创建的默认 Store 清理协程；重启保留任务并恢复清理，注入 Store 继续由宿主管理。
+- **mcp**：双向转换保留显式旧方言的 tuple items，不再静默放宽约束；复用 ai-core 的 Schema 表示，非法默认方言仍明确报错。
+
 ### Fixed
 
 - core Retry/Fallback和Workflow步骤统一遵守中断、取消及未知结果的不可重放分类；Future并行组合保留完整错误树和结果，框架异步回调panic转为含栈失败。图的并行纯等待保存全部目标，StateMachine在取消边界停止新派发。

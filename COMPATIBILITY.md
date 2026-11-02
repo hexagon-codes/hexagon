@@ -41,9 +41,11 @@ hexagon 是 Hexagon 生态的 **AI Agent 框架（L2）**，向下依赖 toolkit
 | `AgentAsTool.Execute` 的 `Result.Output` | 从字符串改为 `agent.ChildRunResult`。Go消费者将 `result.Output.(string)` 改为读取信封的 `Child.Output.Content`，或调用 `ModelToolContent()`；完整结果同时保留子运行身份、Blocks、用量与失败事实。JSON消费者按 `child_result_version` 解码，不将整个信封当文本 |
 | `memory/store.MemoryStore` 的动态数值 | JSON解码得到的动态数字保留为 `json.Number`，覆盖FileStore重开及记录/历史复制。Go消费者处理 `json.Number.Int64`、`Float64` 或 `String` 的结果与错误，不再直接断言float64；需要旧数值类型时由应用在确定范围内转换。JSON线上仍为数值字面，不改为字符串 |
 | Agent `Collect` / Input流 | 同一输入的Query文本增量按顺序无分隔拼接，只调用下游一次；Context字段合并并保类型隔离，同键不同值明确报错。互相独立的任务使用Batch；自定义Input合并函数可在装配期通过streamx注册，不在运行途中切换全局合并规则 |
+| Agent `Transform` | Deep、ReAct、Sequential、Parallel、Loop、Reflection、Supervisor、SelfDiscovery、PlanExecute与既有Team/BaseAgent共同遵守流关闭合同；保留各自Run算法。上游非EOF错误向输出传播，输出Close关闭输入并取消在途上下文，不派发后续输入 |
+| `Graph.Stream` | 有界事件缓冲为终止错误预留一个槽位；取消时仍交付一个Error事件并关闭channel。缓冲填满且消费者停止读取时，取消仍能释放生产协程。正常消费继续保留事件顺序与End事件 |
 | `core` Future / Retry / Fallback | 失败组合保留完整可解包错误树与已完成结果，成功或未知分支禁止整组自动重放；中断、取消和unknown优先于自定义重试/降级策略。框架异步回调panic变为含栈的 `AsyncPanicError`，Future正常完成并返回不可盲重放错误 |
 | Artifact自动ID | 新自动身份由 `artifact.VersionID` 根据完整会话、名称、版本生成，不再解析为 `session/name/vN`；消费者视为不透明ID，版本读取独立Version字段。旧记录仍按原ID读取；显式ID已有upsert/create-only选择保持 |
-| A2A Store与流式阻塞处理器 | PushConfig存取隔离嵌套认证配置；Update变更SessionID时同步索引。注入的Store仍由宿主关闭。仅实现TaskHandler的处理器必须返回终态、等待输入/认证或显式Final，否则SSE发送失败任务并结束，不能以Working静默EOF |
+| A2A Store与流式阻塞处理器 | PushConfig存取隔离嵌套认证配置；Update变更SessionID时同步索引。Server.Stop释放自行创建的默认Store清理协程，未Start时也可Stop；再次Start重启清理且保留任务。注入的Store仍由宿主关闭，MemoryTaskStore.Close可重复调用。仅实现TaskHandler的处理器必须返回终态、等待输入/认证或显式Final，否则SSE发送失败任务并结束，不能以Working静默EOF |
 | 评估StopOnError | 首次系统/评估执行错误后停止尚未开始的工作，合作取消在途工作并保留已有结果；低分/明确不通过不自动等于执行错误。Dataset的TotalSamples仍为数据集大小，Results只含已开始的样本；Batch未开始的位置为nil。CustomEvaluator同时返回的部分评分与错误均保留 |
 | 并行组合 / Workflow 回调 | 并行错误保留有序分支状态和完整错误树；已有成功、unknown 或取消未确认的组合不整组盲重放，全部普通失败仍可按原策略重试。完成前业务 hook 失败可转失败；已提交完成后的观察通知失败只显式报错，不回退已确认终态 |
 | MCP / A2A | MCP 双向传递 ai-core 已支持的递归 Schema。A2A 同步阻塞处理器返回非终态且非等待状态时，任务保存为 failed、保留消息产物并返回 InvalidAgentResponse 与 taskId；Final 不是自动 completed 的依据。未支持的立即返回模式仍明确报告 |
