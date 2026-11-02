@@ -71,7 +71,7 @@ func SubgraphNode[S State](name string, subgraph *Graph[S], stateMapper ...*Subg
 			}
 			outputState, err := x.run(ctx)
 			if err != nil {
-				if _, ok := graphWaitingSignal(err); ok {
+				if _, ok := graphWaitingSignal(ctx, err); ok {
 					for id, result := range x.frontier.Results {
 						if len(result.Output) == 0 {
 							data, encodeErr := subgraph.codec().Encode(x.outputs[id])

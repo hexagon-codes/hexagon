@@ -224,6 +224,9 @@ func (sm *StateMachine[S]) RunWithThreadID(ctx context.Context, threadID string,
 	steps := 0
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return state, err
+		}
 		// 检查最大步数
 		if steps >= sm.maxSteps {
 			return state, ErrMaxStepsExceeded
@@ -252,6 +255,9 @@ func (sm *StateMachine[S]) RunWithThreadID(ctx context.Context, threadID string,
 		}
 
 		// OnEnter
+		if err := ctx.Err(); err != nil {
+			return state, err
+		}
 		if stateObj.OnEnter != nil {
 			if err := stateObj.OnEnter(ctx, state); err != nil {
 				return state, fmt.Errorf("state %s OnEnter error: %w", currentState, err)
@@ -259,6 +265,9 @@ func (sm *StateMachine[S]) RunWithThreadID(ctx context.Context, threadID string,
 		}
 
 		// 执行状态处理器
+		if err := ctx.Err(); err != nil {
+			return state, err
+		}
 		var nextState string
 		var err error
 		if stateObj.Handler != nil {
@@ -273,6 +282,9 @@ func (sm *StateMachine[S]) RunWithThreadID(ctx context.Context, threadID string,
 		}
 
 		// OnExit
+		if err := ctx.Err(); err != nil {
+			return state, err
+		}
 		if stateObj.OnExit != nil {
 			if err := stateObj.OnExit(ctx, state); err != nil {
 				return state, fmt.Errorf("state %s OnExit error: %w", currentState, err)
@@ -280,6 +292,9 @@ func (sm *StateMachine[S]) RunWithThreadID(ctx context.Context, threadID string,
 		}
 
 		// 确定下一状态
+		if err := ctx.Err(); err != nil {
+			return state, err
+		}
 		if nextState == "" {
 			// 使用转换条件
 			nextState, err = sm.findNextState(ctx, currentState, state)
@@ -304,6 +319,9 @@ func (sm *StateMachine[S]) findNextState(ctx context.Context, currentState strin
 
 	// 按优先级排序（已在添加时处理）
 	for _, trans := range transitions {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if trans.Condition == nil || trans.Condition(ctx, state) {
 			return trans.To, nil
 		}

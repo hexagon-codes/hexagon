@@ -226,7 +226,7 @@ func (r *CheckpointRunner[S]) executeFromCheckpoint(ctx context.Context, state S
 	}
 	final, err := x.run(ctx)
 	if err != nil {
-		if _, ok := graphWaitingSignal(err); ok {
+		if _, ok := graphWaitingSignal(ctx, err); ok {
 			r.currentCheckpoint.Status = CheckpointStatusInterrupted
 		} else if ctx.Err() != nil {
 			r.currentCheckpoint.Status = CheckpointStatusInterrupted

@@ -58,9 +58,36 @@ func parallelFailure[S State](name string, results []ParallelResult[S]) error {
 }
 
 // graphWaitingSignal 只将纯中断错误树判为等待，避免混合分支失败被中断分支遮蔽。
-func graphWaitingSignal(err error) (*interrupt.InterruptSignal, bool) {
-	signal, ok := interrupt.IsInterruptSignal(err)
-	return signal, ok && onlyInterruptFailures(err)
+func graphWaitingSignal(ctx context.Context, err error) (*interrupt.InterruptSignal, bool) {
+	if err == nil || !onlyInterruptFailures(err) {
+		return nil, false
+	}
+	var signals []error
+	seen := map[*interrupt.InterruptSignal]bool{}
+	var collect func(error)
+	collect = func(cause error) {
+		switch value := cause.(type) {
+		case *interrupt.InterruptSignal:
+			if !seen[value] {
+				seen[value] = true
+				signals = append(signals, value)
+			}
+		case interface{ Unwrap() []error }:
+			for _, nested := range value.Unwrap() {
+				collect(nested)
+			}
+		case interface{ Unwrap() error }:
+			collect(value.Unwrap())
+		}
+	}
+	collect(err)
+	if len(signals) == 1 {
+		return signals[0].(*interrupt.InterruptSignal), true
+	}
+	if len(signals) == 0 {
+		return nil, false
+	}
+	return interrupt.CompositeInterrupt(ctx, "parallel branches are waiting", nil, signals...).(*interrupt.InterruptSignal), true
 }
 
 func onlyInterruptFailures(err error) bool {

@@ -91,7 +91,7 @@ func (x *planExecutor[S]) runPregel(ctx context.Context) (S, error) {
 			result := <-completed
 			outcomes[result.name] = ParallelResult[S]{Name: result.name, State: result.state, Error: result.err}
 			if result.err != nil {
-				if signal, ok := graphWaitingSignal(result.err); ok {
+				if signal, ok := graphWaitingSignal(ctx, result.err); ok {
 					x.frontier.Waiting[result.name] = signal
 					signals = append(signals, signal)
 				} else {

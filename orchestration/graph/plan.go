@@ -347,7 +347,7 @@ func (x *planExecutor[S]) run(ctx context.Context) (S, error) {
 		x.sortReady()
 		name := x.frontier.Ready[0]
 		if err := x.runOne(ctx, name); err != nil {
-			if _, ok := graphWaitingSignal(err); ok {
+			if _, ok := graphWaitingSignal(ctx, err); ok {
 				x.frontier.Ready = x.frontier.Ready[1:]
 				continue
 			}
@@ -393,7 +393,7 @@ func (x *planExecutor[S]) runOne(ctx context.Context, name string) error {
 		nodeCtx := interrupt.AppendAddressSegment(ctx, interrupt.SegmentNode, name, "")
 		output, writes, commandTarget, err := x.execute(ctx, nodeCtx, name, x.state)
 		if err != nil {
-			if signal, ok := graphWaitingSignal(err); ok {
+			if signal, ok := graphWaitingSignal(ctx, err); ok {
 				x.frontier.Waiting[name] = signal
 			} else {
 				x.failed[id] = err
