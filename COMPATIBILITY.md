@@ -36,10 +36,17 @@ hexagon 是 Hexagon 生态的 **AI Agent 框架（L2）**，向下依赖 toolkit
 | `Snapshot.BudgetStartedAt` | 首次模型派发前保存预算墙钟起点；恢复不重新起算。原快照没有该事实时不能自动补得历史保证；普通轻量执行仍无需持久依赖 |
 | `WaitingTargets` | nil 表示未声明/保持，非 nil 空列表表示当前没有等待；执行核随快照声明完整目标。原子提交只为当前等待集的未消费输入保持 queued；过期目标不盲消费，同 ID 查回不再派发。宿主选择恢复输入时必须与当前等待集对应 |
 | `PrepareModelRequest` / `EventModelDraftReplaced` | 计量与派发共用完整请求派生；不修改传入历史。草稿替换事件以 `replacement_text` 撤回本包装调用的废弃尝试，保留 Continue 之前的前缀；实际费用和回执仍逐次保存 |
+| `ModelAttemptInitializer` | 可选预算初始化端口；执行核只采用尚未建立的首次预算起点，其他候选修改不采用。内部模型调用不重跑整条 BeforeLLM 链；每次派发读取同一预算事实并在需要时先持久保存 |
+| `ChildRunResult.ControlError` | 可选 `control_error` 保存首次执行的控制错误分类；旧 nil 记录保守处理。恢复已知普通失败不重派原任务，同时允许读取组合内后续已保存结果；不改变 Runtime 通用 TaskExecutionError 的不可重放语义 |
+| 并行组合 / Workflow 回调 | 并行错误保留有序分支状态和完整错误树；已有成功、unknown 或取消未确认的组合不整组盲重放，全部普通失败仍可按原策略重试。完成前业务 hook 失败可转失败；已提交完成后的观察通知失败只显式报错，不回退已确认终态 |
+| MCP / A2A | MCP 双向传递 ai-core 已支持的递归 Schema。A2A 同步阻塞处理器返回非终态且非等待状态时，任务保存为 failed、保留消息产物并返回 InvalidAgentResponse 与 taskId；Final 不是自动 completed 的依据。未支持的立即返回模式仍明确报告 |
+| Artifact / 评估身份 | Artifact 读写隔离完整可变 Metadata，合法 time.Time 保持值与时区；确实无法隔离的值显式返回错误。Dataset/Single/Batch 执行前固定评估器 Name，重复名称在执行系统或评估器前报错，不覆盖已有结果 |
+| 迁移快照读取 | 持久会话缓存经校验的迁移载荷，缓存只对原持久字节有效；新快照使旧缓存失效。每次读取仍产生独立值，不反复迁移或让调用方改写缓存 |
 
 ## 插件依赖代次与恢复
 
 - 插件实例在初始化时取得声明依赖的使用权，依赖使用权保留到该实例 Stop 完成。单独更新 Provider 可以立即发布新根路由；仍运行的 Tool 继续使用原 Provider，旧 Provider 的 `Retirement.Wait` 等待实际依赖者排空，不表示更新发布失败。
+- 停止后的实例重启时，依赖实际代次未变化则只执行 Start；代次变化时先使用原冻结配置重新 Init，再 Start，使实例缓存的真实对象与新绑定一致。停止后的原依赖见证只用于身份比较，不持有使用权，也不再次调用已关闭对象；重新装配失败保留明确错误并释放候选资源。
 - `DependencyFromContext(ctx, name)` 在 Init/Start/Stop 回调中返回固定依赖。候选集内的插件通过此入口取得候选依赖，历史恢复通过此入口取得原版本依赖；插件必须缓存这份实际依赖，不能再用当前 `Registry.Get` 替换它。旧插件直接使用 Registry.Get 时按生命周期当时实际可见的代次固定；路由在未完成生命周期回调期间变化且无法确认绑定时，清理未发布实例并明确返回错误，不停止已有运行实例。
 - `Lease.Plugin(name)` 优先返回显式选择的根；只请求 Tool 时，其隐式 Provider 是该 Tool 的实际依赖。根 Provider v2 和 Tool 所依赖的 Provider v1 可同时持有；同名多版本的隐式依赖没有显式根选择时，`Plugin(name)` 返回 false，调用方应使用已经装配好的 Tool。`References()` 和 `RecoverableReferences()` 返回显式根，并通过 `Reference.Dependencies` 递归记录实际依赖，不把旧依赖伪装成当前路由。
 - 恢复独立重建每份固定依赖，不发布旧路由。无法从原引用或生命周期上下文证明依赖绑定时返回 `plugin.ErrDependencyUnavailable`，不静默改用 latest。跨层的 RunPreparer 宿主适配器应在恢复路径把该错误与 `runtime.ErrUnrecoverableSpec` 一起包装并保留原错误，随后禁止派发 Provider；Runtime 核心不依赖 plugin 包。没有依赖树的旧引用仅能恢复实际无依赖的插件，有依赖的旧任务应由原固定版本继续或提供明确迁移。
