@@ -132,6 +132,9 @@ func MapEach[I, O any](r Runnable[I, O]) Runnable[I, O] {
 					return
 				}
 				if err != nil {
+					if _, sourceEOF := stream.IsSourceEOF(err); sourceEOF {
+						continue
+					}
 					if !errors.Is(err, io.EOF) {
 						_ = writer.CloseWithError(err)
 					}
