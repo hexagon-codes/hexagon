@@ -111,6 +111,8 @@ type StreamChannel struct {
 	done   chan struct{}
 	mu     sync.Mutex
 	closed bool
+	// terminalSlot 仅由StreamRun启用，预留终止事件的位置。
+	terminalSlot bool
 }
 
 // NewStreamChannel 创建流式事件通道
@@ -138,11 +140,13 @@ func (sc *StreamChannel) Done() <-chan struct{} {
 // 如果通道已关闭或缓冲区已满，事件将被丢弃
 func (sc *StreamChannel) Emit(event StreamModeEvent) {
 	sc.mu.Lock()
+	defer sc.mu.Unlock()
 	if sc.closed {
-		sc.mu.Unlock()
 		return
 	}
-	sc.mu.Unlock()
+	if sc.terminalSlot && len(sc.events) >= cap(sc.events)-1 {
+		return
+	}
 
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
@@ -153,6 +157,19 @@ func (sc *StreamChannel) Emit(event StreamModeEvent) {
 	default:
 		// 缓冲区满，丢弃事件（避免阻塞节点执行）
 	}
+}
+
+// emitTerminal 使用保留槽位，终止事实不受普通进度丢弃策略影响。
+func (sc *StreamChannel) emitTerminal(event StreamModeEvent) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if sc.closed {
+		return
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
+	sc.events <- event
 }
 
 // Close 关闭事件通道
@@ -213,7 +230,12 @@ func (g *Graph[S]) StreamRun(ctx context.Context, state S, opts ...StreamRunOpti
 		modeSet[m] = true
 	}
 
-	ch := NewStreamChannel(cfg.bufferSize)
+	// 额外槽位不减少调用方配置的普通事件容量。
+	if cfg.bufferSize <= 0 {
+		cfg.bufferSize = 100
+	}
+	ch := NewStreamChannel(cfg.bufferSize + 1)
+	ch.terminalSlot = true
 
 	go func() {
 		defer ch.Close()
@@ -231,12 +253,16 @@ func (g *Graph[S]) StreamRun(ctx context.Context, state S, opts ...StreamRunOpti
 		streamCtx := WithStreamChannel(ctx, ch)
 		events, err := g.Stream(streamCtx, state)
 		if err != nil {
-			ch.Emit(StreamModeEvent{Mode: StreamModeDebug, Type: EventNodeError, Data: err.Error()})
+			ch.emitTerminal(StreamModeEvent{Mode: StreamModeDebug, Type: EventNodeError, Data: err.Error()})
 			return
 		}
 		for event := range events {
 			if event.Type == EventTypeError {
-				ch.Emit(StreamModeEvent{Mode: StreamModeDebug, Type: EventNodeError, Node: event.NodeName, Data: event.Error.Error()})
+				ch.emitTerminal(StreamModeEvent{Mode: StreamModeDebug, Type: EventNodeError, Node: event.NodeName, Data: event.Error.Error()})
+				return
+			}
+			if event.Type == EventTypeEnd {
+				ch.emitTerminal(StreamModeEvent{Mode: StreamModeDebug, Type: EventGraphEnd, Node: event.NodeName, Data: event.State})
 				return
 			}
 			if modeSet[StreamModeDebug] {
