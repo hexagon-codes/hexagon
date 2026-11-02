@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/hexagon-codes/hexagon/interrupt"
@@ -53,6 +54,7 @@ func (x *planExecutor[S]) runPregel(ctx context.Context) (S, error) {
 				return x.state, &GraphPersistenceError{Cause: err}
 			}
 		}
+		var firstError error
 		for _, name := range names {
 			if x.frontier.Results[x.taskID(name)] != nil {
 				continue
@@ -67,7 +69,8 @@ func (x *planExecutor[S]) runPregel(ctx context.Context) (S, error) {
 				}
 			}
 			if err := x.emit(ctx, EventTypeNodeStart, name, x.state, nil); err != nil {
-				return x.state, err
+				firstError = err
+				break
 			}
 			count++
 			invoke := func(name string) {
@@ -81,18 +84,18 @@ func (x *planExecutor[S]) runPregel(ctx context.Context) (S, error) {
 				invoke(name)
 			}
 		}
-		var firstError error
 		var signals []error
+		outcomes := make(map[string]ParallelResult[S], len(names))
+		hasFailure := false
 		for i := 0; i < count; i++ {
 			result := <-completed
+			outcomes[result.name] = ParallelResult[S]{Name: result.name, State: result.state, Error: result.err}
 			if result.err != nil {
-				if signal, ok := interrupt.IsInterruptSignal(result.err); ok {
+				if signal, ok := graphWaitingSignal(result.err); ok {
 					x.frontier.Waiting[result.name] = signal
 					signals = append(signals, signal)
-				} else if firstError == nil {
-					firstError = fmt.Errorf("node %q failed: %w", result.name, result.err)
-				}
-				if _, ok := interrupt.IsInterruptSignal(result.err); !ok {
+				} else {
+					hasFailure = true
 					x.failed[x.taskID(result.name)] = result.err
 				}
 				continue
@@ -105,21 +108,34 @@ func (x *planExecutor[S]) runPregel(ctx context.Context) (S, error) {
 			if x.persist != nil {
 				var err error
 				data, err = x.graph.codec().Encode(result.state)
-				if err != nil && firstError == nil {
-					firstError = err
+				if err != nil {
+					firstError = errors.Join(firstError, err)
 				}
 			}
 			encoded, err := encodeWrites(result.writes)
-			if err != nil && firstError == nil {
-				firstError = err
+			if err != nil {
+				firstError = errors.Join(firstError, err)
 			}
 			x.frontier.Results[id] = &savedNodeResult{TaskID: id, Node: result.name, Activation: generations[result.name], Output: data, Writes: encoded, CommandTarget: result.commandTarget}
-			if err := x.save(ctx); err != nil && firstError == nil {
-				firstError = err
+			if err := x.save(ctx); err != nil {
+				firstError = errors.Join(firstError, err)
 			}
 		}
-		if firstError != nil {
-			return x.state, firstError
+		if firstError != nil || hasFailure {
+			ordered := make([]ParallelResult[S], 0, len(names))
+			for _, name := range names {
+				result, exists := outcomes[name]
+				if !exists {
+					saved := x.frontier.Results[taskIDs[name]]
+					if saved == nil {
+						continue
+					}
+					output, err := x.resultState(saved)
+					result = ParallelResult[S]{Name: name, State: output, Error: err}
+				}
+				ordered = append(ordered, result)
+			}
+			return x.state, &ParallelExecutionError[S]{Name: fmt.Sprintf("superstep %d", x.frontier.Activation), Results: ordered, Cause: firstError}
 		}
 		if len(signals) > 0 || len(x.frontier.Waiting) > 0 {
 			return x.state, x.waitingError(ctx)

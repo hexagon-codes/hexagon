@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync/atomic"
 	"time"
 )
@@ -609,44 +610,42 @@ func ParallelForEachLoopNode[S State, T any](
 		for i := 0; i < workerCount; i++ {
 			go func() {
 				for w := range workCh {
-					select {
-					case <-ctx.Done():
-						resultCh <- struct {
-							index int
-							err   error
-						}{w.index, ctx.Err()}
-						return
-					default:
-						err := body(ctx, w.item, w.index)
-						resultCh <- struct {
-							index int
-							err   error
-						}{w.index, err}
-					}
+					err := func() (err error) {
+						defer func() {
+							if value := recover(); value != nil {
+								err = &NodePanicError{Node: fmt.Sprintf("%s[%d]", name, w.index), Value: value, Stack: debug.Stack()}
+							}
+						}()
+						if err := ctx.Err(); err != nil {
+							return err
+						}
+						err = body(ctx, w.item, w.index)
+						return errors.Join(err, ctx.Err())
+					}()
+					resultCh <- struct {
+						index int
+						err   error
+					}{w.index, err}
 				}
 			}()
 		}
 
-		// 收集所有结果（使用 select 避免 context 取消时死锁）
-		collected := 0
-		for collected < len(items) {
-			select {
-			case result := <-resultCh:
-				results[result.index] = result.err
-				collected++
-			case <-ctx.Done():
-				// context 已取消，填充剩余未收集的结果
-				for i := range results {
-					if results[i] == nil {
-						results[i] = ctx.Err()
-					}
-				}
-				return merger(state, results)
-			}
+		// 取消只阻止后续派发；收敛在途回调，不能把已成功项改写为取消。
+		outcomes := make([]ParallelResult[S], len(items))
+		controlFailure := false
+		for range items {
+			result := <-resultCh
+			results[result.index] = result.err
+			outcomes[result.index] = ParallelResult[S]{Name: fmt.Sprint(result.index), State: state, Error: result.err}
+			controlFailure = controlFailure || nodeControlOrUnknown(result.err)
 		}
 
-		// 合并结果
-		return merger(state, results)
+		// 普通分项错误仍由既有 merger 决定；panic、未知结果和取消不得被吞为成功。
+		merged, err := merger(state, results)
+		if err != nil || controlFailure {
+			return merged, &ParallelExecutionError[S]{Name: name, Results: outcomes, Cause: err}
+		}
+		return merged, nil
 	}
 
 	return &Node[S]{

@@ -71,7 +71,7 @@ func SubgraphNode[S State](name string, subgraph *Graph[S], stateMapper ...*Subg
 			}
 			outputState, err := x.run(ctx)
 			if err != nil {
-				if _, ok := interrupt.IsInterruptSignal(err); ok {
+				if _, ok := graphWaitingSignal(err); ok {
 					for id, result := range x.frontier.Results {
 						if len(result.Output) == 0 {
 							data, encodeErr := subgraph.codec().Encode(x.outputs[id])
@@ -465,6 +465,7 @@ func (c *GraphComposer[S]) Compose() (*Graph[S], error) {
 //   - name: 节点名称
 //   - subgraphs: 要并行执行的子图列表
 //   - merger: 状态合并函数
+//
 // 错误时等待所有已派发子图结束，通过 ParallelExecutionError 保留完整结果，不盲重放成功子图。
 func ParallelSubgraphs[S State](name string, subgraphs []*Graph[S], merger StateMerger[S]) *Node[S] {
 	return &Node[S]{

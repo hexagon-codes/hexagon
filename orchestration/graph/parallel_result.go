@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/hexagon/interrupt"
 )
 
 // ParallelResult 保留已派发分支的完整结果；错误伴随的状态不作为成功更新采用。
@@ -54,4 +55,37 @@ func parallelFailure[S State](name string, results []ParallelResult[S]) error {
 		}
 	}
 	return nil
+}
+
+// graphWaitingSignal 只将纯中断错误树判为等待，避免混合分支失败被中断分支遮蔽。
+func graphWaitingSignal(err error) (*interrupt.InterruptSignal, bool) {
+	signal, ok := interrupt.IsInterruptSignal(err)
+	return signal, ok && onlyInterruptFailures(err)
+}
+
+func onlyInterruptFailures(err error) bool {
+	if err == nil {
+		return true
+	}
+	switch value := err.(type) {
+	case *interrupt.InterruptSignal:
+		return true
+	case *GraphPersistenceError:
+		return false
+	case interface{ Unwrap() []error }:
+		causes := value.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !onlyInterruptFailures(cause) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return value.Unwrap() != nil && onlyInterruptFailures(value.Unwrap())
+	default:
+		return false
+	}
 }

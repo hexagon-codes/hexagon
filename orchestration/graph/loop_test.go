@@ -999,7 +999,7 @@ func TestParallelForEachLoopNode_DefaultConcurrency(t *testing.T) {
 }
 
 func TestParallelForEachLoopNode_ContextCancel(t *testing.T) {
-	// maxConcurrency 需要 >= items 数量，否则 worker 提前退出导致结果收集死锁
+	// 取消后未派发项也有完成记录，不要求 worker 与 item 数量相等。
 	node := ParallelForEachLoopNode[TestState, int](
 		"parallel-foreach",
 		func(s TestState) []int { return []int{1, 2, 3} },
@@ -1017,7 +1017,7 @@ func TestParallelForEachLoopNode_ContextCancel(t *testing.T) {
 			}
 			return state, nil
 		},
-		3, // 确保每个 item 有独立 worker
+		1,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())

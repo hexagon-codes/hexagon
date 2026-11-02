@@ -324,6 +324,7 @@ func (s *ParallelStep) Execute(ctx context.Context, input StepInput) (*StepOutpu
 
 	// 结果收集
 	type result struct {
+		index  int
 		stepID string
 		output *StepOutput
 		err    error
@@ -335,9 +336,9 @@ func (s *ParallelStep) Execute(ctx context.Context, input StepInput) (*StepOutpu
 	// 控制并行数
 	sem := make(chan struct{}, s.maxParallelCount())
 
-	for _, step := range s.steps {
+	for index, step := range s.steps {
 		wg.Add(1)
-		go func(step Step) {
+		go func(index int, step Step) {
 			defer wg.Done()
 
 			// 获取信号量
@@ -345,17 +346,17 @@ func (s *ParallelStep) Execute(ctx context.Context, input StepInput) (*StepOutpu
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-ctx.Done():
-				results <- result{stepID: step.ID(), err: ctx.Err()}
+				results <- result{index: index, stepID: step.ID(), err: ctx.Err()}
 				return
 			}
 
 			output, err := invokeStep(step.ID(), func() (*StepOutput, error) { return step.Execute(ctx, input) })
-			results <- result{stepID: step.ID(), output: output, err: err}
+			results <- result{index: index, stepID: step.ID(), output: output, err: err}
 
 			if err != nil && s.failFast {
 				cancel()
 			}
-		}(step)
+		}(index, step)
 	}
 
 	// 等待所有步骤完成
@@ -366,24 +367,25 @@ func (s *ParallelStep) Execute(ctx context.Context, input StepInput) (*StepOutpu
 
 	// 收集结果
 	outputs := make(map[string]any)
-	var firstErr error
+	outcomes := make([]ParallelStepResult, len(s.steps))
+	hasFailure := false
 
 	for res := range results {
-		if res.err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("step %s failed: %w", res.stepID, res.err)
-		}
+		outcomes[res.index] = ParallelStepResult{StepID: res.stepID, Output: res.output, Error: res.err}
+		hasFailure = hasFailure || res.err != nil
 		if res.output != nil {
 			outputs[res.stepID] = res.output.Data
 		}
 	}
 
-	if firstErr != nil && s.failFast {
-		return nil, firstErr
+	var failure error
+	if hasFailure {
+		failure = &ParallelStepError{StepID: s.id, Results: outcomes}
 	}
 
 	return &StepOutput{
 		Data: outputs,
-	}, firstErr
+	}, failure
 }
 
 // Validate 验证步骤配置

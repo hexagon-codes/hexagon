@@ -147,7 +147,7 @@ func MapReduceNode[S State](name string, split SplitFunc[S], mapFn MapFunc[S], r
 						case sem <- struct{}{}:
 							defer func() { <-sem }()
 						case <-ctx.Done():
-							resultCh <- mapResult{index: idx, err: ctx.Err()}
+							resultCh <- mapResult{index: idx, state: s, err: ctx.Err()}
 							return
 						}
 					}
@@ -165,11 +165,13 @@ func MapReduceNode[S State](name string, split SplitFunc[S], mapFn MapFunc[S], r
 
 			// 收集结果
 			results := make([]S, len(shards))
+			outcomes := make([]ParallelResult[S], len(shards))
 			for r := range resultCh {
-				if r.err != nil {
-					return state, fmt.Errorf("map-reduce 节点 %q 的第 %d 个分片处理失败: %w", name, r.index, r.err)
-				}
+				outcomes[r.index] = ParallelResult[S]{Name: fmt.Sprint(r.index), State: r.state, Error: r.err}
 				results[r.index] = r.state
+			}
+			if err := parallelFailure(name, outcomes); err != nil {
+				return state, err
 			}
 
 			// 3. Reduce

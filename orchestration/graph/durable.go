@@ -468,7 +468,7 @@ func (r *DurableGraphRunner[S]) run(ctx context.Context, scope, runID string, au
 		if errors.As(runErr, &unknown) {
 			return state, runErr
 		}
-		if _, waiting := interrupt.IsInterruptSignal(runErr); waiting {
+		if _, waiting := graphWaitingSignal(runErr); waiting {
 			if err := x.save(ctx); err != nil {
 				return state, errors.Join(runErr, err)
 			}
