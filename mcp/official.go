@@ -118,14 +118,39 @@ type connectingTransport struct {
 	sdkmcp.Transport
 	connection sdkmcp.Connection
 	closeErr   error
+	schemas    *wireSchemas
 }
 
 func (t *connectingTransport) Connect(ctx context.Context) (sdkmcp.Connection, error) {
-	conn, err := t.Transport.Connect(ctx)
+	transport := t.Transport
+	if t.schemas != nil {
+		if original, ok := transport.(*sdkmcp.StreamableClientTransport); ok {
+			cloned := *original
+			client := original.HTTPClient
+			if client == nil {
+				client = http.DefaultClient
+			}
+			copied := *client
+			base := client.Transport
+			if base == nil {
+				base = http.DefaultTransport
+			}
+			copied.Transport = &schemaHTTPTransport{base: base, schemas: t.schemas}
+			cloned.HTTPClient = &copied
+			transport = &cloned
+		}
+	}
+	conn, err := transport.Connect(ctx)
 	if err != nil {
 		return nil, err
 	}
 	// 返回原始连接，保留 SDK 内部的协议协商与会话扩展接口。
+	if t.schemas != nil {
+		switch t.Transport.(type) {
+		case *sdkmcp.CommandTransport, *sdkmcp.StdioTransport, *sdkmcp.IOTransport, *sdkmcp.InMemoryTransport, *sdkmcp.SSEClientTransport:
+			conn = &schemaReadConnection{Connection: conn, schemas: t.schemas}
+		}
+	}
 	t.connection = conn
 	return conn, nil
 }
@@ -163,6 +188,7 @@ func ConnectSession(ctx context.Context, transport sdkmcp.Transport) (*Session, 
 	if !ok {
 		tracked = &connectingTransport{Transport: transport}
 	}
+	tracked.schemas = &wireSchemas{}
 	session, err := client.Connect(ctx, tracked, nil)
 	if err != nil {
 		stage := "connect"
@@ -188,7 +214,7 @@ func ConnectSession(ctx context.Context, transport sdkmcp.Transport) (*Session, 
 			proxyTool := &MCPProxyToolV2{
 				mcpTool:      mcpTool,
 				session:      session,
-				cachedSchema: sdkSchemaToAICore(mcpTool.InputSchema),
+				cachedSchema: tracked.schemas.schema(mcpTool.Name, mcpTool.InputSchema),
 			}
 			tools = append(tools, proxyTool)
 		}
@@ -607,7 +633,9 @@ func sdkSchemaToAICore(inputSchema any) *llm.Schema {
 		if err != nil {
 			return nil
 		}
-		if err := json.Unmarshal(data, &schemaMap); err != nil {
+		decoder := json.NewDecoder(strings.NewReader(string(data)))
+		decoder.UseNumber()
+		if err := decoder.Decode(&schemaMap); err != nil {
 			return nil
 		}
 	}
@@ -666,11 +694,31 @@ func parseSchemaMap(m map[string]any) *llm.Schema {
 	if v, ok := m["default"]; ok {
 		s.Default = v
 	}
-	if v, ok := m["minimum"].(float64); ok {
-		s.Minimum = &v
-	}
-	if v, ok := m["maximum"].(float64); ok {
-		s.Maximum = &v
+	for _, name := range []string{"minimum", "maximum"} {
+		value, exists := m[name]
+		if !exists {
+			continue
+		}
+		raw, err := json.Marshal(value)
+		if err != nil {
+			continue
+		}
+		var number json.Number
+		if err := json.Unmarshal(raw, &number); err != nil {
+			continue
+		}
+		approximate, err := number.Float64()
+		if name == "minimum" {
+			s.MinimumNumber = number
+			if err == nil {
+				s.Minimum = &approximate
+			}
+		} else {
+			s.MaximumNumber = number
+			if err == nil {
+				s.Maximum = &approximate
+			}
+		}
 	}
 	if v, ok := schemaInt(m["minLength"]); ok {
 		s.MinLength = &v
@@ -712,7 +760,7 @@ func parseSchemaMap(m map[string]any) *llm.Schema {
 	s.AllOf = parseSchemaList(m["allOf"])
 	s.Not = parseSchemaValue(m["not"])
 	if len(typeUnion) > 0 {
-		if len(s.AnyOf) == 0 {
+		if s.AnyOf == nil {
 			s.AnyOf = typeUnion
 		} else {
 			// 类型联合与同层原有组合约束同时成立，不能互相覆盖。
@@ -773,6 +821,9 @@ func schemaStringSlice(raw any) []string {
 
 func schemaInt(raw any) (int, bool) {
 	switch value := raw.(type) {
+	case json.Number:
+		number, err := value.Int64()
+		return int(number), err == nil && int64(int(number)) == number
 	case int:
 		return value, true
 	case int32:
@@ -860,6 +911,12 @@ func aicoreSchemaToSDKMap(s *llm.Schema, root bool) map[string]any {
 	if s.Maximum != nil {
 		result["maximum"] = *s.Maximum
 	}
+	if s.MinimumNumber != "" {
+		result["minimum"] = s.MinimumNumber
+	}
+	if s.MaximumNumber != "" {
+		result["maximum"] = s.MaximumNumber
+	}
 	if s.MinLength != nil {
 		result["minLength"] = *s.MinLength
 	}
@@ -891,17 +948,17 @@ func aicoreSchemaToSDKMap(s *llm.Schema, root bool) map[string]any {
 		result["items"] = aicoreSchemaToSDKMap(s.Items, false)
 	}
 
-	if len(s.Enum) > 0 {
+	if s.Enum != nil {
 		result["enum"] = s.Enum
 	}
 
-	if len(s.AnyOf) > 0 {
+	if s.AnyOf != nil {
 		result["anyOf"] = schemaListToSDK(s.AnyOf)
 	}
-	if len(s.OneOf) > 0 {
+	if s.OneOf != nil {
 		result["oneOf"] = schemaListToSDK(s.OneOf)
 	}
-	if len(s.AllOf) > 0 {
+	if s.AllOf != nil {
 		result["allOf"] = schemaListToSDK(s.AllOf)
 	}
 	if s.Not != nil {
