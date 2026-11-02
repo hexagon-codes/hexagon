@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/hexagon-codes/ai-core/llm"
 )
@@ -78,15 +79,37 @@ const (
 )
 
 // ToolResult is a product-neutral tool result.
+type StructuredPayload struct {
+	Kind    string          `json:"kind"`
+	Version int             `json:"version"`
+	Data    json.RawMessage `json:"data"`
+}
+
 type ToolResult struct {
 	Content string
-	Raw     any
-	Error   string
+	// ContentParts 保存可持久化的完整多模态投影，不依赖 Raw 恢复后仍实现 Go 接口。
+	ContentParts []llm.ContentPart `json:"content_parts,omitempty"`
+	// ToolSnapshot 让已完成的发现任务在状态采用前中断后仍能重建相同执行绑定。
+	ToolSnapshot *ToolSnapshot      `json:"tool_snapshot,omitempty"`
+	Structured   *StructuredPayload `json:"structured,omitempty"`
+	// NeedsReconciliation 不把已发生但尚需补登记的动作当成可重新执行的失败。
+	NeedsReconciliation bool `json:"needs_reconciliation,omitempty"`
+	Raw                 any
+	Error               string
+	// Stop 表示记录本次结果后停止本轮运行，Content作为终稿，不派发剩余工具。
+	// 由执行器按自身政策设置；零值保持普通工具结果行为。
+	Stop bool `json:"stop,omitempty"`
 	// Status 是执行结果状态（success / error），由框架在执行点据 execErr 与
 	// tool.Result.Success 判定。零值（空串）表示未填充——老快照/老路径向后兼容。
 	Status ToolStatus `json:"status,omitempty"`
 	// DurationMs 是工具执行耗时（毫秒），由框架在执行点 time.Since 测量。
 	DurationMs int64 `json:"duration_ms,omitempty"`
+}
+
+// ToolResultReconciler 仅核对原结果或幂等补登记，不得重新调用原业务执行器。
+// handled=false 表示该结果不属于此核对器；查询失败保留原事实，不能转为成功文本。
+type ToolResultReconciler interface {
+	ReconcileToolResult(context.Context, llm.ToolCall, ToolResult) (ToolResult, bool, error)
 }
 
 // Permission checks whether a tool call can execute.

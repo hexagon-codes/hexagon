@@ -17,10 +17,19 @@ var (
 	// are not declared replay-safe (default), risking duplicated side effects.
 	// Resolve by declaring the tool idempotent/read-only (SideEffectClassifier) or
 	// performing manual dedup before resuming.
-	ErrUnsafeReplay = errors.New("runtime: resume would replay an in-flight unsafe tool call; refusing to re-execute")
+	ErrUnsafeReplay error = &unsafeReplayError{}
 	// ErrBudgetExceeded 表示预算（token/时间/成本）超限，执行被 fail-closed 终止。
 	ErrBudgetExceeded = errors.New("runtime budget exceeded")
 )
+
+type unsafeReplayError struct{}
+
+func (*unsafeReplayError) Error() string {
+	return "runtime: resume would replay an in-flight unsafe tool call; refusing to re-execute"
+}
+
+// UnsafeToReplay 将未决副作用语义传给上层通用执行器，不依赖具体错误文本。
+func (*unsafeReplayError) UnsafeToReplay() bool { return true }
 
 // RuntimeError is a structured error payload for event consumers.
 type RuntimeError struct {

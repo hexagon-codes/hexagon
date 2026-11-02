@@ -2,14 +2,16 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"time"
 
 	"github.com/hexagon-codes/toolkit/util/lease"
 )
 
 // 本文件为 SessionLane 补上跨副本串行能力：注入分布式租约（lease.Lease）后，
-// 同一 sessionKey 的执行在多副本间也互斥串行，并通过 fencing token 拒绝过期持有者
-// 的写入。未注入租约时所有方法行为与单进程版一致。
+// DoRun 续租并传播失租取消，fencing token 由下游受保护存储实际核对。
+// 进程内请求缓存不提供跨副本幂等，也不能撤销已发出的外部动作。
 
 // SetDistributedLease 注入分布式租约后端与租约 TTL，启用跨副本会话串行。
 //
@@ -30,11 +32,16 @@ const leasePollInterval = 20 * time.Millisecond
 // 若未注入分布式租约则返回 token=0、释放函数为空操作（退化为不跨副本串行）。
 // 租约被他人持有时轮询等待，直到获取成功或 ctx 取消。fencing token 供下游受保护
 // 资源比较、拒绝过期持有者写入。
+// 此低阶入口不自动续租；持续执行使用 DoRun 获取续租及失租取消。
 func (l *SessionLane) AcquireSession(ctx context.Context, sessionKey string) (lease.FencingToken, func(), error) {
 	l.mu.Lock()
 	backend := l.lease
 	ttl := l.leaseTTL
 	l.mu.Unlock()
+	return acquireSession(ctx, sessionKey, backend, ttl)
+}
+
+func acquireSession(ctx context.Context, sessionKey string, backend lease.Lease, ttl time.Duration) (lease.FencingToken, func(), error) {
 
 	if backend == nil || sessionKey == "" {
 		return 0, func() {}, nil
@@ -49,7 +56,14 @@ func (l *SessionLane) AcquireSession(ctx context.Context, sessionKey string) (le
 			return 0, func() {}, err
 		}
 		if acquired {
-			release := func() { _ = backend.Release(context.WithoutCancel(ctx), sessionKey, token) }
+			var once sync.Once
+			release := func() {
+				once.Do(func() {
+					cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+					defer cancel()
+					_ = backend.Release(cleanup, sessionKey, token)
+				})
+			}
 			return token, release, nil
 		}
 		// 被他人持有，等待后重试
@@ -63,30 +77,90 @@ func (l *SessionLane) AcquireSession(ctx context.Context, sessionKey string) (le
 
 // DoCtx 在跨副本会话串行 + 请求幂等保护下执行 fn。
 //
-// 与 Do 同义，但当注入了分布式租约时，sessionKey 的串行跨副本生效（先取分布式租约
-// 再执行，结束释放）；未注入租约时退化为单进程 sync.Mutex（与 Do 一致）。
-// requestID 幂等语义与 Do 相同。
+// 等待准入可取消；分布式租约按 DoRun 续租并在失租后返回错误。
+// 无参 fn 不能接收派生 ctx，需要主动停止运行时改用 DoRun；请求缓存仅限当前进程。
 func (l *SessionLane) DoCtx(ctx context.Context, sessionKey, requestID string, fn func() (*Result, error)) (*Result, error) {
-	l.mu.Lock()
-	hasLease := l.lease != nil
-	l.mu.Unlock()
+	return l.DoRun(ctx, sessionKey, requestID, func(context.Context) (*Result, error) { return fn() })
+}
 
-	if hasLease && sessionKey != "" {
-		_, release, err := l.AcquireSession(ctx, sessionKey)
+type sessionFenceKey struct{}
+
+// SessionFence 是会话资源的 fencing 身份，不替代 TaskStore 授予的 Run 执行权。
+type SessionFence struct {
+	SessionKey string
+	Token      lease.FencingToken
+}
+
+func SessionFenceFromContext(ctx context.Context) (SessionFence, bool) {
+	fence, ok := ctx.Value(sessionFenceKey{}).(SessionFence)
+	return fence, ok
+}
+
+// DoRun 等待准入可取消，并将租约代次及失租取消传给实际执行回调。
+// 旧 DoCtx 的无参回调无法接收派生 ctx；需要主动停止运行时使用此方法。
+func (l *SessionLane) DoRun(ctx context.Context, sessionKey, requestID string, fn func(context.Context) (*Result, error)) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if sessionKey != "" {
+		gate := l.sessionLock(sessionKey)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case gate <- struct{}{}:
+		}
+		defer func() { <-gate }()
+	}
+	l.mu.Lock()
+	backend, ttl := l.lease, l.leaseTTL
+	l.mu.Unlock()
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	execution, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	if backend != nil && sessionKey != "" {
+		token, release, err := acquireSession(ctx, sessionKey, backend, ttl)
 		if err != nil {
 			return nil, err
 		}
 		defer release()
-	} else if sessionKey != "" {
-		sl := l.sessionLock(sessionKey)
-		sl.Lock()
-		defer sl.Unlock()
+		execution = context.WithValue(execution, sessionFenceKey{}, SessionFence{SessionKey: sessionKey, Token: token})
+		stopped := make(chan struct{})
+		go func() {
+			defer close(stopped)
+			interval := ttl / 3
+			if interval <= 0 {
+				interval = time.Nanosecond
+			}
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-execution.Done():
+					return
+				case <-ticker.C:
+					if err := backend.Refresh(execution, sessionKey, token, ttl); err != nil {
+						cancel(errors.Join(ErrExecutionLost, err))
+						return
+					}
+				}
+			}
+		}()
+		defer func() { cancel(nil); <-stopped }()
 	}
-
+	run := func() (*Result, error) {
+		if err := execution.Err(); err != nil {
+			return nil, context.Cause(execution)
+		}
+		result, err := fn(execution)
+		if cause := context.Cause(execution); cause != nil {
+			return result, errors.Join(err, cause)
+		}
+		return result, err
+	}
 	if requestID == "" {
-		return fn()
+		return run()
 	}
-	e := l.entry(requestID)
-	e.once.Do(func() { e.result, e.err = fn() })
-	return e.result, e.err
+	return l.doRequest(execution, requestID, run)
 }

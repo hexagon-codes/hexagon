@@ -43,10 +43,12 @@ package structured
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/schema"
 	"github.com/hexagon-codes/hexagon/llm/parser"
 )
 
@@ -136,12 +138,18 @@ type config struct {
 	// NativeJSONSchema 启用 provider 原生 JSON Schema 强制解码
 	// 开启后经 CompletionRequest.ResponseFormat 把 Schema 下发给 provider
 	// （json_schema + strict），由 provider 端约束解码，而非仅靠 prompt 注入。
-	// 对支持的 provider（如 OpenAI GPT-4o+）能从根本上保证输出合法；不支持的
-	// provider 会忽略该字段并退化为 prompt 注入 + 重试（行为不变）。
+	// Provider 是否实际约束解码取决于适配器和模型；本地验证始终执行。
 	NativeJSONSchema bool
 
 	// SchemaName 原生 json_schema 模式下的 schema 名称（默认 "structured_output"）
 	SchemaName string
+
+	// ToolOutput 以单一结果工具的参数返回对象，与 NativeJSONSchema 互斥。
+	ToolOutput bool
+	ToolName   string
+
+	// OutputSchema 可选的动态输出约束；nil 时使用 T 的生成 Schema。
+	OutputSchema *schema.Schema
 }
 
 // defaultConfig 返回默认配置
@@ -194,7 +202,8 @@ func WithTemperature(t float64) Option {
 // WithMaxRetries 设置最大重试次数
 //
 // 当 JSON 解析或验证失败时，会自动重试并在消息中附带错误信息，
-// 让 LLM 有机会纠正输出。默认值为 3
+// 让 LLM 有机会纠正输出。默认值为 3，即首次调用后最多修正 3 次。
+// Provider 错误、拒绝和截断不会作为格式错误自动重试。
 func WithMaxRetries(n int) Option {
 	return func(c *config) {
 		c.MaxRetries = n
@@ -224,8 +233,8 @@ func WithStrictMode(strict bool) Option {
 // WithNativeJSONSchema 启用 provider 原生 JSON Schema 强制解码
 //
 // 开启后把从类型 T 生成的（严格化）Schema 经 ResponseFormat 下发给 provider，
-// 由 provider 端约束解码，而非仅靠 prompt 注入 + 解析重试。对支持的 provider
-// 能从根本上保证输出合法；不支持的 provider 忽略该字段、自动退化为 prompt 注入。
+// 由支持该能力的 provider 约束解码；所有响应仍经过本地 Schema 验证。
+// 不保证适配器和模型支持原生格式；与 WithToolOutput 同时使用会在调用前报错。
 // name 为可选的 schema 名称（空则用 "structured_output"）。
 func WithNativeJSONSchema(name ...string) Option {
 	return func(c *config) {
@@ -234,6 +243,25 @@ func WithNativeJSONSchema(name ...string) Option {
 			c.SchemaName = name[0]
 		}
 	}
+}
+
+// WithToolOutput 使用单一合成结果工具返回 JSON 参数，不执行任何业务工具。
+// 每次请求携带同一结果 Schema 和 required 工具选择；参数仍须通过本地校验。
+// name 为空时使用 structured_output。与 WithNativeJSONSchema 互斥。
+// Provider 必须支持工具调用；未返回结果工具会按 WithMaxRetries 有限修正。
+func WithToolOutput(name ...string) Option {
+	return func(c *config) {
+		c.ToolOutput = true
+		if len(name) > 0 && name[0] != "" {
+			c.ToolName = name[0]
+		}
+	}
+}
+
+// WithOutputSchema 指定动态结果合同；Provider 原生格式、提示和本地验证使用同一快照。
+// 不会修改调用方的 Schema；仅传入该选项不会自动启用 Provider 的 strict 模式。
+func WithOutputSchema(definition *schema.Schema) Option {
+	return func(c *config) { c.OutputSchema = definition }
 }
 
 // ============== 核心函数 ==============
@@ -333,9 +361,53 @@ func generateInternal[T any](ctx context.Context, provider llm.Provider, message
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	if cfg.MaxRetries < 0 {
+		return zero, fmt.Errorf("structured output: max retries must not be negative")
+	}
+	if provider == nil {
+		return zero, fmt.Errorf("structured output: provider is nil")
+	}
+	if cfg.NativeJSONSchema && cfg.ToolOutput {
+		return zero, fmt.Errorf("structured output: native JSON schema and tool output are mutually exclusive")
+	}
+	mode := OutputModePrompt
+	if cfg.NativeJSONSchema {
+		mode = OutputModeNative
+	} else if cfg.ToolOutput {
+		mode = OutputModeTool
+	}
+	toolName := cfg.ToolName
+	if toolName == "" {
+		toolName = "structured_output"
+	}
+	definition := cfg.OutputSchema
+	if definition == nil {
+		definition = llm.SchemaOf[T]()
+	}
+	encoded, err := json.Marshal(definition)
+	if err != nil {
+		return zero, fmt.Errorf("structured output: encode schema: %w", err)
+	}
+	var frozen schema.Schema
+	decoder := json.NewDecoder(strings.NewReader(string(encoded)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&frozen); err != nil {
+		return zero, fmt.Errorf("structured output: clone schema: %w", err)
+	}
+	definition = &frozen
+	if cfg.NativeJSONSchema {
+		definition.Strict()
+	}
+	validator, err := schema.NewValidator(definition)
+	if err != nil {
+		return zero, fmt.Errorf("structured output: invalid schema: %w", err)
+	}
 
 	// 构建格式指令，生成包含 Schema 的系统提示
-	formatInstructions := buildFormatInstructions[T]()
+	formatInstructions := formatInstructionsFor(definition)
+	if cfg.ToolOutput {
+		formatInstructions = fmt.Sprintf("Return the result by calling %q exactly once. Its arguments must satisfy the tool's JSON Schema. Do not return the result as message text or call other tools.", toolName)
+	}
 
 	// 组装系统提示：自定义系统提示 + 格式指令
 	systemPrompt := formatInstructions
@@ -349,8 +421,7 @@ func generateInternal[T any](ctx context.Context, provider llm.Provider, message
 	allMessages = append(allMessages, messages...)
 
 	// 启用原生强制解码时，构造 provider 端的 json_schema 约束（一次构造、各次重试复用）。
-	// 用 Strict() 把 Schema 收紧（additionalProperties:false + 全字段 required），
-	// 配合 provider 的 strict 模式从根本上约束输出。
+	// 用 Strict() 把 Schema 收紧，并以同一快照完成本地验证。
 	var responseFormat *llm.ResponseFormat
 	if cfg.NativeJSONSchema {
 		schemaName := cfg.SchemaName
@@ -361,16 +432,22 @@ func generateInternal[T any](ctx context.Context, provider llm.Provider, message
 			Type: "json_schema",
 			JSONSchema: &llm.ResponseFormatJSONSchema{
 				Name:   schemaName,
-				Schema: llm.SchemaOf[T]().Strict(),
+				Schema: definition,
 				Strict: true,
 			},
 		}
+	}
+	var outputTools []llm.ToolDefinition
+	var toolChoice any
+	if cfg.ToolOutput {
+		outputTools = []llm.ToolDefinition{llm.NewToolDefinition(toolName, "Return the structured result matching the provided JSON Schema.", definition)}
+		toolChoice = "required"
 	}
 
 	// 创建 JSON 解析器
 	jsonParser := parser.NewJSONParser[T]().
 		WithStrictMode(cfg.StrictMode).
-		WithExtractJSON(true)
+		WithExtractJSON(false)
 
 	// 收集每次尝试的错误
 	var attempts []AttemptError
@@ -390,46 +467,59 @@ func generateInternal[T any](ctx context.Context, provider llm.Provider, message
 			MaxTokens:      cfg.MaxTokens,
 			Temperature:    cfg.Temperature,
 			ResponseFormat: responseFormat,
+			Tools:          outputTools,
+			ToolChoice:     toolChoice,
 		}
 
 		// 调用 LLM
-		resp, err := provider.Complete(ctx, req)
+		purpose := "structured.generate"
+		if attempt > 0 {
+			purpose = "structured.repair"
+		}
+		resp, err := llm.InvokeComplete(ctx, provider, req, purpose)
 		if err != nil {
-			return zero, fmt.Errorf("structured output: LLM 调用失败: %w", err)
+			return zero, fmt.Errorf("structured output: model call failed: %w", err)
+		}
+		if resp == nil {
+			return zero, fmt.Errorf("structured output: provider returned nil response")
 		}
 
-		// 尝试解析响应
-		result, parseErr := jsonParser.Parse(ctx, resp.Content)
+		// 先校验实际 JSON，再解码目标类型，避免 struct 投影掩盖未知字段或缺失值。
+		raw, parseErr := ExtractOutput(resp, mode, toolName)
+		if parseErr == nil {
+			parseErr = validator.ValidateJSON(raw)
+		}
+		var result T
+		if parseErr == nil {
+			result, parseErr = jsonParser.Parse(ctx, string(raw))
+		}
 		if parseErr == nil {
 			// 解析成功，返回结果
 			return result, nil
 		}
 
 		// 记录本次尝试的错误
+		output := resp.Content
+		if cfg.ToolOutput && len(resp.ToolCalls) > 0 {
+			encodedCalls, _ := json.Marshal(resp.ToolCalls)
+			output = string(encodedCalls)
+		}
 		attempts = append(attempts, AttemptError{
-			Output: resp.Content,
+			Output: output,
 			Err:    parseErr,
 		})
+		if errors.Is(parseErr, ErrRefused) || errors.Is(parseErr, ErrTruncated) {
+			return zero, &Error{Attempts: attempts}
+		}
 
 		// 如果还有重试机会，将错误信息追加到消息中
 		// 让 LLM 知道上一次输出的问题，以便修正
 		if attempt < maxAttempts-1 {
-			// 追加 LLM 上一次的响应
-			allMessages = append(allMessages, llm.Message{
-				Role:    llm.RoleAssistant,
-				Content: resp.Content,
-			})
-
-			// 追加修正提示
-			fixPrompt := fmt.Sprintf(
-				"你上一次的输出解析失败，错误信息: %s\n\n请严格按照要求的 JSON Schema 格式重新输出，确保：\n"+
-					"1. 输出合法的 JSON\n"+
-					"2. 包含所有必需字段\n"+
-					"3. 字段类型正确\n"+
-					"4. 不要包含任何非 JSON 内容",
-				parseErr.Error(),
-			)
-			allMessages = append(allMessages, llm.UserMessage(fixPrompt))
+			feedback, err := RepairMessages(resp, mode, toolName, parseErr)
+			if err != nil {
+				return zero, &Error{Attempts: attempts}
+			}
+			allMessages = append(allMessages, feedback...)
 		}
 	}
 
@@ -452,7 +542,10 @@ func generateInternal[T any](ctx context.Context, provider llm.Provider, message
 func buildFormatInstructions[T any]() string {
 	// 从 Go 类型生成 JSON Schema
 	s := llm.SchemaOf[T]()
+	return formatInstructionsFor(s)
+}
 
+func formatInstructionsFor(s *schema.Schema) string {
 	// 将 Schema 序列化为 JSON 字符串
 	schemaJSON, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

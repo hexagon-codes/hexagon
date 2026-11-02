@@ -18,7 +18,8 @@ type BudgetControlConfig struct {
 	// Cost 单次 run 的成本估算函数（per-run 成本维度，可选；消费 security/cost）。
 	Cost CostFunc
 	// Record 跨 run 累计记账 + 超限 fail-closed（cross-run 维度，可选；消费 security/cost）。
-	Record RecordUsageFunc
+	Record        RecordUsageFunc
+	RecordAttempt func(context.Context, hruntime.ModelAttempt) error
 }
 
 // BudgetControl 是预算的单一抽象：内部组合 Budget（per-run）与 CostControl（cross-run），
@@ -36,7 +37,7 @@ type BudgetControl struct {
 func NewBudgetControl(cfg BudgetControlConfig) BudgetControl {
 	return BudgetControl{
 		budget: Budget{Limits: cfg.Limits, Cost: cfg.Cost},
-		cost:   CostControl{Record: cfg.Record},
+		cost:   CostControl{Record: cfg.Record, RecordAttempt: cfg.RecordAttempt},
 	}
 }
 
@@ -48,12 +49,20 @@ func (b BudgetControl) BeforeLLM(ctx context.Context, state *hruntime.State) err
 	return b.cost.BeforeLLM(ctx, state)
 }
 
-// AfterLLM 依次执行 per-run 维度与跨 run 累计记账/封顶。
+// AfterLLM 处理已接受结果，不在此重复记录调用费用。
 func (b BudgetControl) AfterLLM(ctx context.Context, state *hruntime.State, resp *llm.CompletionResponse) error {
 	if err := b.budget.AfterLLM(ctx, state, resp); err != nil {
 		return err
 	}
 	return b.cost.AfterLLM(ctx, state, resp)
+}
+
+func (b BudgetControl) BeforeModelAttempt(ctx context.Context, state *hruntime.State, attempt hruntime.ModelAttempt) error {
+	return b.budget.BeforeModelAttempt(ctx, state, attempt)
+}
+
+func (b BudgetControl) AfterModelAttempt(ctx context.Context, state *hruntime.State, attempt hruntime.ModelAttempt) error {
+	return b.cost.AfterModelAttempt(ctx, state, attempt)
 }
 
 // BeforeTool 依次委托两者。

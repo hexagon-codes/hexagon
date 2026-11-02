@@ -17,7 +17,10 @@ type TokenCounter func(messages []llm.Message) int
 
 // Compactor 把消息历史压缩为更短的等价历史。以依赖注入方式提供，使「摘要式压缩」
 // （需 LLM）等策略可插拔；nil 时 Compaction 用内置策略「保留全部 system + 最近 N 条」。
-type Compactor func(ctx context.Context, messages []llm.Message) []llm.Message
+// 自定义压缩须完整保留待完成调用组；改写消息语义时应清除该消息的 ProviderContinuation，
+// 不可同时回放改写后的正文与旧协议输出。
+// 返回错误时不采用候选消息，调用方保留原消息并处理失败。
+type Compactor func(ctx context.Context, messages []llm.Message) ([]llm.Message, error)
 
 // Compaction 是上下文压缩中间件：在每次 LLM 调用前估算消息历史 token，超过阈值即压缩
 // state.Messages，并发 ContextCompacted{before,after} 事件。
@@ -26,8 +29,7 @@ type Compactor func(ctx context.Context, messages []llm.Message) []llm.Message
 //   - 未提供 ShouldCompact 且 MaxTokens <= 0 时完全关闭。
 //   - token 估算（Count）与压缩策略（Compact）均可注入；默认估算为中文感知估算、默认压缩为
 //     「保留 system + 最近 KeepRecent 条」截断（不需 LLM）；摘要式压缩由调用方注入 Compact。
-//   - 压缩可能丢弃中间的 assistant/tool 配对，但 runner 在发送前会 sanitize 孤立 tool
-//     message（见 runner.sanitizeToolCallSequence），故协议序列仍合规。
+//   - 内置策略以完整 assistant/tool 调用组为截断边界，保留协议续传与工具返回的对应关系。
 //
 // 线程安全：Compaction 自身无可变状态；注入回调的并发安全由调用方负责。
 type Compaction struct {
@@ -40,6 +42,8 @@ type Compaction struct {
 	KeepRecent int
 	// Count token 估算函数；nil 时用内置中文感知估算。
 	Count TokenCounter
+	// CountRequest 覆盖完整请求；优先于 Count。Count 仅覆盖消息部分，工具/输出 Schema 仍计入。
+	CountRequest RequestTokenCounter
 	// Compact 压缩函数；nil 时用内置「保留 system + 最近 KeepRecent」。
 	Compact Compactor
 }
@@ -51,11 +55,11 @@ func (c Compaction) count(messages []llm.Message) int {
 	return estimateTokens(messages)
 }
 
-func (c Compaction) compact(ctx context.Context, messages []llm.Message) []llm.Message {
+func (c Compaction) compact(ctx context.Context, messages []llm.Message) ([]llm.Message, error) {
 	if c.Compact != nil {
-		return c.Compact(ctx, messages)
+		return c.Compact(ctx, hruntime.CloneOutputMessages(messages))
 	}
-	return keepRecent(messages, c.keepRecent())
+	return keepRecent(messages, c.keepRecent()), nil
 }
 
 func (c Compaction) keepRecent() int {
@@ -70,25 +74,34 @@ func (c Compaction) BeforeLLM(ctx context.Context, state *hruntime.State) error 
 	if state == nil {
 		return nil
 	}
-	if c.ShouldCompact != nil {
-		if !c.ShouldCompact(state.Messages) {
-			return nil
-		}
-	} else if c.MaxTokens <= 0 {
+	if c.ShouldCompact == nil && c.MaxTokens <= 0 {
 		return nil
 	}
-	before := c.count(state.Messages)
-	if c.ShouldCompact == nil && before <= c.MaxTokens {
+	request, err := state.Request.Generation.ApplyTo(llm.CompletionRequest{Model: state.Request.ModelName, Messages: state.Messages, Tools: state.Request.Tools, Metadata: state.Request.Metadata})
+	if err != nil {
+		return fmt.Errorf("prepare compaction request: %w", err)
+	}
+	work, err := c.Prepare(request, 0)
+	if err != nil {
+		return err
+	}
+	if work == nil {
 		return nil
 	}
-	compacted := c.compact(ctx, state.Messages)
-	after := c.count(compacted)
+	candidate, err := work.Run(ctx)
+	if err != nil {
+		return err
+	}
+	compacted, err := AdoptCompaction(candidate, 0, state.Messages)
+	if err != nil {
+		return err
+	}
 	state.Messages = compacted
 	_ = state.Emit(ctx, hruntime.Event{
 		Type: hruntime.EventContextCompacted,
 		Metadata: map[string]any{
-			"before_tokens": before,
-			"after_tokens":  after,
+			"before_tokens": candidate.BeforeTokens,
+			"after_tokens":  candidate.AfterTokens,
 			"max_tokens":    c.MaxTokens,
 		},
 	})
@@ -126,7 +139,7 @@ func estimateTokens(messages []llm.Message) int {
 	return total
 }
 
-// keepRecent 内置压缩：保留全部 system 消息 + 最近 keep 条非 system 消息，保持原序。
+// keepRecent 保留全部 system 与最近 keep 条非 system 消息，窗口向前扩展到完整调用组。
 func keepRecent(messages []llm.Message, keep int) []llm.Message {
 	if len(messages) == 0 {
 		return messages
@@ -142,18 +155,22 @@ func keepRecent(messages []llm.Message, keep int) []llm.Message {
 	if drop <= 0 {
 		return messages // 无需压缩
 	}
+	keepStart := len(messages)
+	for i, message := range messages {
+		if message.Role != llm.RoleSystem {
+			if drop == 0 {
+				keepStart = i
+				break
+			}
+			drop--
+		}
+	}
+	_, keepStart = RecentMessageBounds(messages, len(messages)-keepStart)
 	out := make([]llm.Message, 0, len(messages))
-	dropped := 0
-	for _, m := range messages {
-		if m.Role == llm.RoleSystem {
-			out = append(out, m) // system 始终保留
-			continue
+	for i, message := range messages {
+		if message.Role == llm.RoleSystem || i >= keepStart {
+			out = append(out, message)
 		}
-		if dropped < drop {
-			dropped++
-			continue // 丢弃最早的非 system 消息
-		}
-		out = append(out, m)
 	}
 	return out
 }
@@ -172,6 +189,7 @@ type HeuristicCompressOptions struct {
 // 用户各轮原文和多模态内容完整保留，不依据正文相同或文本长度推断重复消息和媒体。
 // cfg 为零值时使用默认参数。
 func HeuristicCompress(history []llm.Message, cfg HeuristicCompressOptions) []llm.Message {
+	history = hruntime.CloneOutputMessages(history)
 	if cfg.KeepRecentToolPairs <= 0 {
 		cfg.KeepRecentToolPairs = 3
 	}
@@ -204,9 +222,15 @@ func HeuristicCompress(history []llm.Message, cfg HeuristicCompressOptions) []ll
 		if role == "assistant" {
 			runes := []rune(m.Content)
 			if len(runes) > cfg.MaxAssistantChars {
+				// 调用组的原始协议条目与正文保持一致，不能只缩短显示正文。
+				if m.ProviderContinuation != nil && len(m.ToolCalls) > 0 {
+					out = append(out, m)
+					continue
+				}
 				head := cfg.MaxAssistantChars * 60 / 100
 				tail := cfg.MaxAssistantChars * 20 / 100
 				m.Content = string(runes[:head]) + "\n...[truncated]...\n" + string(runes[len(runes)-tail:])
+				m.ProviderContinuation = nil
 			}
 		}
 

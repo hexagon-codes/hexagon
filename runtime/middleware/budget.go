@@ -89,6 +89,9 @@ func (b Budget) BeforeLLM(ctx context.Context, state *hruntime.State) error {
 	usedTokens := 0
 	if state != nil {
 		usedTokens = state.Usage.TotalTokens
+		if lowerBound, ok := state.Attributes[hruntime.UsageKnownTokenLowerBoundMetadataKey].(int); ok && lowerBound > usedTokens {
+			usedTokens = lowerBound
+		}
 	}
 	now := b.clock()
 	elapsed := now.Sub(b.ensureStart(state, now))
@@ -137,6 +140,11 @@ func (b Budget) breach(tokens int, elapsed time.Duration, cost float64) string {
 }
 
 // AfterLLM 无操作（预算检查在 BeforeLLM 完成）。
+// BeforeModelAttempt 在 fallback 或 wrapper 的每次实际委托前检查最新消耗。
+func (b Budget) BeforeModelAttempt(ctx context.Context, state *hruntime.State, _ hruntime.ModelAttempt) error {
+	return b.BeforeLLM(ctx, state)
+}
+
 func (Budget) AfterLLM(context.Context, *hruntime.State, *llm.CompletionResponse) error {
 	return nil
 }

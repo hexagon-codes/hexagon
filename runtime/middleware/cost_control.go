@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	hruntime "github.com/hexagon-codes/hexagon/runtime"
@@ -23,38 +24,38 @@ type RecordUsageFunc func(model string, usage llm.Usage) error
 //   - CostControl 经注入的 RecordUsageFunc 把每次调用用量写入**跨 run 共享累加器**，
 //     故对多 run agent 实现"agent 全程累计封顶"——这正是 Budget per-run 模型补不上的语义。
 //
-// 工作方式：在 AfterLLM（本次 LLM 调用已返回）把 resp.Usage 记入累加器；若累计成本突破
-// 预算，累加器返回错误，本中间件发 BudgetExceeded 事件并 fail-closed 中断本次 run。
-// 由于累加器在 agent 的多次 run 间共享，超限会在"累计跨过预算的那一次调用"处触发。
+// 在 AfterModelAttempt 记录每次实际调用的已知用量，包括失败/取消；未知回执不当零。
+// 累加器错误由执行核作为记账/预算错误处理，不冒充 Provider 错误或触发模型重做。
 //
 // 线程安全：CostControl 自身无可变状态；并发安全性由注入的 RecordUsageFunc（累加器）负责。
 type CostControl struct {
 	// Record 跨 run 累计记账 + fail-closed 检查函数；nil 时本中间件为 no-op。
 	Record RecordUsageFunc
+	// RecordAttempt 供持久账本按实际 attempt ID 幂等入账，优先于简便 Record。
+	// 返回的错误保持原分类；预算耗尽由宿主显式包装 ErrBudgetExceeded。
+	RecordAttempt func(context.Context, hruntime.ModelAttempt) error
 }
 
-// BeforeLLM 无操作（累计记账在 AfterLLM 完成）。
+// BeforeLLM 无操作（累计记账在尝试结束时完成）。
 func (CostControl) BeforeLLM(context.Context, *hruntime.State) error { return nil }
 
-// AfterLLM 把本次 LLM 调用的用量记入跨 run 累加器；累计超预算时 fail-closed。
-func (c CostControl) AfterLLM(ctx context.Context, state *hruntime.State, resp *llm.CompletionResponse) error {
-	if c.Record == nil || resp == nil {
+// AfterLLM 不重复记账，成功结果采用与实际调用用量分开。
+func (CostControl) AfterLLM(context.Context, *hruntime.State, *llm.CompletionResponse) error {
+	return nil
+}
+
+func (c CostControl) AfterModelAttempt(ctx context.Context, _ *hruntime.State, attempt hruntime.ModelAttempt) error {
+	if !attempt.ProviderCalled || !attempt.UsageKnown {
 		return nil
 	}
-	model := ""
-	if state != nil {
-		model, _ = state.Attributes["model"].(string)
+	if c.RecordAttempt != nil {
+		return c.RecordAttempt(ctx, attempt)
 	}
-	if err := c.Record(model, resp.Usage); err != nil {
-		_ = state.Emit(ctx, hruntime.Event{
-			Type:  hruntime.EventBudgetExceeded,
-			Error: err,
-			Metadata: map[string]any{
-				"dimension": "cumulative_cost",
-				"model":     model,
-			},
-		})
-		return err
+	if c.Record == nil {
+		return nil
+	}
+	if err := c.Record(attempt.Model, attempt.Usage); err != nil {
+		return fmt.Errorf("%w: %w", hruntime.ErrBudgetExceeded, err)
 	}
 	return nil
 }

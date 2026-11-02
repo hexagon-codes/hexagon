@@ -220,7 +220,7 @@ func TestGenerate_RetryOnInvalidResponse(t *testing.T) {
 		lastMsgs := provider.lastRequest.Messages
 		found := false
 		for _, msg := range lastMsgs {
-			if msg.Role == llm.RoleUser && strings.Contains(msg.Content, "解析失败") {
+			if msg.Role == llm.RoleUser && strings.Contains(msg.Content, "validation failed") {
 				found = true
 				break
 			}
@@ -446,8 +446,8 @@ func TestGenerate_LLMError(t *testing.T) {
 	if !strings.Contains(err.Error(), "rate limit exceeded") {
 		t.Errorf("错误信息应包含原始 LLM 错误, 实际: %s", err.Error())
 	}
-	if !strings.Contains(err.Error(), "LLM 调用失败") {
-		t.Errorf("错误信息应包含 'LLM 调用失败', 实际: %s", err.Error())
+	if !strings.Contains(err.Error(), "model call failed") {
+		t.Errorf("错误信息应包含 'model call failed', 实际: %s", err.Error())
 	}
 }
 
