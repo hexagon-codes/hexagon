@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"encoding/json"
+	wire "github.com/a2aproject/a2a-go/v2/a2a"
 	"time"
 )
 
@@ -13,6 +14,12 @@ import (
 // Agent Card 是 A2A 协议的核心概念，描述了 Agent 的基本信息、能力和技能。
 // 客户端通过获取 Agent Card 来了解如何与 Agent 交互。
 type AgentCard struct {
+	SecuritySchemes      wire.NamedSecuritySchemes        `json:"securitySchemes,omitempty"`
+	SecurityRequirements wire.SecurityRequirementsOptions `json:"securityRequirements,omitempty"`
+	Signatures           []wire.AgentCardSignature        `json:"signatures,omitempty"`
+	IconURL              string                           `json:"iconUrl,omitempty"`
+	// SupportedInterfaces 仅声明实际提供的协议绑定与端点。
+	SupportedInterfaces []AgentInterface `json:"supportedInterfaces,omitempty"`
 	// Name Agent 名称（必需）
 	Name string `json:"name"`
 
@@ -58,6 +65,7 @@ type AgentProvider struct {
 
 // AgentCapabilities Agent 能力配置
 type AgentCapabilities struct {
+	Extensions []wire.AgentExtension `json:"extensions,omitempty"`
 	// Streaming 是否支持流式响应
 	Streaming bool `json:"streaming,omitempty"`
 
@@ -70,6 +78,7 @@ type AgentCapabilities struct {
 
 // AgentSkill Agent 技能
 type AgentSkill struct {
+	SecurityRequirements wire.SecurityRequirementsOptions `json:"securityRequirements,omitempty"`
 	// ID 技能 ID
 	ID string `json:"id"`
 
@@ -199,17 +208,19 @@ const (
 	TaskStateFailed TaskState = "failed"
 
 	// TaskStateCanceled 已取消 - 任务被取消
-	TaskStateCanceled TaskState = "canceled"
+	TaskStateCanceled     TaskState = "canceled"
+	TaskStateRejected     TaskState = "rejected"
+	TaskStateAuthRequired TaskState = "auth-required"
 )
 
 // IsTerminal 检查状态是否为终态
 func (s TaskState) IsTerminal() bool {
-	return s == TaskStateCompleted || s == TaskStateFailed || s == TaskStateCanceled
+	return s == TaskStateCompleted || s == TaskStateFailed || s == TaskStateCanceled || s == TaskStateRejected
 }
 
 // IsActive 检查状态是否为活动状态
 func (s TaskState) IsActive() bool {
-	return s == TaskStateSubmitted || s == TaskStateWorking || s == TaskStateInputRequired
+	return s == TaskStateSubmitted || s == TaskStateWorking || s == TaskStateInputRequired || s == TaskStateAuthRequired
 }
 
 // ============== Message ==============
@@ -228,6 +239,11 @@ const (
 // Message 消息
 // 消息是 Agent 与用户之间的通信单元，支持多模态内容。
 type Message struct {
+	ID               string   `json:"messageId"`
+	TaskID           string   `json:"taskId,omitempty"`
+	ContextID        string   `json:"contextId,omitempty"`
+	Extensions       []string `json:"extensions,omitempty"`
+	ReferenceTaskIDs []string `json:"referenceTaskIds,omitempty"`
 	// Role 消息角色 (user, agent)
 	Role Role `json:"role"`
 
@@ -254,31 +270,11 @@ func (m *Message) GetTextContent() string {
 
 // UnmarshalJSON 自定义 JSON 反序列化
 func (m *Message) UnmarshalJSON(data []byte) error {
-	// 使用辅助结构避免递归调用
-	type messageAlias struct {
-		Role     Role              `json:"role"`
-		Parts    []json.RawMessage `json:"parts"`
-		Metadata map[string]any    `json:"metadata,omitempty"`
-	}
-
-	var alias messageAlias
-	if err := json.Unmarshal(data, &alias); err != nil {
+	var value wire.Message
+	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
-
-	m.Role = alias.Role
-	m.Metadata = alias.Metadata
-
-	// 反序列化 Parts
-	m.Parts = make([]Part, 0, len(alias.Parts))
-	for _, rawPart := range alias.Parts {
-		part, err := UnmarshalPart(rawPart)
-		if err != nil {
-			return err
-		}
-		m.Parts = append(m.Parts, part)
-	}
-
+	*m = *localMessage(&value)
 	return nil
 }
 
@@ -307,6 +303,7 @@ type Part interface {
 
 // TextPart 文本部分
 type TextPart struct {
+	PartMetadata
 	// Text 文本内容
 	Text string `json:"text"`
 }
@@ -318,14 +315,16 @@ func (p *TextPart) Type() PartType {
 
 // MarshalJSON 自定义 JSON 序列化
 func (p *TextPart) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]any{
-		"type": PartTypeText,
-		"text": p.Text,
-	})
+	value, err := wirePart(p)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(value)
 }
 
 // FilePart 文件部分
 type FilePart struct {
+	PartMetadata
 	// File 文件内容
 	File FileContent `json:"file"`
 }
@@ -337,10 +336,11 @@ func (p *FilePart) Type() PartType {
 
 // MarshalJSON 自定义 JSON 序列化
 func (p *FilePart) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]any{
-		"type": PartTypeFile,
-		"file": p.File,
-	})
+	value, err := wirePart(p)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(value)
 }
 
 // FileContent 文件内容
@@ -360,8 +360,9 @@ type FileContent struct {
 
 // DataPart 结构化数据部分
 type DataPart struct {
+	PartMetadata
 	// Data 结构化数据
-	Data map[string]any `json:"data"`
+	Data any `json:"data"`
 }
 
 // Type 返回数据类型
@@ -371,66 +372,24 @@ func (p *DataPart) Type() PartType {
 
 // MarshalJSON 自定义 JSON 序列化
 func (p *DataPart) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]any{
-		"type": PartTypeData,
-		"data": p.Data,
-	})
+	value, err := wirePart(p)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(value)
 }
 
 // UnmarshalPart 从 JSON 反序列化 Part
 func UnmarshalPart(data []byte) (Part, error) {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	var value wire.Part
+	if err := json.Unmarshal(data, &value); err != nil {
 		return nil, err
 	}
-
-	// 获取类型
-	var typeStr string
-	if typeRaw, ok := raw["type"]; ok {
-		if err := json.Unmarshal(typeRaw, &typeStr); err != nil {
-			return nil, err
-		}
-	}
-
-	switch PartType(typeStr) {
-	case PartTypeText:
-		var text string
-		if textRaw, ok := raw["text"]; ok {
-			if err := json.Unmarshal(textRaw, &text); err != nil {
-				return nil, err
-			}
-		}
-		return &TextPart{Text: text}, nil
-
-	case PartTypeFile:
-		var file FileContent
-		if fileRaw, ok := raw["file"]; ok {
-			if err := json.Unmarshal(fileRaw, &file); err != nil {
-				return nil, err
-			}
-		}
-		return &FilePart{File: file}, nil
-
-	case PartTypeData:
-		var data map[string]any
-		if dataRaw, ok := raw["data"]; ok {
-			if err := json.Unmarshal(dataRaw, &data); err != nil {
-				return nil, err
-			}
-		}
-		return &DataPart{Data: data}, nil
-
-	default:
-		// 默认尝试作为文本处理
-		var text string
-		if textRaw, ok := raw["text"]; ok {
-			if err := json.Unmarshal(textRaw, &text); err != nil {
-				return nil, err
-			}
-			return &TextPart{Text: text}, nil
-		}
+	result := localPart(&value)
+	if result == nil {
 		return nil, ErrInvalidMessage
 	}
+	return result, nil
 }
 
 // UnmarshalParts 从 JSON 数组反序列化 Parts
@@ -456,6 +415,8 @@ func UnmarshalParts(data []byte) ([]Part, error) {
 // Artifact 任务产物
 // 产物是任务执行过程中生成的输出，可以是文本、文件或结构化数据。
 type Artifact struct {
+	ID         string   `json:"artifactId"`
+	Extensions []string `json:"extensions,omitempty"`
 	// Name 产物名称
 	Name string `json:"name,omitempty"`
 
@@ -494,39 +455,11 @@ func (a *Artifact) GetTextContent() string {
 
 // UnmarshalJSON 自定义 JSON 反序列化
 func (a *Artifact) UnmarshalJSON(data []byte) error {
-	// 使用辅助结构避免递归调用
-	type artifactAlias struct {
-		Name        string            `json:"name,omitempty"`
-		Description string            `json:"description,omitempty"`
-		Parts       []json.RawMessage `json:"parts"`
-		Index       int               `json:"index,omitempty"`
-		Append      bool              `json:"append,omitempty"`
-		LastChunk   bool              `json:"lastChunk,omitempty"`
-		Metadata    map[string]any    `json:"metadata,omitempty"`
-	}
-
-	var alias artifactAlias
-	if err := json.Unmarshal(data, &alias); err != nil {
+	var value wire.Artifact
+	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
-
-	a.Name = alias.Name
-	a.Description = alias.Description
-	a.Index = alias.Index
-	a.Append = alias.Append
-	a.LastChunk = alias.LastChunk
-	a.Metadata = alias.Metadata
-
-	// 反序列化 Parts
-	a.Parts = make([]Part, 0, len(alias.Parts))
-	for _, rawPart := range alias.Parts {
-		part, err := UnmarshalPart(rawPart)
-		if err != nil {
-			return err
-		}
-		a.Parts = append(a.Parts, part)
-	}
-
+	*a = localArtifact(&value)
 	return nil
 }
 
@@ -635,6 +568,10 @@ func NewJSONRPCErrorResponse(id any, err *Error) *JSONRPCResponse {
 
 // SendMessageRequest 发送消息请求
 type SendMessageRequest struct {
+	// ReturnImmediately 请求异步返回；不支持的服务端必须明确返回错误。
+	ReturnImmediately bool `json:"-"`
+	// HistoryLimit 区分未指定历史与显式零条历史。
+	HistoryLimit *int `json:"-"`
 	// TaskID 任务 ID（可选，不提供则创建新任务）
 	TaskID string `json:"id,omitempty"`
 
@@ -663,6 +600,7 @@ type SendMessageResponse = Task
 
 // GetTaskRequest 获取任务请求
 type GetTaskRequest struct {
+	HistoryLimit *int `json:"-"`
 	// ID 任务 ID
 	ID string `json:"id"`
 
@@ -675,6 +613,10 @@ type GetTaskResponse = Task
 
 // ListTasksRequest 列出任务请求
 type ListTasksRequest struct {
+	PageToken            string     `json:"pageToken,omitempty"`
+	HistoryLimit         *int       `json:"-"`
+	IncludeArtifacts     bool       `json:"includeArtifacts,omitempty"`
+	StatusTimestampAfter *time.Time `json:"statusTimestampAfter,omitempty"`
 	// SessionID 会话 ID（可选，过滤条件）
 	SessionID string `json:"sessionId,omitempty"`
 
@@ -690,6 +632,8 @@ type ListTasksRequest struct {
 
 // ListTasksResponse 列出任务响应
 type ListTasksResponse struct {
+	PageSize      int    `json:"pageSize"`
+	NextPageToken string `json:"nextPageToken"`
 	// Tasks 任务列表
 	Tasks []*Task `json:"tasks"`
 
@@ -699,6 +643,7 @@ type ListTasksResponse struct {
 
 // CancelTaskRequest 取消任务请求
 type CancelTaskRequest struct {
+	Metadata map[string]any `json:"metadata,omitempty"`
 	// ID 任务 ID
 	ID string `json:"id"`
 }
@@ -749,6 +694,8 @@ type StreamEvent interface {
 
 // TaskStatusEvent 任务状态事件
 type TaskStatusEvent struct {
+	ContextID string         `json:"contextId"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
 	// ID 任务 ID
 	ID string `json:"id"`
 
@@ -766,6 +713,8 @@ func (e *TaskStatusEvent) EventType() string {
 
 // ArtifactEvent 产物事件
 type ArtifactEvent struct {
+	ContextID string         `json:"contextId"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
 	// ID 任务 ID
 	ID string `json:"id"`
 
@@ -806,7 +755,8 @@ func (e *DoneEvent) EventType() string {
 func NewTask(id string) *Task {
 	now := time.Now()
 	return &Task{
-		ID: id,
+		ID:        id,
+		SessionID: wire.NewContextID(),
 		Status: TaskStatus{
 			State:     TaskStateSubmitted,
 			Timestamp: now,
@@ -822,6 +772,7 @@ func NewTask(id string) *Task {
 // NewTextMessage 创建文本消息
 func NewTextMessage(role Role, text string) Message {
 	return Message{
+		ID:   wire.NewMessageID(),
 		Role: role,
 		Parts: []Part{
 			&TextPart{Text: text},
@@ -842,6 +793,7 @@ func NewAgentMessage(text string) Message {
 // NewTextArtifact 创建文本产物
 func NewTextArtifact(name, text string) Artifact {
 	return Artifact{
+		ID:   string(wire.NewArtifactID()),
 		Name: name,
 		Parts: []Part{
 			&TextPart{Text: text},
@@ -858,7 +810,7 @@ func NewAgentCard(name, url, version string) *AgentCard {
 		Capabilities: AgentCapabilities{
 			Streaming: true,
 		},
-		DefaultInputModes:  []string{"text"},
-		DefaultOutputModes: []string{"text"},
+		DefaultInputModes:  []string{"text/plain"},
+		DefaultOutputModes: []string{"text/plain"},
 	}
 }

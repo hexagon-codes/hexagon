@@ -880,7 +880,7 @@ func TestClientParseSSEEvent(t *testing.T) {
 		{
 			name:      "task-status",
 			eventType: EventTypeTaskStatus,
-			data:      `{"id":"t1","status":{"state":"working"}}`,
+			data:      `{"jsonrpc":"2.0","id":1,"result":{"statusUpdate":{"taskId":"t1","contextId":"c1","status":{"state":"TASK_STATE_WORKING"}}}}`,
 			check: func(e StreamEvent) bool {
 				ev, ok := e.(*TaskStatusEvent)
 				return ok && ev.ID == "t1" && ev.Status.State == TaskStateWorking
@@ -889,7 +889,7 @@ func TestClientParseSSEEvent(t *testing.T) {
 		{
 			name:      "artifact",
 			eventType: EventTypeArtifact,
-			data:      `{"id":"t1","artifact":{"name":"r","parts":[{"type":"text","text":"hi"}]}}`,
+			data:      `{"jsonrpc":"2.0","id":1,"result":{"artifactUpdate":{"taskId":"t1","contextId":"c1","artifact":{"artifactId":"a1","name":"r","parts":[{"text":"hi"}]}}}}`,
 			check: func(e StreamEvent) bool {
 				ev, ok := e.(*ArtifactEvent)
 				return ok && ev.Artifact.GetTextContent() == "hi"
@@ -898,18 +898,18 @@ func TestClientParseSSEEvent(t *testing.T) {
 		{
 			name:      "error",
 			eventType: EventTypeError,
-			data:      `{"error":{"code":-32001,"message":"not found"}}`,
+			data:      `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"not found"}}`,
 			check: func(e StreamEvent) bool {
 				ev, ok := e.(*ErrorEvent)
 				return ok && ev.Error.Code == CodeTaskNotFound
 			},
 		},
 		{
-			name:      "done带task",
+			name:      "task快照",
 			eventType: EventTypeDone,
-			data:      `{"task":{"id":"t1","status":{"state":"completed"}}}`,
+			data:      `{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"t1","contextId":"c1","status":{"state":"TASK_STATE_COMPLETED"}}}}`,
 			check: func(e StreamEvent) bool {
-				ev, ok := e.(*DoneEvent)
+				ev, ok := e.(*TaskEvent)
 				return ok && ev.Task != nil && ev.Task.ID == "t1"
 			},
 		},
@@ -923,11 +923,12 @@ func TestClientParseSSEEvent(t *testing.T) {
 			},
 		},
 		{
-			name:      "未知事件类型返回nil",
+			name:      "非法事件返回错误",
 			eventType: "mystery",
 			data:      `{}`,
 			check: func(e StreamEvent) bool {
-				return e == nil
+				_, ok := e.(*ErrorEvent)
+				return ok
 			},
 		},
 	}
