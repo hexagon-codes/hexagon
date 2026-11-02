@@ -60,7 +60,7 @@ type StreamingTaskHandler interface {
 	//   - msg: 收到的消息
 	//
 	// 返回:
-	//   - <-chan *TaskUpdate: 任务更新流
+	//   - <-chan *TaskUpdate: 任务更新流；生产者停止后台工作后必须关闭，即使已经发出Final或收到取消。
 	//   - error: 处理错误
 	HandleTaskStream(ctx context.Context, task *Task, msg *Message) (<-chan *TaskUpdate, error)
 }

@@ -434,7 +434,11 @@ func (s *Server) handleSendMessageStream(ctx context.Context, w http.ResponseWri
 		s.writeSSEError(w, beginErr)
 		return
 	}
-	defer release()
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
 	ctx = runCtx
 	task = currentTask
 	normalizeMessage(&req.Message, task)
@@ -505,7 +509,26 @@ func (s *Server) handleSendMessageStream(ctx context.Context, w http.ResponseWri
 		emit(update, err)
 		return
 	}
-	updates, err := stream.HandleTaskStream(ctx, task, &req.Message)
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	updates, err := stream.HandleTaskStream(streamCtx, task, &req.Message)
+	if updates != nil {
+		// HTTP结束只停止投递；生产者退出前仍持有本代执行归属。
+		defer func() {
+			cancelStream()
+			complete := release
+			release = nil
+			go func() {
+				for range updates {
+				}
+				complete()
+			}()
+		}()
+	} else {
+		defer cancelStream()
+		if err == nil {
+			err = fmt.Errorf("streaming task handler returned a nil stream")
+		}
+	}
 	if err != nil {
 		emit(nil, err)
 		return
