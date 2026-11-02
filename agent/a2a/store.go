@@ -58,7 +58,8 @@ type MemoryTaskStore struct {
 	taskTTL time.Duration
 
 	// done 用于通知清理协程停止
-	done chan struct{}
+	done        chan struct{}
+	cleanupDone chan struct{}
 
 	mu sync.RWMutex
 }
@@ -74,17 +75,13 @@ func NewMemoryTaskStore(opts ...MemoryStoreOption) *MemoryTaskStore {
 		pushConfigs:  make(map[string]*PushNotificationConfig),
 		maxTasks:     10000,
 		taskTTL:      24 * time.Hour,
-		done:         make(chan struct{}),
 	}
 
 	for _, opt := range opts {
 		opt(s)
 	}
 
-	// 启动清理协程
-	if s.taskTTL > 0 {
-		go s.cleanupLoop()
-	}
+	s.startCleanup()
 
 	return s
 }
@@ -330,20 +327,50 @@ func (s *MemoryTaskStore) cleanupOldTasks() {
 }
 
 // Close 关闭内存任务存储，停止清理协程
-// 必须在不再使用 MemoryTaskStore 时调用，否则清理协程会泄漏。
+// 可重复调用；返回时本次清理协程已退出，不删除已存储的任务。
 func (s *MemoryTaskStore) Close() {
-	close(s.done)
+	s.mu.Lock()
+	done, finished := s.done, s.cleanupDone
+	if done != nil {
+		close(done)
+		s.done = nil
+	}
+	s.mu.Unlock()
+	if finished != nil {
+		<-finished
+	}
+}
+
+// startCleanup 为服务器重启恢复清理工作，保留已有任务与配置。
+func (s *MemoryTaskStore) startCleanup() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done != nil {
+		return
+	}
+	s.done = make(chan struct{})
+	s.cleanupDone = make(chan struct{})
+	if s.taskTTL <= 0 {
+		close(s.cleanupDone)
+		return
+	}
+	go s.cleanupLoop(s.done, s.cleanupDone, s.taskTTL)
 }
 
 // cleanupLoop 定期清理过期任务
 // 通过 done channel 接收停止信号，避免 goroutine 泄漏。
-func (s *MemoryTaskStore) cleanupLoop() {
-	ticker := time.NewTicker(s.taskTTL / 10)
+func (s *MemoryTaskStore) cleanupLoop(done <-chan struct{}, finished chan struct{}, ttl time.Duration) {
+	defer close(finished)
+	interval := ttl / 10
+	if interval <= 0 {
+		interval = time.Nanosecond
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-s.done:
+		case <-done:
 			return
 		case <-ticker.C:
 			s.cleanupExpiredTasks()

@@ -41,6 +41,9 @@ type Server struct {
 	// pushStore 推送配置存储
 	pushStore PushConfigStore
 
+	// ownedStore 仅记录服务器自行创建的存储，注入的存储由调用者管理。
+	ownedStore *MemoryTaskStore
+
 	// pushService 推送服务
 	pushService PushService
 
@@ -83,6 +86,7 @@ func NewServer(card *AgentCard, handler TaskHandler, opts ...ServerOption) *Serv
 	}
 	if s.store == nil || s.pushStore == nil {
 		memStore := NewMemoryTaskStore()
+		s.ownedStore = memStore
 		if s.store == nil {
 			s.store = memStore
 		}
@@ -127,6 +131,9 @@ func (s *Server) Start(addr string) error {
 	if s.running.Load() {
 		return fmt.Errorf("server already running")
 	}
+	if s.ownedStore != nil {
+		s.ownedStore.startCleanup()
+	}
 
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
@@ -143,6 +150,9 @@ func (s *Server) Start(addr string) error {
 
 	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		s.running.Store(false)
+		if s.ownedStore != nil {
+			s.ownedStore.Close()
+		}
 		return err
 	}
 
@@ -151,6 +161,9 @@ func (s *Server) Start(addr string) error {
 
 // Stop 停止服务器
 func (s *Server) Stop(ctx context.Context) error {
+	if s.ownedStore != nil {
+		defer s.ownedStore.Close()
+	}
 	if !s.running.Load() {
 		return nil
 	}
