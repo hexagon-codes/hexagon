@@ -80,7 +80,7 @@ type comparisonState struct {
 	Data   map[string]any
 }
 
-func (s comparisonState) Clone() graph.State {
+func (s comparisonState) Clone() (graph.State, error) {
 	clone := s
 	if s.Data != nil {
 		clone.Data = make(map[string]any, len(s.Data))
@@ -88,7 +88,7 @@ func (s comparisonState) Clone() graph.State {
 			clone.Data[k] = v
 		}
 	}
-	return clone
+	return clone, nil
 }
 
 // BenchmarkComparisonGraphLinear 对标线性图编排
@@ -430,7 +430,7 @@ func BenchmarkComparisonMemoryEfficiency(b *testing.B) {
 			for j := 0; j < 1000; j++ {
 				state.Set(fmt.Sprintf("key-%d", j), j)
 			}
-			_ = state.Clone()
+			_, _ = state.Clone()
 		}
 	})
 

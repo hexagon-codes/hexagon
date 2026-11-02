@@ -1,17 +1,13 @@
 // Package graph 提供 Hexagon AI Agent 框架的图编排引擎
 package graph
 
-import (
-	"encoding/json"
-	"fmt"
-	"os"
-)
+import "github.com/hexagon-codes/toolkit/util/reflectx"
 
 // State 是图状态的约束接口
 // 所有状态类型都必须实现此接口
 type State interface {
-	// Clone 创建状态的深拷贝
-	Clone() State
+	// Clone 保留具体类型并隔离可变输入；不能复制时返回错误，不回退为共享引用。
+	Clone() (State, error)
 }
 
 // Reducer 状态合并器
@@ -43,15 +39,11 @@ func (r AppendReducer[S, V]) Reduce(state S, key string, value V) S {
 type MapState map[string]any
 
 // Clone 创建状态的深拷贝
-func (s MapState) Clone() State {
+func (s MapState) Clone() (State, error) {
 	if s == nil {
-		return MapState{}
+		return MapState{}, nil
 	}
-	clone := make(MapState, len(s))
-	for k, v := range s {
-		clone[k] = deepCopy(v)
-	}
-	return clone
+	return reflectx.DeepCopyChecked(s)
 }
 
 // Get 获取值
@@ -131,44 +123,4 @@ type ChannelConfig struct {
 
 	// Default 默认值
 	Default any `json:"default,omitempty"`
-}
-
-// deepCopy 深拷贝值
-func deepCopy(v any) any {
-	if v == nil {
-		return nil
-	}
-
-	// 对于基本类型，直接返回
-	switch val := v.(type) {
-	case bool, int, int8, int16, int32, int64,
-		uint, uint8, uint16, uint32, uint64,
-		float32, float64, string:
-		return val
-	case []any:
-		clone := make([]any, len(val))
-		for i, item := range val {
-			clone[i] = deepCopy(item)
-		}
-		return clone
-	case map[string]any:
-		clone := make(map[string]any, len(val))
-		for k, item := range val {
-			clone[k] = deepCopy(item)
-		}
-		return clone
-	default:
-		// 对于复杂类型，使用 JSON 序列化/反序列化
-		data, err := json.Marshal(v)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[WARN] deepCopy: JSON marshal failed for type %T, returning original reference: %v\n", v, err)
-			return v
-		}
-		var clone any
-		if err := json.Unmarshal(data, &clone); err != nil {
-			fmt.Fprintf(os.Stderr, "[WARN] deepCopy: JSON unmarshal failed for type %T, returning original reference: %v\n", v, err)
-			return v
-		}
-		return clone
-	}
 }

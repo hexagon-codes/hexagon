@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -371,7 +372,8 @@ func (e *InterruptError) Error() string {
 
 // IsInterruptError 判断是否是中断错误
 func IsInterruptError(err error) (*Interrupt, bool) {
-	if ie, ok := err.(*InterruptError); ok {
+	var ie *InterruptError
+	if errors.As(err, &ie) {
 		return ie.Interrupt, true
 	}
 	return nil, false
@@ -621,7 +623,7 @@ func (h *HumanInTheLoop[S]) RunWithInterrupt(ctx context.Context, threadID strin
 		}
 
 		// 执行节点
-		newState, err := node.Handler(ctx, state)
+		newState, commandTarget, err := executeCommandNode(ctx, node, state, nil)
 		if err != nil {
 			return state, nil, fmt.Errorf("node %s failed: %w", currentNode, err)
 		}
@@ -629,7 +631,17 @@ func (h *HumanInTheLoop[S]) RunWithInterrupt(ctx context.Context, threadID strin
 
 		// 确定下一个节点
 		executor := &graphExecutor[S]{graph: h.graph, state: state, config: &runConfig{}}
-		nextNode, err := executor.getNextNode(currentNode)
+		nextNode := ""
+		if commandTarget == nil {
+			nextNode, err = executor.getNextNode(currentNode)
+		}
+		if commandTarget != nil {
+			nextNode = *commandTarget
+			err = nil
+			if _, ok := h.graph.Nodes[nextNode]; !ok {
+				err = fmt.Errorf("command at node %q selected unknown node %q", currentNode, nextNode)
+			}
+		}
 		if err != nil {
 			return state, nil, err
 		}

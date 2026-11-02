@@ -28,7 +28,7 @@ type WorkflowState struct {
 }
 
 // Clone 实现 State 接口
-func (s WorkflowState) Clone() graph.State {
+func (s WorkflowState) Clone() (graph.State, error) {
 	clone := WorkflowState{
 		Input:     s.Input,
 		Category:  s.Category,
@@ -39,7 +39,7 @@ func (s WorkflowState) Clone() graph.State {
 	for k, v := range s.Metadata {
 		clone.Metadata[k] = v
 	}
-	return clone
+	return clone, nil
 }
 
 func main() {

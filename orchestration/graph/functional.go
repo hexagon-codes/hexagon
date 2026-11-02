@@ -105,7 +105,11 @@ func DefineTask[S State](wf *Workflow[S], name string, handler func(ctx context.
 // 在 entrypoint 函数中调用此方法来执行任务
 func (t *TaskDef[S]) Run(ctx context.Context, state S) (S, error) {
 	t.execCount.Add(1)
+	return runIsolatedNode(ctx, t.Name, t.run, state)
+}
 
+// run 在公开入口的隔离边界内处理缓存和用户回调。
+func (t *TaskDef[S]) run(ctx context.Context, state S) (S, error) {
 	// 检查缓存
 	if t.cache != nil {
 		key := ComputeCacheKey(t.Name, state)
@@ -146,7 +150,7 @@ func (wf *Workflow[S]) Run(ctx context.Context, state S) (S, error) {
 	if wf.entrypoint == nil {
 		return state, fmt.Errorf("工作流 %q 未定义入口点，请调用 DefineEntrypoint", wf.name)
 	}
-	return wf.entrypoint(ctx, state)
+	return runIsolatedNode(ctx, wf.name+" entrypoint", wf.entrypoint, state)
 }
 
 // Name 返回工作流名称
@@ -184,7 +188,7 @@ func RunParallel[S State](ctx context.Context, state S, merger func(original S, 
 	resultCh := make(chan taskResult, len(tasks))
 	for i, task := range tasks {
 		go func(idx int, t *TaskDef[S]) {
-			result, err := t.Run(ctx, state.Clone().(S))
+			result, err := t.Run(ctx, state)
 			resultCh <- taskResult{index: idx, state: result, err: err}
 		}(i, task)
 	}
@@ -201,18 +205,22 @@ func RunParallel[S State](ctx context.Context, state S, merger func(original S, 
 	if merger == nil {
 		return results[len(results)-1], nil
 	}
-	return merger(state, results), nil
+	return runIsolatedNode(ctx, "parallel task merger", func(_ context.Context, candidate S) (S, error) {
+		return merger(candidate, results), nil
+	}, state)
 }
 
 // RunConditional 条件执行任务
 // 根据 condition 返回值选择执行哪个任务
 func RunConditional[S State](ctx context.Context, state S, condition func(S) string, routes map[string]*TaskDef[S]) (S, error) {
-	label := condition(state)
-	task, ok := routes[label]
-	if !ok {
-		return state, fmt.Errorf("条件路由未找到任务: %q", label)
-	}
-	return task.Run(ctx, state)
+	return runIsolatedNode(ctx, "conditional task route", func(callCtx context.Context, candidate S) (S, error) {
+		label := condition(candidate)
+		task, ok := routes[label]
+		if !ok {
+			return candidate, fmt.Errorf("conditional task route not found: %q", label)
+		}
+		return task.Run(callCtx, candidate)
+	}, state)
 }
 
 // ToGraph 将函数式工作流转换为图

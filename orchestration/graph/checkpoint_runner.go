@@ -9,7 +9,10 @@ package graph
 import (
 	"context"
 	"encoding/json"
+	"errors"
+
 	"fmt"
+	"github.com/hexagon-codes/hexagon/interrupt"
 	"time"
 )
 
@@ -28,9 +31,9 @@ type CheckpointRunner[S State] struct {
 
 // CheckpointRunnerConfig 检查点执行器配置
 type CheckpointRunnerConfig struct {
-	// AutoSave 是否自动保存检查点
+	// AutoSave 保留的历史配置；恢复结果与采用前沿仍逐节点保存，不能关闭。
 	AutoSave bool
-	// SaveInterval 保存间隔（每执行多少个节点保存一次）
+	// SaveInterval 不再控制恢复事实的保存间隔。
 	SaveInterval int
 	// SaveOnError 错误时是否保存检查点
 	SaveOnError bool
@@ -40,6 +43,8 @@ type CheckpointRunnerConfig struct {
 	MaxRetries int
 	// RetryDelay 重试延迟
 	RetryDelay time.Duration
+	// NodeTimeout 为节点未显式设置时继承的毫秒时限。
+	NodeTimeout int64
 }
 
 // DefaultCheckpointRunnerConfig 默认配置
@@ -49,13 +54,16 @@ func DefaultCheckpointRunnerConfig() *CheckpointRunnerConfig {
 		SaveInterval:    1,
 		SaveOnError:     true,
 		SaveOnInterrupt: true,
-		MaxRetries:      3,
+		MaxRetries:      0,
 		RetryDelay:      time.Second,
 	}
 }
 
 // NewCheckpointRunner 创建检查点执行器
 func NewCheckpointRunner[S State](g *Graph[S], saver EnhancedCheckpointSaver, config *CheckpointRunnerConfig) *CheckpointRunner[S] {
+	if g != nil && g.frozen != nil {
+		g = g.frozen
+	}
 	if config == nil {
 		config = DefaultCheckpointRunnerConfig()
 	}
@@ -68,10 +76,16 @@ func NewCheckpointRunner[S State](g *Graph[S], saver EnhancedCheckpointSaver, co
 
 // Run 从初始状态运行
 func (r *CheckpointRunner[S]) Run(ctx context.Context, threadID string, initialState S) (S, error) {
+	if r.graph == nil || !r.graph.compiled || r.graph.plan == nil {
+		return initialState, fmt.Errorf("graph not compiled")
+	}
+	if r.saver == nil {
+		return initialState, fmt.Errorf("checkpoint saver is required")
+	}
 	r.threadID = threadID
 
 	// 创建初始检查点
-	stateBytes, err := json.Marshal(initialState)
+	stateBytes, err := r.graph.codec().Encode(initialState)
 	if err != nil {
 		return initialState, fmt.Errorf("marshal initial state: %w", err)
 	}
@@ -90,6 +104,11 @@ func (r *CheckpointRunner[S]) Run(ctx context.Context, threadID string, initialS
 		Metadata:       make(map[string]any),
 	}
 
+	frontier, err := r.graph.encodeFrontier(newPlanExecutor(r.graph, initialState).frontier)
+	if err != nil {
+		return initialState, err
+	}
+	r.currentCheckpoint.Frontier = frontier
 	if err := r.saver.SaveEnhanced(ctx, r.currentCheckpoint); err != nil {
 		return initialState, fmt.Errorf("save initial checkpoint: %w", err)
 	}
@@ -112,11 +131,20 @@ func (r *CheckpointRunner[S]) Resume(ctx context.Context, checkpointID string) (
 	r.branchID = checkpoint.BranchID
 
 	// 反序列化状态
-	var state S
-	if err := json.Unmarshal(checkpoint.State, &state); err != nil {
+	state, err := r.graph.codec().Decode(checkpoint.State)
+	if err != nil {
 		return zero, fmt.Errorf("unmarshal state: %w", err)
 	}
 
+	if _, err := r.graph.decodeFrontier(checkpoint.Frontier); err != nil {
+		return zero, err
+	}
+	if checkpoint.Status == CheckpointStatusCompleted {
+		return state, nil
+	}
+	if len(checkpoint.Frontier) == 0 {
+		return zero, fmt.Errorf("checkpoint is missing its graph execution specification")
+	}
 	// 更新检查点状态
 	checkpoint.Status = CheckpointStatusRunning
 	if err := r.saver.SaveEnhanced(ctx, checkpoint); err != nil {
@@ -174,97 +202,53 @@ func (r *CheckpointRunner[S]) Fork(ctx context.Context, checkpointID string, bra
 // executeFromCheckpoint 从检查点执行
 func (r *CheckpointRunner[S]) executeFromCheckpoint(ctx context.Context, state S) (S, error) {
 	startTime := time.Now()
-	stepCount := 0
-
-	// 确保 Stats 和 Metadata 已初始化
-	if r.currentCheckpoint.Stats == nil {
-		r.currentCheckpoint.Stats = &CheckpointStats{}
-	}
-	if r.currentCheckpoint.Metadata == nil {
-		r.currentCheckpoint.Metadata = make(map[string]any)
-	}
-
-	// 获取待执行节点
-	pendingNodes := r.currentCheckpoint.PendingNodes
-	if len(pendingNodes) == 0 {
-		// 如果没有待执行节点，从当前节点获取后继
-		pendingNodes = r.getSuccessors(r.currentCheckpoint.CurrentNode, state)
-	}
-
-	for len(pendingNodes) > 0 {
-		select {
-		case <-ctx.Done():
-			// 上下文取消，保存中断检查点
-			if r.config.SaveOnInterrupt {
-				r.saveInterruptCheckpoint(ctx, state, pendingNodes)
-			}
-			return state, ctx.Err()
-		default:
-		}
-
-		// 获取下一个节点
-		currentNode := pendingNodes[0]
-		pendingNodes = pendingNodes[1:]
-
-		// 检查是否到达终点
-		if currentNode == END {
-			r.currentCheckpoint.Status = CheckpointStatusCompleted
-			r.currentCheckpoint.CurrentNode = END
-			r.currentCheckpoint.PendingNodes = nil
-			r.currentCheckpoint.Stats.TotalDuration = time.Since(startTime)
-			r.saver.SaveEnhanced(ctx, r.currentCheckpoint)
-			return state, nil
-		}
-
-		// 执行节点
-		nodeStart := time.Now()
-		var err error
-		state, err = r.executeNode(ctx, currentNode, state)
-		nodeDuration := time.Since(nodeStart)
-
+	x := newPlanExecutor(r.graph, state)
+	if len(r.currentCheckpoint.Frontier) > 0 {
+		frontier, err := r.graph.decodeFrontier(r.currentCheckpoint.Frontier)
 		if err != nil {
-			// 错误处理
-			if r.config.SaveOnError {
-				r.saveErrorCheckpoint(ctx, state, currentNode, pendingNodes, err)
-			}
-			return state, fmt.Errorf("execute node %s: %w", currentNode, err)
+			return state, err
 		}
-
-		stepCount++
-
-		// 更新检查点
-		r.currentCheckpoint.CurrentNode = currentNode
-		r.currentCheckpoint.CompletedNodes = append(r.currentCheckpoint.CompletedNodes, currentNode)
-		r.currentCheckpoint.VisitedNodes = append(r.currentCheckpoint.VisitedNodes, currentNode)
-		r.currentCheckpoint.Stats.StepCount = stepCount
-		if r.currentCheckpoint.Stats.NodeDurations == nil {
-			r.currentCheckpoint.Stats.NodeDurations = make(map[string]time.Duration)
-		}
-		r.currentCheckpoint.Stats.NodeDurations[currentNode] = nodeDuration
-
-		// 获取后继节点
-		successors := r.getSuccessors(currentNode, state)
-		pendingNodes = append(successors, pendingNodes...)
-		r.currentCheckpoint.PendingNodes = pendingNodes
-
-		// 序列化状态
-		stateBytes, err := json.Marshal(state)
-		if err == nil {
-			r.currentCheckpoint.State = stateBytes
-		}
-
-		// 自动保存检查点
-		if r.config.AutoSave && stepCount%r.config.SaveInterval == 0 {
-			r.saver.SaveEnhanced(ctx, r.currentCheckpoint)
-		}
+		x.frontier = frontier
+	} else {
+		return state, fmt.Errorf("checkpoint is missing its graph execution specification")
 	}
-
-	// 完成
+	x.defaults = &RetryPolicy{MaxRetries: r.config.MaxRetries, InitialDelay: r.config.RetryDelay.Milliseconds(), Multiplier: 1}
+	x.defaultTimeout = r.config.NodeTimeout
+	x.persist = func(saveCtx context.Context, next S, frontier *graphFrontier) error {
+		return r.saveFrontier(saveCtx, next, frontier)
+	}
+	x.observe = func(event StreamEvent[S]) error {
+		if event.Type == EventTypeNodeEnd {
+			r.currentCheckpoint.CurrentNode = event.NodeName
+			r.currentCheckpoint.VisitedNodes = append(r.currentCheckpoint.VisitedNodes, event.NodeName)
+			r.currentCheckpoint.Stats.StepCount++
+		}
+		return nil
+	}
+	final, err := x.run(ctx)
+	if err != nil {
+		if _, ok := interrupt.IsInterruptSignal(err); ok {
+			r.currentCheckpoint.Status = CheckpointStatusInterrupted
+		} else if ctx.Err() != nil {
+			r.currentCheckpoint.Status = CheckpointStatusInterrupted
+		} else {
+			r.currentCheckpoint.Status = CheckpointStatusFailed
+		}
+		r.currentCheckpoint.Metadata["error"] = err.Error()
+		if r.config.SaveOnError || r.config.SaveOnInterrupt {
+			if saveErr := r.saveFrontier(context.WithoutCancel(ctx), final, x.frontier); saveErr != nil {
+				return final, errors.Join(err, saveErr)
+			}
+		}
+		return final, err
+	}
 	r.currentCheckpoint.Status = CheckpointStatusCompleted
+	r.currentCheckpoint.CurrentNode = END
 	r.currentCheckpoint.Stats.TotalDuration = time.Since(startTime)
-	r.saver.SaveEnhanced(ctx, r.currentCheckpoint)
-
-	return state, nil
+	if err := r.saveFrontier(ctx, final, x.frontier); err != nil {
+		return final, err
+	}
+	return final, nil
 }
 
 // executeNode 执行单个节点
@@ -274,25 +258,8 @@ func (r *CheckpointRunner[S]) executeNode(ctx context.Context, nodeName string, 
 		return state, fmt.Errorf("node %s not found", nodeName)
 	}
 
-	// 支持重试
-	var lastErr error
-	for i := 0; i <= r.config.MaxRetries; i++ {
-		newState, err := node.Handler(ctx, state)
-		if err == nil {
-			return newState, nil
-		}
-		lastErr = err
-
-		if i < r.config.MaxRetries {
-			select {
-			case <-ctx.Done():
-				return state, ctx.Err()
-			case <-time.After(r.config.RetryDelay):
-			}
-		}
-	}
-
-	return state, lastErr
+	defaults := &RetryPolicy{MaxRetries: r.config.MaxRetries, InitialDelay: r.config.RetryDelay.Milliseconds(), Multiplier: 1}
+	return executeNodeHandler(ctx, node, state, defaults)
 }
 
 // getSuccessors 获取后继节点

@@ -116,9 +116,14 @@ func (s *MemoryWorkflowStore) SaveExecution(ctx context.Context, execution *Work
 	defer s.mu.Unlock()
 
 	// 深拷贝
-	data, _ := json.Marshal(execution)
+	data, err := json.Marshal(execution)
+	if err != nil {
+		return err
+	}
 	var copy WorkflowExecution
-	json.Unmarshal(data, &copy)
+	if err := decodeWorkflowJSON(data, &copy); err != nil {
+		return err
+	}
 
 	s.executions[execution.ID] = &copy
 	return nil
@@ -133,7 +138,7 @@ func (s *MemoryWorkflowStore) GetExecution(ctx context.Context, id string) (*Wor
 	if !ok {
 		return nil, fmt.Errorf("execution %s not found", id)
 	}
-	return execution, nil
+	return cloneExecution(execution)
 }
 
 // ListExecutions 列出执行实例
@@ -149,7 +154,11 @@ func (s *MemoryWorkflowStore) ListExecutions(ctx context.Context, workflowID str
 		if status != "" && execution.Status != status {
 			continue
 		}
-		result = append(result, execution)
+		copy, err := cloneExecution(execution)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, copy)
 		if limit > 0 && len(result) >= limit {
 			break
 		}
@@ -206,7 +215,11 @@ func (s *MemoryWorkflowStore) GetPendingExecutions(ctx context.Context, limit in
 	var result []*WorkflowExecution
 	for _, execution := range s.executions {
 		if execution.Status == StatusRunning || execution.Status == StatusPaused {
-			result = append(result, execution)
+			copy, err := cloneExecution(execution)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, copy)
 			if limit > 0 && len(result) >= limit {
 				break
 			}
@@ -237,7 +250,8 @@ type ExecutionSnapshot struct {
 	ExecutionID string `json:"execution_id"`
 
 	// WorkflowID 工作流 ID
-	WorkflowID string `json:"workflow_id"`
+	WorkflowID      string `json:"workflow_id"`
+	WorkflowVersion string `json:"workflow_version,omitempty"`
 
 	// Status 状态
 	Status WorkflowStatus `json:"status"`
@@ -249,7 +263,10 @@ type ExecutionSnapshot struct {
 	StepResults map[string]*StepResult `json:"step_results"`
 
 	// Input 输入
-	Input json.RawMessage `json:"input"`
+	Input       json.RawMessage `json:"input"`
+	InputFormat string          `json:"input_format,omitempty"`
+	Output      json.RawMessage `json:"output,omitempty"`
+	StartedAt   time.Time       `json:"started_at"`
 
 	// CreatedAt 创建时间
 	CreatedAt time.Time `json:"created_at"`
@@ -258,25 +275,33 @@ type ExecutionSnapshot struct {
 // CreateSnapshot 创建执行快照
 func CreateSnapshot(execution *WorkflowExecution) *ExecutionSnapshot {
 	return &ExecutionSnapshot{
-		ExecutionID: execution.ID,
-		WorkflowID:  execution.WorkflowID,
-		Status:      execution.Status,
-		Context:     execution.Context,
-		StepResults: execution.StepResults,
-		Input:       execution.Input,
-		CreatedAt:   time.Now(),
+		ExecutionID:     execution.ID,
+		WorkflowID:      execution.WorkflowID,
+		WorkflowVersion: execution.WorkflowVersion,
+		Status:          execution.Status,
+		Context:         execution.Context,
+		StepResults:     execution.StepResults,
+		Input:           execution.Input,
+		InputFormat:     execution.InputFormat,
+		Output:          execution.Output,
+		StartedAt:       execution.StartedAt,
+		CreatedAt:       time.Now(),
 	}
 }
 
 // RestoreFromSnapshot 从快照恢复执行
 func RestoreFromSnapshot(snapshot *ExecutionSnapshot) *WorkflowExecution {
 	return &WorkflowExecution{
-		ID:          snapshot.ExecutionID,
-		WorkflowID:  snapshot.WorkflowID,
-		Status:      snapshot.Status,
-		Context:     snapshot.Context,
-		StepResults: snapshot.StepResults,
-		Input:       snapshot.Input,
+		ID:              snapshot.ExecutionID,
+		WorkflowID:      snapshot.WorkflowID,
+		WorkflowVersion: snapshot.WorkflowVersion,
+		Status:          snapshot.Status,
+		Context:         snapshot.Context,
+		StepResults:     snapshot.StepResults,
+		Input:           snapshot.Input,
+		InputFormat:     snapshot.InputFormat,
+		Output:          snapshot.Output,
+		StartedAt:       snapshot.StartedAt,
 	}
 }
 
@@ -304,32 +329,27 @@ func (r *ExecutionRecovery) RecoverPending(ctx context.Context) (int, error) {
 	}
 
 	recovered := 0
+	var recoveryErr error
 	for _, execution := range executions {
 		wf, ok := r.registry.Get(execution.WorkflowID)
 		if !ok {
 			// 尝试从存储加载工作流
 			wf, err = r.store.GetWorkflow(ctx, execution.WorkflowID)
 			if err != nil {
+				recoveryErr = joinRecoveryError(recoveryErr, execution.ID, err)
 				continue
 			}
 		}
 
-		// 恢复执行
-		var input WorkflowInput
-		if execution.Input != nil {
-			json.Unmarshal(execution.Input, &input)
-		}
-		input.Variables = execution.Context.Variables
-		input.Metadata = execution.Context.Metadata
-
-		if _, err := r.executor.RunAsync(ctx, wf, input); err != nil {
+		if _, err := r.executor.RecoverExecution(ctx, wf, execution); err != nil {
+			recoveryErr = joinRecoveryError(recoveryErr, execution.ID, err)
 			continue
 		}
 
 		recovered++
 	}
 
-	return recovered, nil
+	return recovered, recoveryErr
 }
 
 // 确保实现了接口

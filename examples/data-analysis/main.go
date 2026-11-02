@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/hexagon-codes/hexagon/orchestration/graph"
+	"github.com/hexagon-codes/toolkit/util/reflectx"
 )
 
 // AnalysisState 数据分析状态
@@ -51,21 +52,8 @@ type AnalysisState struct {
 }
 
 // Clone 克隆状态
-func (s AnalysisState) Clone() graph.State {
-	clone := s
-	if s.RawData != nil {
-		clone.RawData = make([]map[string]any, len(s.RawData))
-		copy(clone.RawData, s.RawData)
-	}
-	if s.Statistics != nil {
-		clone.Statistics = make(map[string]float64)
-		for k, v := range s.Statistics {
-			clone.Statistics[k] = v
-		}
-	}
-	clone.Insights = append([]string{}, s.Insights...)
-	clone.Errors = append([]string{}, s.Errors...)
-	return clone
+func (s AnalysisState) Clone() (graph.State, error) {
+	return reflectx.DeepCopyChecked(s)
 }
 
 func main() {

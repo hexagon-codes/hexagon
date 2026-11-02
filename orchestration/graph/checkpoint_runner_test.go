@@ -24,8 +24,8 @@ func TestDefaultCheckpointRunnerConfig(t *testing.T) {
 	if !cfg.SaveOnInterrupt {
 		t.Error("expected SaveOnInterrupt true")
 	}
-	if cfg.MaxRetries != 3 {
-		t.Errorf("expected MaxRetries 3, got %d", cfg.MaxRetries)
+	if cfg.MaxRetries != 0 {
+		t.Errorf("expected MaxRetries 0, got %d", cfg.MaxRetries)
 	}
 	if cfg.RetryDelay != time.Second {
 		t.Errorf("expected RetryDelay 1s, got %v", cfg.RetryDelay)

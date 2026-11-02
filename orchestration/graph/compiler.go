@@ -2,7 +2,10 @@ package graph
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
+	"sync"
 	"time"
 )
 
@@ -20,6 +23,16 @@ type CompiledGraph[S State] struct {
 
 // ExecutionPlan 执行计划
 type ExecutionPlan struct {
+	// Mode 与 TriggerMode 在构建前确定，所有执行入口复用。
+	Mode        GraphMode   `json:"mode"`
+	TriggerMode TriggerMode `json:"trigger_mode"`
+	Identity    string      `json:"identity"`
+	// Components 和入口用于冻结 Pregel/All 的初始与循环预期前驱集合。
+	Components           map[string]int      `json:"components"`
+	CyclicComponents     map[int]bool        `json:"cyclic_components"`
+	ComponentEntries     map[int]string      `json:"component_entries"`
+	InternalPredecessors map[string][]string `json:"internal_predecessors"`
+	ExternalPredecessors map[string][]string `json:"external_predecessors"`
 	// TopologicalOrder 拓扑排序后的节点顺序
 	TopologicalOrder []string
 
@@ -77,15 +90,19 @@ func Compile[S State](g *Graph[S]) (*CompiledGraph[S], error) {
 		}
 	}
 
-	// 计算执行计划
-	plan, err := computeExecutionPlan(g)
+	// facade 返回独立计划视图，执行仍使用 Build 时冻结的同一计划。
+	data, err := json.Marshal(g.plan)
 	if err != nil {
+		return nil, err
+	}
+	var plan ExecutionPlan
+	if err := json.Unmarshal(data, &plan); err != nil {
 		return nil, err
 	}
 
 	return &CompiledGraph[S]{
 		Graph:         g,
-		ExecutionPlan: plan,
+		ExecutionPlan: &plan,
 		Stats: &ExecutionStats{
 			NodeStats: make(map[string]*NodeStats),
 		},
@@ -96,17 +113,49 @@ func Compile[S State](g *Graph[S]) (*CompiledGraph[S], error) {
 func computeExecutionPlan[S State](g *Graph[S]) (*ExecutionPlan, error) {
 	plan := &ExecutionPlan{
 		Dependencies: make(map[string][]string),
+		Mode:         g.mode, TriggerMode: g.triggerMode,
+	}
+	if !g.triggerExplicit && g.mode == GraphModePregel {
+		plan.TriggerMode = TriggerAnyPredecessor
+	}
+	if plan.Mode != GraphModeDAG && plan.Mode != GraphModePregel {
+		return nil, fmt.Errorf("invalid graph mode %d", plan.Mode)
+	}
+	if plan.TriggerMode != TriggerAllPredecessors && plan.TriggerMode != TriggerAnyPredecessor {
+		return nil, fmt.Errorf("invalid trigger mode %d", plan.TriggerMode)
 	}
 
 	// 计算节点依赖
 	for _, edge := range g.Edges {
-		plan.Dependencies[edge.To] = append(plan.Dependencies[edge.To], edge.From)
+		plan.Dependencies[edge.To] = appendUnique(plan.Dependencies[edge.To], edge.From)
+	}
+	for from, edges := range g.conditionalEdges {
+		for _, edge := range edges {
+			for _, to := range edge.edges {
+				plan.Dependencies[to] = appendUnique(plan.Dependencies[to], from)
+			}
+			if edge.defaultTarget != "" {
+				plan.Dependencies[edge.defaultTarget] = appendUnique(plan.Dependencies[edge.defaultTarget], from)
+			}
+		}
+	}
+	for key := range plan.Dependencies {
+		sort.Strings(plan.Dependencies[key])
 	}
 
 	// 拓扑排序
-	order, err := topologicalSort(g.Nodes, plan.Dependencies)
-	if err != nil {
-		return nil, err
+	var order []string
+	if plan.Mode == GraphModeDAG {
+		var err error
+		order, err = topologicalSort(g.Nodes, plan.Dependencies)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		for name := range g.Nodes {
+			order = append(order, name)
+		}
+		sort.Strings(order)
 	}
 	plan.TopologicalOrder = order
 
@@ -115,6 +164,10 @@ func computeExecutionPlan[S State](g *Graph[S]) (*ExecutionPlan, error) {
 
 	// 计算关键路径（简化版：最长路径）
 	plan.CriticalPath = computeCriticalPath(g, plan.Dependencies)
+	if err := g.compileComponents(plan); err != nil {
+		return nil, err
+	}
+	plan.Identity = planIdentity(g, plan)
 
 	return plan, nil
 }
@@ -139,6 +192,7 @@ func topologicalSort[S State](nodes map[string]*Node[S], deps map[string][]strin
 			queue = append(queue, name)
 		}
 	}
+	sort.Strings(queue)
 
 	// Kahn 算法
 	result := make([]string, 0, len(nodes))
@@ -154,6 +208,7 @@ func topologicalSort[S State](nodes map[string]*Node[S], deps map[string][]strin
 					inDegree[successor]--
 					if inDegree[successor] == 0 {
 						queue = append(queue, successor)
+						sort.Strings(queue)
 					}
 				}
 			}
@@ -161,7 +216,14 @@ func topologicalSort[S State](nodes map[string]*Node[S], deps map[string][]strin
 	}
 
 	if len(result) != len(nodes) {
-		return nil, fmt.Errorf("graph contains a cycle")
+		var blocked []string
+		for name, degree := range inDegree {
+			if degree > 0 {
+				blocked = append(blocked, name)
+			}
+		}
+		sort.Strings(blocked)
+		return nil, fmt.Errorf("DAG contains a cycle involving %v; select Pregel before Build", blocked)
 	}
 
 	return result, nil
@@ -198,6 +260,9 @@ func computeParallelGroups(order []string, deps map[string][]string) [][]string 
 
 	for node, level := range levels {
 		groups[level] = append(groups[level], node)
+	}
+	for _, group := range groups {
+		sort.Strings(group)
 	}
 
 	return groups
@@ -247,42 +312,38 @@ func (cg *CompiledGraph[S]) Run(ctx context.Context, initialState S, opts ...Run
 
 // RunWithStats 执行并返回详细统计
 func (cg *CompiledGraph[S]) RunWithStats(ctx context.Context, initialState S, opts ...RunOption) (S, *ExecutionResult, error) {
+	var timingMu sync.Mutex
+	definition := cg.Graph
+	if definition.frozen != nil {
+		definition = definition.frozen
+	}
 	result := &ExecutionResult{
 		StartTime:  time.Now(),
 		NodeTiming: make(map[string]time.Duration),
 	}
 
 	// 创建节点映射的本地副本，包装处理函数以收集统计（不修改共享的 cg.Nodes）
-	localNodes := make(map[string]*Node[S], len(cg.Nodes))
-	for name, node := range cg.Nodes {
+	localNodes := make(map[string]*Node[S], len(definition.Nodes))
+	for name, node := range definition.Nodes {
 		nodeName := name
 		originalHandler := node.Handler
-		localNodes[name] = &Node[S]{
-			Name:     node.Name,
-			Type:     node.Type,
-			Metadata: node.Metadata,
-			Handler: func(ctx context.Context, state S) (S, error) {
-				nodeStart := time.Now()
-				defer func() {
-					result.NodeTiming[nodeName] = time.Since(nodeStart)
-				}()
-				return originalHandler(ctx, state)
-			},
+		local := *node
+		local.Handler = func(ctx context.Context, state S) (S, error) {
+			nodeStart := time.Now()
+			defer func() {
+				timingMu.Lock()
+				defer timingMu.Unlock()
+				result.NodeTiming[nodeName] = time.Since(nodeStart)
+			}()
+			return originalHandler(ctx, state)
 		}
+		localNodes[name] = &local
 	}
 
 	// 创建一个使用本地节点映射的浅拷贝图来执行
-	localGraph := &Graph[S]{
-		Name:             cg.Graph.Name,
-		Nodes:            localNodes,
-		Edges:            cg.Graph.Edges,
-		EntryPoint:       cg.Graph.EntryPoint,
-		Checkpointer:     cg.Graph.Checkpointer,
-		Metadata:         cg.Graph.Metadata,
-		compiled:         cg.Graph.compiled,
-		adjacency:        cg.Graph.adjacency,
-		conditionalEdges: cg.Graph.conditionalEdges,
-	}
+	localGraph := *definition
+	localGraph.frozen = nil
+	localGraph.Nodes = localNodes
 
 	// 执行本地副本
 	finalState, err := localGraph.Run(ctx, initialState, opts...)

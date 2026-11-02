@@ -123,30 +123,14 @@ func (b *GraphBuilder[S]) AddCommandNode(name string, handler CommandHandler[S])
 		return b
 	}
 
-	// 使用缓存确保 handler 只调用一次，路由和状态更新使用同一个 Command 结果
-	var lastCmd *Command[S]
-
 	// 包装 CommandHandler 为标准 NodeHandler
 	b.graph.Nodes[name] = &Node[S]{
-		Name: name,
-		Type: NodeTypeConditional, // 因为 Command 自带路由逻辑
+		Name:           name,
+		Type:           NodeTypeConditional, // 因为 Command 自带路由逻辑
+		commandHandler: handler,
 		Handler: func(ctx context.Context, state S) (S, error) {
-			cmd, err := handler(ctx, state)
-			if err != nil {
-				return state, err
-			}
-
-			// 缓存 Command 结果供 router 使用
-			lastCmd = cmd
-
-			if cmd == nil {
-				return state, nil
-			}
-
-			// 应用状态更新
-			newState := cmd.ApplyUpdates(state)
-
-			return newState, nil
+			output, _, err := invokeCommand(ctx, handler, state)
+			return output, err
 		},
 		Metadata: map[string]any{
 			"__command_handler": handler,
@@ -154,19 +138,42 @@ func (b *GraphBuilder[S]) AddCommandNode(name string, handler CommandHandler[S])
 		},
 	}
 
-	// 注册一个动态路由器，从缓存的 Command 结果获取目标
-	b.graph.conditionalEdges[name] = append(b.graph.conditionalEdges[name], conditionalEdge[S]{
-		router: func(state S) string {
-			// 直接使用 Node.Handler 中缓存的 Command 结果
-			if lastCmd == nil {
-				return END
-			}
-			return lastCmd.Target()
-		},
-		edges: nil, // 动态路由，无预定义映射
-	})
-
 	return b
+}
+
+func invokeCommand[S State](ctx context.Context, handler CommandHandler[S], state S) (S, *string, error) {
+	command, err := handler(ctx, state)
+	if err != nil {
+		return state, nil, err
+	}
+	target := END
+	if command == nil {
+		return state, &target, nil
+	}
+	target = command.Target()
+	return command.ApplyUpdates(state), &target, nil
+}
+
+// executeCommandNode 将状态与路由作为同一次 attempt 的结果返回，不写入共享定义。
+func executeCommandNode[S State](ctx context.Context, node *Node[S], input S, defaults *RetryPolicy) (S, *string, error) {
+	if node.commandHandler == nil {
+		output, err := executeNodeHandler(ctx, node, input, defaults)
+		return output, nil, err
+	}
+	local := *node
+	var target *string
+	local.Handler = func(callCtx context.Context, state S) (S, error) {
+		output, next, err := invokeCommand(callCtx, node.commandHandler, state)
+		if err == nil {
+			target = next
+		}
+		return output, err
+	}
+	output, err := executeNodeHandler(ctx, &local, input, defaults)
+	if err != nil {
+		return output, nil, err
+	}
+	return output, target, nil
 }
 
 // ============== 便捷函数 ==============

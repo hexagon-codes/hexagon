@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	hr "github.com/hexagon-codes/hexagon/runtime"
 	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
@@ -58,6 +59,8 @@ type Workflow struct {
 
 	// Version 版本
 	Version string `json:"version,omitempty"`
+	// DefinitionReference 固定宿主装配的步骤实现版本，仅持久 Run 装配消费。
+	DefinitionReference *hr.ContentReference `json:"definition_reference,omitempty"`
 
 	// Steps 步骤列表
 	Steps []Step `json:"-"`
@@ -105,13 +108,16 @@ type WorkflowExecution struct {
 	ID string `json:"id"`
 
 	// WorkflowID 工作流 ID
-	WorkflowID string `json:"workflow_id"`
+	WorkflowID      string `json:"workflow_id"`
+	WorkflowVersion string `json:"workflow_version,omitempty"`
 
 	// Status 状态
 	Status WorkflowStatus `json:"status"`
 
 	// Input 输入数据
 	Input json.RawMessage `json:"input,omitempty"`
+	// InputFormat 标识完整 WorkflowInput 信封；空值表示旧版直接保存的 Data。
+	InputFormat string `json:"input_format,omitempty"`
 
 	// Output 输出数据
 	Output json.RawMessage `json:"output,omitempty"`
@@ -169,6 +175,8 @@ type StepResult struct {
 
 	// Output 输出数据
 	Output any `json:"output,omitempty"`
+	// HasOutput 区分显式 nil 输出与未产生输出，恢复时保留原数据流。
+	HasOutput bool `json:"has_output,omitempty"`
 
 	// Error 错误信息
 	Error string `json:"error,omitempty"`
@@ -403,10 +411,11 @@ func generateExecutionID() string {
 // NewExecution 创建执行实例
 func NewExecution(wf *Workflow) *WorkflowExecution {
 	return &WorkflowExecution{
-		ID:          generateExecutionID(),
-		WorkflowID:  wf.ID,
-		Status:      StatusPending,
-		StepResults: make(map[string]*StepResult),
+		ID:              generateExecutionID(),
+		WorkflowID:      wf.ID,
+		WorkflowVersion: wf.Version,
+		Status:          StatusPending,
+		StepResults:     make(map[string]*StepResult),
 		Context: &ExecutionContext{
 			Variables:      make(map[string]any),
 			CompletedSteps: make([]string, 0),

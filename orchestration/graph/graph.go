@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/hexagon-codes/hexagon/interrupt"
+	hr "github.com/hexagon-codes/hexagon/runtime"
 )
 
 // Graph 图定义
@@ -51,13 +52,26 @@ type Graph[S State] struct {
 	adjacency map[string][]string
 
 	// conditionalEdges 条件边映射
-	conditionalEdges map[string][]conditionalEdge[S]
+	conditionalEdges    map[string][]conditionalEdge[S]
+	mode                GraphMode
+	triggerMode         TriggerMode
+	triggerExplicit     bool
+	plan                *ExecutionPlan
+	merger              StateMerger[S]
+	stateCodec          StateCodec[S]
+	interruptCodecs     *interrupt.StateCodecs
+	fieldReducers       map[string]FieldReducer
+	frozen              *Graph[S]
+	definitionReference *hr.ContentReference
+	codecType           string
+	codecVersion        string
 }
 
 // conditionalEdge 条件边内部表示
 type conditionalEdge[S State] struct {
-	router RouterFunc[S]
-	edges  map[string]string // label -> target
+	router        RouterFunc[S]
+	edges         map[string]string // label -> target
+	defaultTarget string
 }
 
 // GraphBuilder 图构建器
@@ -198,7 +212,13 @@ func (b *GraphBuilder[S]) WithMetadata(key string, value any) *GraphBuilder[S] {
 }
 
 // Build 构建图
-func (b *GraphBuilder[S]) Build() (*Graph[S], error) {
+func (b *GraphBuilder[S]) Build() (graph *Graph[S], err error) {
+	defer func() {
+		if value := recover(); value != nil {
+			graph = nil
+			err = &NodePanicError{Node: "graph definition " + b.graph.Name, Value: value}
+		}
+	}()
 	if b.err != nil {
 		return nil, b.err
 	}
@@ -233,7 +253,25 @@ func (b *GraphBuilder[S]) MustBuild() *Graph[S] {
 }
 
 // compile 编译图
-func (g *Graph[S]) compile() error {
+func (g *Graph[S]) compile() (err error) {
+	// 身份回调保护位于共同入口，公开 Compile 和动态图构建也遵守同一错误合同。
+	defer func() {
+		if value := recover(); value != nil {
+			err = &NodePanicError{Node: "graph definition " + g.Name, Value: value}
+		}
+	}()
+	codec := g.stateCodec
+	if codec == nil {
+		codec = JSONStateCodec[S]{}
+	}
+	g.codecType, g.codecVersion = codec.Type(), codec.Version()
+	if g.interruptCodecs == nil {
+		g.interruptCodecs = interrupt.NewStateCodecs()
+	}
+	if err := interrupt.RegisterJSONState[*graphContinuation](g.interruptCodecs, "graph.continuation", "1"); err != nil {
+		return err
+	}
+	g.adjacency = make(map[string][]string)
 	// 构建邻接表
 	for _, edge := range g.Edges {
 		g.adjacency[edge.From] = append(g.adjacency[edge.From], edge.To)
@@ -244,13 +282,22 @@ func (g *Graph[S]) compile() error {
 		return err
 	}
 
-	// 设置入口点
+	// START 保留全部入口分支，不把第一条出边当成唯一入口。
 	if g.EntryPoint == "" {
-		// 从 START 节点的边推断入口点
-		if targets, ok := g.adjacency[START]; ok && len(targets) > 0 {
-			g.EntryPoint = targets[0]
-		}
+		g.EntryPoint = START
 	}
+	if _, ok := g.Nodes[g.EntryPoint]; !ok {
+		return fmt.Errorf("entry node %q not found", g.EntryPoint)
+	}
+	plan, err := computeExecutionPlan(g)
+	if err != nil {
+		return err
+	}
+	g.plan = plan
+	if err := g.validateWriteConflicts(); err != nil {
+		return err
+	}
+	g.freezeDefinition()
 
 	g.compiled = true
 	return nil
@@ -258,6 +305,16 @@ func (g *Graph[S]) compile() error {
 
 // validate 验证图
 func (g *Graph[S]) validate() error {
+	for name, node := range g.Nodes {
+		if node == nil || (node.Handler == nil && node.IO == nil) {
+			return fmt.Errorf("node %q has no handler or typed I/O adapter", name)
+		}
+		if node.IO != nil {
+			if err := validateNodeIO[S](name, node.IO); err != nil {
+				return err
+			}
+		}
+	}
 	// 检查所有边引用的节点是否存在
 	for _, edge := range g.Edges {
 		if _, ok := g.Nodes[edge.From]; !ok {
@@ -274,6 +331,11 @@ func (g *Graph[S]) validate() error {
 			return fmt.Errorf("node %s not found (referenced in conditional edge)", from)
 		}
 		for _, ce := range condEdges {
+			if ce.defaultTarget != "" {
+				if _, ok := g.Nodes[ce.defaultTarget]; !ok {
+					return fmt.Errorf("node %s not found (conditional default target)", ce.defaultTarget)
+				}
+			}
 			for _, to := range ce.edges {
 				if _, ok := g.Nodes[to]; !ok {
 					return fmt.Errorf("node %s not found (referenced in conditional edge target)", to)
@@ -314,6 +376,18 @@ type runConfig struct {
 	threadConfig *ThreadConfig
 	interrupt    []string
 	debug        bool
+	retryPolicy  *RetryPolicy
+	timeoutMS    int64
+}
+
+// WithNodeRetryPolicy 设置本次执行的默认策略；节点非 nil 策略优先，零次重试只调用一次。
+func WithNodeRetryPolicy(policy *RetryPolicy) RunOption {
+	return func(c *runConfig) { c.retryPolicy = policy }
+}
+
+// WithNodeTimeout 设置节点继承的毫秒时限，父 context 的期限始终优先。
+func WithNodeTimeout(milliseconds int64) RunOption {
+	return func(c *runConfig) { c.timeoutMS = milliseconds }
 }
 
 // WithThread 设置线程配置
@@ -348,61 +422,11 @@ type graphExecutor[S State] struct {
 
 // run 执行图
 func (e *graphExecutor[S]) run(ctx context.Context) (S, error) {
-	currentNode := e.graph.EntryPoint
-	if currentNode == "" {
-		currentNode = START
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return e.state, ctx.Err()
-		default:
-		}
-
-		// 检查是否到达终点
-		if currentNode == END {
-			break
-		}
-
-		// 检查中断
-		for _, interruptNode := range e.config.interrupt {
-			if currentNode == interruptNode {
-				return e.state, fmt.Errorf("interrupted at node: %s", currentNode)
-			}
-		}
-
-		// 获取节点
-		node, ok := e.graph.Nodes[currentNode]
-		if !ok {
-			return e.state, fmt.Errorf("node %s not found", currentNode)
-		}
-
-		// 注入层级地址段
-		nodeCtx := interrupt.AppendAddressSegment(ctx, interrupt.SegmentNode, currentNode, "")
-
-		// 执行节点
-		newState, err := node.Handler(nodeCtx, e.state)
-		if err != nil {
-			// 捕获 InterruptSignal，透传给调用方
-			if signal, ok := interrupt.IsInterruptSignal(err); ok {
-				return e.state, signal
-			}
-			return e.state, fmt.Errorf("node %s failed: %w", currentNode, err)
-		}
-		e.state = newState
-		e.visited[currentNode] = true
-
-		// 确定下一个节点
-		nextNode, err := e.getNextNode(currentNode)
-		if err != nil {
-			return e.state, err
-		}
-
-		currentNode = nextNode
-	}
-
-	return e.state, nil
+	x := newPlanExecutor(e.graph, e.state)
+	x.defaults = e.config.retryPolicy
+	x.defaultTimeout = e.config.timeoutMS
+	x.interruptBefore = e.config.interrupt
+	return x.run(ctx)
 }
 
 // getNextNode 获取下一个节点
@@ -444,112 +468,32 @@ func (g *Graph[S]) Stream(ctx context.Context, initialState S, opts ...RunOption
 	}
 
 	events := make(chan StreamEvent[S], 10)
-
 	go func() {
 		defer close(events)
-
 		config := &runConfig{}
 		for _, opt := range opts {
 			opt(config)
 		}
-
-		state := initialState
-		currentNode := g.EntryPoint
-		if currentNode == "" {
-			currentNode = START
-		}
-
-		// sendEvent 发送事件，如果 context 已取消则返回 false
-		sendEvent := func(evt StreamEvent[S]) bool {
+		x := newPlanExecutor(g, initialState)
+		x.defaults = config.retryPolicy
+		x.defaultTimeout = config.timeoutMS
+		x.interruptBefore = config.interrupt
+		x.observe = func(event StreamEvent[S]) error {
 			select {
+			case events <- event:
+				return nil
 			case <-ctx.Done():
-				return false
-			case events <- evt:
-				return true
+				return ctx.Err()
 			}
 		}
-
-		for {
-			// 检查 context 是否已取消
+		state, err := x.run(ctx)
+		if err != nil {
 			select {
-			case <-ctx.Done():
-				sendEvent(StreamEvent[S]{
-					Type:  EventTypeError,
-					Error: ctx.Err(),
-				})
-				return
+			case events <- StreamEvent[S]{Type: EventTypeError, State: state, Error: err}:
 			default:
 			}
-
-			if currentNode == END {
-				sendEvent(StreamEvent[S]{
-					Type:  EventTypeEnd,
-					State: state,
-				})
-				return
-			}
-
-			node, ok := g.Nodes[currentNode]
-			if !ok {
-				sendEvent(StreamEvent[S]{
-					Type:  EventTypeError,
-					Error: fmt.Errorf("node %s not found", currentNode),
-				})
-				return
-			}
-
-			// 发送节点开始事件
-			if !sendEvent(StreamEvent[S]{
-				Type:     EventTypeNodeStart,
-				NodeName: currentNode,
-				State:    state,
-			}) {
-				return
-			}
-
-			// 执行节点（handler 应该自己处理 context 取消）
-			newState, err := node.Handler(ctx, state)
-			if err != nil {
-				sendEvent(StreamEvent[S]{
-					Type:     EventTypeError,
-					NodeName: currentNode,
-					Error:    err,
-				})
-				return
-			}
-
-			// 节点执行后再次检查 context
-			if ctx.Err() != nil {
-				sendEvent(StreamEvent[S]{
-					Type:  EventTypeError,
-					Error: ctx.Err(),
-				})
-				return
-			}
-
-			state = newState
-
-			// 发送节点完成事件
-			if !sendEvent(StreamEvent[S]{
-				Type:     EventTypeNodeEnd,
-				NodeName: currentNode,
-				State:    state,
-			}) {
-				return
-			}
-
-			// 获取下一个节点
-			executor := &graphExecutor[S]{graph: g, state: state, config: config}
-			nextNode, err := executor.getNextNode(currentNode)
-			if err != nil {
-				sendEvent(StreamEvent[S]{
-					Type:  EventTypeError,
-					Error: err,
-				})
-				return
-			}
-
-			currentNode = nextNode
+		} else {
+			_ = x.emit(ctx, EventTypeEnd, "", state, nil)
 		}
 	}()
 

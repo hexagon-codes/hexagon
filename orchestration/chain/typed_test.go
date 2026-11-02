@@ -292,15 +292,15 @@ func TestTypedChain_Collect(t *testing.T) {
 	chain := NewTypedChain("collect-chain", step)
 
 	// Collect 会先 Concat 流为单值，然后 Invoke
-	// 对于 string 类型，Concat 返回最后一个元素（默认行为）
+	// 字符串按输入顺序拼接后只调用一次 Invoke。
 	ctx := context.Background()
 	result, err := chain.Collect(ctx, stream.FromSlice([]string{"a", "b"}))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Concat 对未注册类型返回最后一个元素 "b"，加 "!" → "b!"
-	if result != "b!" {
-		t.Fatalf("expected 'b!', got %q", result)
+	// 聚合输入 "ab" 后追加一次 "!"。
+	if result != "ab!" {
+		t.Fatalf("expected 'ab!', got %q", result)
 	}
 }
 
