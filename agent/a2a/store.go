@@ -117,15 +117,15 @@ func (s *MemoryTaskStore) Create(_ context.Context, task *Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// 重复创建不能触发容量清理或替换原任务。
+	if _, exists := s.tasks[task.ID]; exists {
+		return NewInvalidParamsError("task already exists: " + task.ID)
+	}
+
 	// 检查是否超过最大任务数
 	if s.maxTasks > 0 && len(s.tasks) >= s.maxTasks {
 		// 清理最旧的已完成任务
 		s.cleanupOldTasks()
-	}
-
-	// 检查任务是否已存在
-	if _, exists := s.tasks[task.ID]; exists {
-		return NewInvalidParamsError("task already exists: " + task.ID)
 	}
 
 	// 设置时间戳
@@ -176,6 +176,14 @@ func (s *MemoryTaskStore) Update(_ context.Context, task *Task) error {
 		return err
 	}
 	stored.UpdatedAt = time.Now()
+	if previous := s.tasks[task.ID]; previous.SessionID != stored.SessionID {
+		if previous.SessionID != "" {
+			s.removeFromSession(previous.SessionID, task.ID)
+		}
+		if stored.SessionID != "" {
+			s.sessionTasks[stored.SessionID] = append(s.sessionTasks[stored.SessionID], task.ID)
+		}
+	}
 	s.tasks[task.ID] = stored
 
 	return nil
@@ -374,7 +382,7 @@ func (s *MemoryTaskStore) SetPushConfig(_ context.Context, taskID string, config
 		return ErrTaskNotFound
 	}
 
-	s.pushConfigs[taskID] = config
+	s.pushConfigs[taskID] = clonePushConfig(config)
 	return nil
 }
 
@@ -387,7 +395,20 @@ func (s *MemoryTaskStore) GetPushConfig(_ context.Context, taskID string) (*Push
 		return nil, ErrTaskNotFound
 	}
 
-	return s.pushConfigs[taskID], nil
+	return clonePushConfig(s.pushConfigs[taskID]), nil
+}
+
+func clonePushConfig(config *PushNotificationConfig) *PushNotificationConfig {
+	if config == nil {
+		return nil
+	}
+	cloned := *config
+	if config.Authentication != nil {
+		auth := *config.Authentication
+		auth.Schemes = slices.Clone(auth.Schemes)
+		cloned.Authentication = &auth
+	}
+	return &cloned
 }
 
 // ============== 辅助函数 ==============

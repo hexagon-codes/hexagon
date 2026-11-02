@@ -69,13 +69,9 @@ type ServerOption func(*Server)
 
 // NewServer 创建 A2A 服务器
 func NewServer(card *AgentCard, handler TaskHandler, opts ...ServerOption) *Server {
-	memStore := NewMemoryTaskStore()
-
 	s := &Server{
 		card:        card,
 		handler:     handler,
-		store:       memStore,
-		pushStore:   memStore,
 		subscribers: make(map[string][]chan StreamEvent),
 		executions:  make(map[string]context.CancelFunc),
 		corsEnabled: true,
@@ -84,6 +80,15 @@ func NewServer(card *AgentCard, handler TaskHandler, opts ...ServerOption) *Serv
 
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.store == nil || s.pushStore == nil {
+		memStore := NewMemoryTaskStore()
+		if s.store == nil {
+			s.store = memStore
+		}
+		if s.pushStore == nil {
+			s.pushStore = memStore
+		}
 	}
 
 	return s
@@ -413,6 +418,10 @@ func (s *Server) handleSendMessageStream(ctx context.Context, w http.ResponseWri
 	stream, ok := s.handler.(StreamingTaskHandler)
 	if !ok {
 		update, err := s.handler.HandleTask(ctx, task, &req.Message)
+		if err == nil && (update == nil || !update.Final) &&
+			(update == nil || update.Status == nil || (!update.Status.State.IsTerminal() && update.Status.State != TaskStateInputRequired && update.Status.State != TaskStateAuthRequired)) {
+			err = NewError(CodeInvalidAgentResponse, "blocking task handler returned without a terminal or interrupted state", map[string]any{"taskId": task.ID})
+		}
 		emit(update, err)
 		return
 	}
@@ -625,7 +634,9 @@ func (s *Server) getOrCreateTask(ctx context.Context, req *SendMessageRequest) (
 
 	// 设置推送通知
 	if req.PushNotification != nil && s.card.Capabilities.PushNotifications {
-		s.pushStore.SetPushConfig(ctx, task.ID, req.PushNotification)
+		if err := s.pushStore.SetPushConfig(ctx, task.ID, req.PushNotification); err != nil {
+			return nil, err
+		}
 	}
 
 	return task, nil
