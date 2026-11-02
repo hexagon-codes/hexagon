@@ -12,6 +12,7 @@ import (
 	"github.com/hexagon-codes/hexagon/core"
 	"github.com/hexagon-codes/hexagon/internal/util"
 	"github.com/hexagon-codes/hexagon/interrupt"
+	agentruntime "github.com/hexagon-codes/hexagon/runtime"
 )
 
 // TeamMode 团队工作模式
@@ -279,21 +280,21 @@ func (t *Team) runSequential(ctx context.Context, input Input) (Output, error) {
 	}
 
 	currentInput := input
-	var lastOutput Output
+	var result Output
 
-	for _, agent := range agents {
+	for index, agent := range agents {
 		select {
 		case <-ctx.Done():
-			return Output{}, ctx.Err()
+			return result, &TeamExecutionError{Causes: []error{ctx.Err()}}
 		default:
 		}
 
-		output, err := agent.Run(ctx, currentInput)
+		child, err := runChildTask(ctx, agent, currentInput, fmt.Sprintf("sequential/member/%d", index), agent.Run)
+		appendTeamChild(&result, child)
 		if err != nil {
-			return Output{}, fmt.Errorf("agent %s failed: %w", agent.Name(), err)
+			return result, &TeamExecutionError{Causes: []error{fmt.Errorf("agent %s failed: %w", agent.Name(), err)}}
 		}
-
-		lastOutput = output
+		output := child.Child.Output
 
 		// 将当前输出转换为下一个 Agent 的输入
 		currentInput = Input{
@@ -302,7 +303,42 @@ func (t *Team) runSequential(ctx context.Context, input Input) (Output, error) {
 		}
 	}
 
-	return lastOutput, nil
+	return result, nil
+}
+
+// appendTeamChild 保留每次子任务的完整事实，顶层用量只累计一次该子任务的聚合值。
+func appendTeamChild(result *Output, child ChildRunResult) {
+	out := child.Child.Output
+	result.Children = append(result.Children, child.Child)
+	result.ToolCalls = append(result.ToolCalls, out.ToolCalls...)
+	result.Blocks = append(result.Blocks, out.Blocks...)
+	result.Usage.PromptTokens += out.Usage.PromptTokens
+	result.Usage.CompletionTokens += out.Usage.CompletionTokens
+	result.Usage.TotalTokens += out.Usage.TotalTokens
+	result.Usage.CacheCreationTokens += out.Usage.CacheCreationTokens
+	result.Usage.CacheReadTokens += out.Usage.CacheReadTokens
+	if out.Content != "" {
+		result.Content = out.Content
+	}
+	result.StopReason = out.StopReason
+	result.Metadata = out.Metadata
+}
+
+// 已保存的普通失败禁止重派原任务，但不阻断读取组合内其他位置的已存事实。
+// 只对明确保存的分类和直接恢复错误采用该语义，旧记录及新的未知错误仍保守处理。
+func teamChildControlError(child ChildRunResult, err error) bool {
+	if err == nil {
+		return false
+	}
+	if child.ControlError != nil {
+		if *child.ControlError {
+			return true
+		}
+		if saved, ok := err.(*agentruntime.TaskExecutionError); ok && saved.TaskID == child.TaskID {
+			return false
+		}
+	}
+	return childControlError(err)
 }
 
 // runHierarchical 层级执行
@@ -326,51 +362,60 @@ func (t *Team) runHierarchical(ctx context.Context, input Input) (Output, error)
 
 	// Manager 分析任务并决定如何分配
 	// 这里简化实现：Manager 决定执行顺序
-	managerOutput, err := t.manager.Run(ctx, Input{
+	var result Output
+	manager, err := runChildTask(ctx, t.manager, Input{
 		Query: fmt.Sprintf("As team manager, analyze this task and coordinate team: %s\nTeam members: %s",
 			input.Query, t.getAgentNamesFromSlice(agents)),
 		Context: input.Context,
-	})
+	}, "hierarchical/manager/plan", t.manager.Run)
+	appendTeamChild(&result, manager)
 	if err != nil {
-		return Output{}, fmt.Errorf("manager failed: %w", err)
+		return result, &TeamExecutionError{Causes: []error{fmt.Errorf("manager failed: %w", err)}}
 	}
+	managerOutput := manager.Child.Output
 
 	// 让所有 Agent 处理任务
 	results := make([]string, 0, len(agents))
-	var agentErrors []string
-	for _, agent := range agents {
+	var failures []error
+	for index, agent := range agents {
 		select {
 		case <-ctx.Done():
-			return Output{}, ctx.Err()
+			return result, &TeamExecutionError{Causes: append(failures, ctx.Err())}
 		default:
 		}
 
-		output, err := agent.Run(ctx, Input{
+		child, err := runChildTask(ctx, agent, Input{
 			Query:   input.Query,
 			Context: map[string]any{"manager_guidance": managerOutput.Content},
-		})
+		}, fmt.Sprintf("hierarchical/member/%d", index), agent.Run)
+		appendTeamChild(&result, child)
 		if err != nil {
-			// 记录失败的 Agent 及错误信息，继续执行其他 Agent
-			agentErrors = append(agentErrors, fmt.Sprintf("[%s]: %v", agent.Name(), err))
+			failures = append(failures, fmt.Errorf("agent %s failed: %w", agent.Name(), err))
+			if teamChildControlError(child, err) {
+				return result, &TeamExecutionError{Causes: failures}
+			}
 			continue
 		}
-		results = append(results, fmt.Sprintf("[%s]: %s", agent.Name(), output.Content))
+		results = append(results, fmt.Sprintf("[%s]: %s", agent.Name(), child.Child.Output.Content))
 	}
 
 	// 如果所有 Agent 都失败了，返回错误
-	if len(results) == 0 && len(agentErrors) > 0 {
-		return Output{}, fmt.Errorf("all agents failed: %s", strings.Join(agentErrors, "; "))
+	if len(results) == 0 && len(failures) > 0 {
+		return result, &TeamExecutionError{Causes: failures}
 	}
 
 	// Manager 汇总结果
-	summaryOutput, err := t.manager.Run(ctx, Input{
+	summary, err := runChildTask(ctx, t.manager, Input{
 		Query: fmt.Sprintf("Summarize team results:\n%s", results),
-	})
+	}, "hierarchical/manager/summary", t.manager.Run)
+	appendTeamChild(&result, summary)
 	if err != nil {
-		return Output{Content: fmt.Sprintf("Team results: %v", results)}, nil
+		failures = append(failures, fmt.Errorf("manager summary failed: %w", err))
 	}
-
-	return summaryOutput, nil
+	if len(failures) > 0 {
+		return result, &TeamExecutionError{Causes: failures}
+	}
+	return result, nil
 }
 
 // runCollaborative 协作执行
@@ -530,27 +575,35 @@ func (t *Team) runRoundRobin(ctx context.Context, input Input) (Output, error) {
 	}
 
 	currentInput := input
-	var lastOutput Output
+	var result Output
+	var failures []error
 
 	for round := 0; round < t.maxRounds; round++ {
-		for _, agent := range agents {
+		for index, agent := range agents {
 			select {
 			case <-ctx.Done():
-				return Output{}, ctx.Err()
+				return result, &TeamExecutionError{Causes: append(failures, ctx.Err())}
 			default:
 			}
 
-			output, err := agent.Run(ctx, currentInput)
+			child, err := runChildTask(ctx, agent, currentInput, fmt.Sprintf("round/%d/member/%d", round, index), agent.Run)
+			appendTeamChild(&result, child)
 			if err != nil {
+				failures = append(failures, fmt.Errorf("agent %s failed: %w", agent.Name(), err))
+				if teamChildControlError(child, err) {
+					return result, &TeamExecutionError{Causes: failures}
+				}
 				continue
 			}
-
-			lastOutput = output
+			output := child.Child.Output
 
 			// 检查是否完成（简化：检查输出中是否包含完成标记）
 			if output.Metadata != nil {
 				if done, ok := output.Metadata["done"].(bool); ok && done {
-					return output, nil
+					if len(failures) > 0 {
+						return result, &TeamExecutionError{Causes: failures}
+					}
+					return result, nil
 				}
 			}
 
@@ -566,7 +619,10 @@ func (t *Team) runRoundRobin(ctx context.Context, input Input) (Output, error) {
 		}
 	}
 
-	return lastOutput, nil
+	if len(failures) > 0 {
+		return result, &TeamExecutionError{Causes: failures}
+	}
+	return result, nil
 }
 
 // getAgentNamesFromSlice 从 Agent 切片获取名称列表

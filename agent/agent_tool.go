@@ -139,6 +139,9 @@ type ChildRunResult struct {
 	Child       ChildResult                `json:"child"`
 	Parts       []llm.ContentPart          `json:"parts,omitempty"`
 	Interrupt   *interrupt.PersistedSignal `json:"interrupt,omitempty"`
+	// ControlError 固定原执行是否返回控制错误；nil 为旧记录，恢复时沿用保守决议。
+	// 普通失败的已存结果可继续组合中其他位置，但不能重新派发原任务。
+	ControlError *bool `json:"control_error,omitempty"`
 }
 
 // ModelToolContent 只返回模型使用的视图；完整 Blocks、用量及子结果仍由信封保留。
@@ -221,6 +224,8 @@ func runChildTask(ctx context.Context, a Agent, input Input, position string, ex
 			if value := recover(); value != nil {
 				runErr = fmt.Errorf("agent %q panicked: %v", a.ID(), value)
 			}
+			control := childControlError(runErr)
+			out.ControlError = &control
 			out.Child.Status = "returned"
 			if runErr != nil {
 				out.Child.Status, out.Child.Error = "failed", runErr.Error()
