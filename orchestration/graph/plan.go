@@ -176,7 +176,7 @@ func (g *Graph[S]) selectSuccessorsWithTarget(name string, state S, commandTarge
 	}
 	var possible []string
 	for _, edge := range g.conditionalEdges[name] {
-		copy, cloneErr := state.Clone()
+		copy, cloneErr := cloneState(state, name)
 		if cloneErr != nil {
 			return nil, nil, cloneErr
 		}
@@ -321,7 +321,7 @@ func (x *planExecutor[S]) emit(ctx context.Context, kind EventType, name string,
 	if (name == START || name == END) && (kind == EventTypeNodeStart || kind == EventTypeNodeEnd) {
 		return nil
 	}
-	copy, cloneErr := state.Clone()
+	copy, cloneErr := cloneState(state, name)
 	if cloneErr != nil {
 		return cloneErr
 	}
@@ -520,7 +520,7 @@ func (x *planExecutor[S]) predecessorResult(name string) *savedNodeResult {
 
 func (x *planExecutor[S]) resultState(result *savedNodeResult) (S, error) {
 	if output, ok := x.outputs[result.TaskID]; ok {
-		copy, err := output.Clone()
+		copy, err := cloneState(output, result.Node)
 		if err != nil {
 			return output, err
 		}

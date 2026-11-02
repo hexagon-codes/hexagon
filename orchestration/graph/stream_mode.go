@@ -19,6 +19,7 @@ package graph
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -268,7 +269,12 @@ func (g *Graph[S]) StreamRun(ctx context.Context, state S, opts ...StreamRunOpti
 		}
 		for event := range events {
 			if event.Type == EventTypeError {
-				ch.emitTerminal(StreamModeEvent{Mode: StreamModeDebug, Type: EventNodeError, Node: event.NodeName, Data: event.Error.Error()})
+				metadata := map[string]any{}
+				var panicError *NodePanicError
+				if errors.As(event.Error, &panicError) {
+					metadata["stack"] = string(panicError.Stack)
+				}
+				ch.emitTerminal(StreamModeEvent{Mode: StreamModeDebug, Type: EventNodeError, Node: event.NodeName, Data: event.Error.Error(), Metadata: metadata})
 				return
 			}
 			if event.Type == EventTypeEnd {

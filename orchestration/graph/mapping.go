@@ -314,7 +314,7 @@ func (g *Graph[S]) applyWrites(base S, writes []StateWrite) (output S, err error
 			err = &NodePanicError{Node: "field reducer", Value: value}
 		}
 	}()
-	copy, err := base.Clone()
+	copy, err := cloneState(base, "field reducer")
 	if err != nil {
 		return base, err
 	}

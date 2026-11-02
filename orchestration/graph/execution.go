@@ -39,6 +39,17 @@ func (e *NodePanicError) Error() string {
 // UnsafeToReplay 表明 panic 之前可能已经发生外部动作，不能自动重新执行。
 func (*NodePanicError) UnsafeToReplay() bool { return true }
 
+// cloneState 捕获所有执行入口中的状态复制异常，保留未知副作用与定位信息。
+func cloneState(state State, node string) (copy State, err error) {
+	defer func() {
+		if value := recover(); value != nil {
+			copy = nil
+			err = &NodePanicError{Node: node, Value: value, Stack: debug.Stack()}
+		}
+	}()
+	return state.Clone()
+}
+
 // executeNodeHandler 统一节点策略，节点显式配置覆盖执行器默认配置。
 // 超时为合作式取消；忽略 context 的处理器返回后也不能采用其过期结果。
 func executeNodeHandler[S State](ctx context.Context, node *Node[S], input S, fallback *RetryPolicy) (output S, err error) {
@@ -133,7 +144,7 @@ func runIsolatedNode[S State](ctx context.Context, name string, handler NodeHand
 			err = &NodePanicError{Node: name, Value: value, Stack: debug.Stack()}
 		}
 	}()
-	cloned, err := input.Clone()
+	cloned, err := cloneState(input, name)
 	if err != nil {
 		return input, fmt.Errorf("clone input for node %q: %w", name, err)
 	}

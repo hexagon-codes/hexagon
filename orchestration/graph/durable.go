@@ -205,7 +205,7 @@ func (r *DurableGraphRunner[S]) Inspect(ctx context.Context, scope, runID string
 	if err != nil {
 		return zero, err
 	}
-	copy, err := x.state.Clone()
+	copy, err := cloneState(x.state, "inspect")
 	if err != nil {
 		return zero, err
 	}
