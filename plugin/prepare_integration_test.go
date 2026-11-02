@@ -341,7 +341,7 @@ func TestPrepareIntegrationRestoresFrozenVersionAndRejectsMissingOriginal(t *tes
 		}
 		restoredLease, err := manager.Registry.RestoreReferences(prepareCtx, pinned, func(_ context.Context, reference plugin.Reference) (plugin.Plugin, map[string]any, error) {
 			if !allowOriginal {
-				return nil, nil, errors.Join(agentruntime.ErrUnrecoverableSpec, missing)
+				return nil, nil, missing
 			}
 			var definition preparedDefinition
 			if err := json.Unmarshal(reference.Definition, &definition); err != nil {
@@ -354,6 +354,10 @@ func TestPrepareIntegrationRestoresFrozenVersionAndRejectsMissingOriginal(t *tes
 			return restored, definition.Config, nil
 		})
 		if err != nil {
+			// 宿主适配器连接两侧错误合同，执行核不依赖具体插件包。
+			if errors.Is(err, plugin.ErrDependencyUnavailable) {
+				return agentruntime.PreparedRun{}, errors.Join(agentruntime.ErrUnrecoverableSpec, err)
+			}
 			return agentruntime.PreparedRun{}, err
 		}
 		return preparedFromLease(restoredLease)
@@ -378,7 +382,7 @@ func TestPrepareIntegrationRestoresFrozenVersionAndRejectsMissingOriginal(t *tes
 	}
 	allowOriginal = false
 	durable.Store = newStore()
-	if _, err := durable.Execute(executionCtx, durable.Store.(*preparedRunStore).record, nil); !errors.Is(err, agentruntime.ErrUnrecoverableSpec) || !errors.Is(err, missing) {
+	if _, err := durable.Execute(executionCtx, durable.Store.(*preparedRunStore).record, nil); !errors.Is(err, agentruntime.ErrUnrecoverableSpec) || !errors.Is(err, plugin.ErrDependencyUnavailable) || !errors.Is(err, missing) {
 		t.Fatalf("missing original revision did not fail explicitly: %v", err)
 	}
 	if frozenReads.Load() != 2 || latestReads.Load() != 0 || current.modelCalls.Load() != 0 || current.toolCalls.Load() != 0 {

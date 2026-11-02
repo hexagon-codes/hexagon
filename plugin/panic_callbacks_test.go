@@ -42,6 +42,11 @@ func (p *callbackPanicPlugin) Init(ctx context.Context, config map[string]any) e
 }
 
 func (p *callbackPanicPlugin) Start(ctx context.Context) error {
+	for _, name := range p.Info().Dependencies {
+		if _, ok := DependencyFromContext(ctx, name); !ok {
+			return fmt.Errorf("dependency %s is missing", name)
+		}
+	}
 	if err := p.invoke("start"); err != nil {
 		return err
 	}
@@ -243,7 +248,8 @@ func TestPluginCallbackPanicRestoreCleansAllResources(t *testing.T) {
 			failure, stopA, stopB := errors.New("restore callback panic"), errors.New("restore a stop panic"), errors.New("restore b stop panic")
 			b.panics[phase] = failure
 			a.panics["stop"], b.panics["stop"] = stopA, stopB
-			references := []Reference{{Name: "a", Version: "v1", ObjectKey: "fixture/a/v1"}, {Name: "b", Version: "v1", ObjectKey: "fixture/b/v1"}}
+			aReference := Reference{Name: "a", Version: "v1", ConfigHash: computeConfigHash(nil), ObjectKey: "fixture/a/v1"}
+			references := []Reference{aReference, {Name: "b", Version: "v1", ConfigHash: computeConfigHash(nil), ObjectKey: "fixture/b/v1", Dependencies: []Reference{aReference}}}
 			_, err := manager.Registry.RestoreReferences(context.Background(), references, func(_ context.Context, ref Reference) (Plugin, map[string]any, error) {
 				if ref.Name == "a" {
 					return a, nil, nil

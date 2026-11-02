@@ -16,6 +16,9 @@ import (
 // ErrForcedStop 表示宿主在使用者尚未排空时显式停止资源。
 var ErrForcedStop = errors.New("plugin: generation forcibly stopped")
 
+// ErrDependencyUnavailable 表示原资源或实际依赖绑定无法安全恢复，不得改用当前路由。
+var ErrDependencyUnavailable = errors.New("plugin: original dependency binding cannot be restored")
+
 // Reference 保存插件版本身份与可选的重建描述，不包含进程内 generation 或资源句柄。
 // 只有 ObjectKey/Definition 存在时才能跨进程恢复；名称与摘要本身不能重建资源。
 type Reference struct {
@@ -24,6 +27,8 @@ type Reference struct {
 	ConfigHash string          `json:"config_hash"`
 	ObjectKey  string          `json:"object_key,omitempty"`
 	Definition json.RawMessage `json:"definition,omitempty"`
+	// Dependencies 固定该实例实际使用的依赖版本，与显式选择的同名新路由分开。
+	Dependencies []Reference `json:"dependencies,omitempty"`
 }
 
 // DefinitionReferencer 由需要持久恢复的插件或宿主适配器提供固定版本的重建描述。
@@ -38,18 +43,22 @@ type DefinitionReferencer interface {
 type RestoreResolver func(context.Context, Reference) (Plugin, map[string]any, error)
 
 type generation struct {
-	plugin       Plugin
-	reference    Reference
-	dependencies []string
-	mu           sync.Mutex
-	refs         int
-	retired      bool
-	forced       bool
-	drained      chan struct{}
-	done         chan struct{}
-	stopOnce     sync.Once
-	stopCancel   context.CancelFunc
-	err          error
+	plugin         Plugin
+	reference      Reference
+	dependencies   []string
+	bindings       []*generation
+	legacyBindings map[string]bool
+	started        bool
+	mu             sync.Mutex
+	refs           int
+	retired        bool
+	forced         bool
+	drained        chan struct{}
+	done           chan struct{}
+	stopOnce       sync.Once
+	stopCancel     context.CancelFunc
+	stopPhase      string
+	err            error
 }
 
 func newGeneration(p Plugin, ref Reference) *generation {
@@ -60,8 +69,8 @@ func newGeneration(p Plugin, ref Reference) *generation {
 // Release 幂等；调用后不得再使用借用的 Plugin。Lease 本身不能序列化恢复。
 type Lease struct {
 	plugins     map[string]Plugin
-	refs        []Reference
 	generations []*generation
+	roots       []*generation
 	once        sync.Once
 }
 
@@ -78,54 +87,64 @@ func (r *Registry) Acquire(names ...string) (*Lease, error) {
 		}
 		sort.Strings(names)
 	}
-	// 依赖与目标路由在同一快照中固定，避免只 pin 工具却提前回收其 Provider。
-	selected := make(map[string]bool)
-	resolved := make([]string, 0, len(names))
-	var include func(string) error
-	include = func(name string) error {
-		if selected[name] {
+	lease := &Lease{plugins: make(map[string]Plugin)}
+	roots := make(map[string]*generation)
+	for _, name := range names {
+		instance := r.plugins[name]
+		if instance == nil || instance.State != PluginStateRunning {
+			return nil, fmt.Errorf("plugin %s is not running", name)
+		}
+		if _, exists := roots[name]; !exists {
+			roots[name] = instance.generation
+			lease.roots = append(lease.roots, instance.generation)
+		}
+	}
+	seen := make(map[*generation]bool)
+	ambiguous := make(map[string]bool)
+	byName := make(map[string]*generation)
+	var include func(*generation, bool) error
+	include = func(g *generation, root bool) error {
+		if seen[g] {
 			return nil
 		}
-		instance, ok := r.plugins[name]
-		if !ok || instance.State != PluginStateRunning {
-			return fmt.Errorf("plugin %s is not running", name)
+		g.mu.Lock()
+		if g.forced || root && g.retired || !root && !g.started {
+			g.mu.Unlock()
+			return fmt.Errorf("plugin %s generation is unavailable", g.reference.Name)
 		}
-		selected[name] = true
-		for _, dep := range instance.generation.dependencies {
-			if err := include(dep); err != nil {
+		select {
+		case <-g.done:
+			g.mu.Unlock()
+			return fmt.Errorf("plugin %s generation is stopped", g.reference.Name)
+		default:
+		}
+		g.refs++
+		bindings := append([]*generation(nil), g.bindings...)
+		g.mu.Unlock()
+		seen[g] = true
+		lease.generations = append(lease.generations, g)
+		name := g.reference.Name
+		if selected, explicit := roots[name]; explicit {
+			lease.plugins[name] = selected.plugin
+		} else if previous, exists := byName[name]; !exists && !ambiguous[name] {
+			byName[name] = g
+			lease.plugins[name] = g.plugin
+		} else if previous != g {
+			delete(lease.plugins, name)
+			ambiguous[name] = true
+		}
+		for _, dependency := range bindings {
+			if err := include(dependency, false); err != nil {
 				return err
 			}
 		}
-		resolved = append(resolved, name)
 		return nil
 	}
-	for _, name := range names {
-		if err := include(name); err != nil {
+	for _, g := range lease.roots {
+		if err := include(g, true); err != nil {
+			lease.Release()
 			return nil, err
 		}
-	}
-	lease := &Lease{plugins: make(map[string]Plugin)}
-	for _, name := range resolved {
-		if _, exists := lease.plugins[name]; exists {
-			continue
-		}
-		instance, ok := r.plugins[name]
-		if !ok || instance.State != PluginStateRunning {
-			lease.Release()
-			return nil, fmt.Errorf("plugin %s is not running", name)
-		}
-		g := instance.generation
-		g.mu.Lock()
-		if g.retired {
-			g.mu.Unlock()
-			lease.Release()
-			return nil, fmt.Errorf("plugin %s is retired", name)
-		}
-		g.refs++
-		g.mu.Unlock()
-		lease.generations = append(lease.generations, g)
-		lease.plugins[name] = instance.Plugin
-		lease.refs = append(lease.refs, g.reference)
 	}
 	return lease, nil
 }
@@ -144,13 +163,13 @@ func (r *Registry) AcquireReferences(refs []Reference) (*Lease, error) {
 	if err != nil {
 		return nil, err
 	}
-	actual := make(map[string]Reference, len(lease.refs))
-	for _, ref := range lease.refs {
+	actual := make(map[string]Reference, len(refs))
+	for _, ref := range lease.References() {
 		actual[ref.Name] = ref
 	}
 	for _, ref := range refs {
 		got := actual[ref.Name]
-		if got.Name != ref.Name || got.Version != ref.Version || got.ConfigHash != ref.ConfigHash {
+		if !sameReferenceIdentity(got, ref) {
 			lease.Release()
 			return nil, fmt.Errorf("plugin %s revision is unavailable", ref.Name)
 		}
@@ -163,34 +182,23 @@ func (l *Lease) Plugin(name string) (Plugin, bool) { p, ok := l.plugins[name]; r
 
 // References 返回版本身份的独立副本；持久交接使用 RecoverableReferences 获取重建描述。
 func (l *Lease) References() []Reference {
-	refs := append([]Reference(nil), l.refs...)
-	for i := range refs {
-		refs[i].Definition = append(json.RawMessage(nil), refs[i].Definition...)
+	refs := make([]Reference, 0, len(l.roots))
+	for _, g := range l.roots {
+		ref, _ := generationReference(g, false)
+		refs = append(refs, ref)
 	}
 	return refs
 }
 
-// RecoverableReferences 为持久交接获取真正可重建的引用，不把名称与摘要冒充重建配置。
-// 此方法在 prepare pin 之后、发布锁之外调用；失败不改变普通 Lease 的使用权。
+// RecoverableReferences 返回根选择及其实际依赖树，各代保持独立固定引用。
 func (l *Lease) RecoverableReferences() ([]Reference, error) {
-	refs := l.References()
-	for i := range refs {
-		provider, ok := l.plugins[refs[i].Name].(DefinitionReferencer)
-		if !ok {
-			return nil, fmt.Errorf("plugin %s has no recoverable definition", refs[i].Name)
-		}
-		objectKey, definition, err := provider.DefinitionReference()
+	refs := make([]Reference, 0, len(l.roots))
+	for _, g := range l.roots {
+		ref, err := generationReference(g, true)
 		if err != nil {
-			return nil, fmt.Errorf("plugin %s definition reference: %w", refs[i].Name, err)
+			return nil, err
 		}
-		if objectKey == "" && len(definition) == 0 {
-			return nil, fmt.Errorf("plugin %s definition reference is empty", refs[i].Name)
-		}
-		if len(definition) > 0 && !json.Valid(definition) {
-			return nil, fmt.Errorf("plugin %s definition is not valid JSON", refs[i].Name)
-		}
-		refs[i].ObjectKey = objectKey
-		refs[i].Definition = append(json.RawMessage(nil), definition...)
+		refs = append(refs, ref)
 	}
 	return refs, nil
 }
@@ -203,79 +211,164 @@ func (r *Registry) RestoreReferences(ctx context.Context, refs []Reference, reso
 		return lease, nil
 	}
 	if resolve == nil {
-		return nil, fmt.Errorf("plugin: restore resolver is required")
+		return nil, fmt.Errorf("%w: restore resolver is required", ErrDependencyUnavailable)
 	}
-	cleanup := func(err error) (*Lease, error) {
+	cache := make(map[string]*generation)
+	visiting := make(map[string]bool)
+	created := make([]*generation, 0)
+	cleanup := func(cause error) (*Lease, error) {
 		lease.Release()
-		errs := []error{err}
-		for i := len(lease.generations) - 1; i >= 0; i-- {
-			g := lease.generations[i]
-			retireGeneration(g)
-			g.stop(context.WithoutCancel(ctx), false)
-			<-g.done
-			g.mu.Lock()
-			errs = append(errs, g.err)
-			g.mu.Unlock()
+		retiring := make([]*generation, 0, len(created))
+		for i := len(created) - 1; i >= 0; i-- {
+			created[i].stopPhase = "restore.cleanup.stop"
+			retireGeneration(created[i])
+			retiring = append(retiring, created[i])
 		}
-		return nil, errors.Join(errs...)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		stopErr := startRetirement(retiring).Wait(cleanupCtx)
+		return nil, fmt.Errorf("%w: %w", ErrDependencyUnavailable, errors.Join(cause, stopErr))
 	}
-	for _, ref := range refs {
-		if _, exists := lease.plugins[ref.Name]; exists {
-			return cleanup(fmt.Errorf("plugin %s has duplicate restore references", ref.Name))
+	var build func(Reference) (*generation, error)
+	build = func(ref Reference) (*generation, error) {
+		ref = cloneReference(ref)
+		if ref.Name == "" || ref.Version == "" || ref.ObjectKey == "" && len(ref.Definition) == 0 || len(ref.Definition) > 0 && !json.Valid(ref.Definition) {
+			return nil, fmt.Errorf("plugin %s has no valid recoverable reference", ref.Name)
 		}
-		if ref.ObjectKey == "" && len(ref.Definition) == 0 {
-			return cleanup(fmt.Errorf("plugin %s has no recoverable definition", ref.Name))
-		}
-		if len(ref.Definition) > 0 && !json.Valid(ref.Definition) {
-			return cleanup(fmt.Errorf("plugin %s definition is not valid JSON", ref.Name))
-		}
-		ref.Definition = append(json.RawMessage(nil), ref.Definition...)
-		candidate, config, err := resolve(ctx, ref)
+		identityData, err := json.Marshal(ref)
 		if err != nil {
-			return cleanup(err)
+			return nil, err
+		}
+		identity := string(identityData)
+		if g := cache[identity]; g != nil {
+			return g, nil
+		}
+		if visiting[identity] {
+			return nil, fmt.Errorf("plugin %s has cyclic restore dependencies", ref.Name)
+		}
+		visiting[identity] = true
+		defer delete(visiting, identity)
+		dependencies := make([]*generation, 0, len(ref.Dependencies))
+		names := make(map[string]bool)
+		for _, child := range ref.Dependencies {
+			if names[child.Name] {
+				return nil, fmt.Errorf("plugin %s has duplicate dependency %s", ref.Name, child.Name)
+			}
+			names[child.Name] = true
+			dependency, err := build(child)
+			if err != nil {
+				return nil, err
+			}
+			dependencies = append(dependencies, dependency)
+		}
+		dependencyCtx, view := contextWithDependencies(ctx, dependencies)
+		var candidate Plugin
+		var config map[string]any
+		err = invokePluginCallback(ref.Name, "restore.resolve", func() error {
+			var err error
+			candidate, config, err = resolve(dependencyCtx, ref)
+			return err
+		})
+		if err != nil {
+			return nil, err
 		}
 		if candidate == nil {
-			return cleanup(fmt.Errorf("plugin %s resolver returned no instance", ref.Name))
+			return nil, fmt.Errorf("plugin %s resolver returned no instance", ref.Name)
 		}
 		r.mu.RLock()
 		current := r.plugins[ref.Name]
-		shared := current != nil && reflect.TypeOf(candidate).Comparable() && candidate == current.Plugin
+		shared := current != nil && reflect.ValueOf(candidate).Comparable() && candidate == current.Plugin
 		r.mu.RUnlock()
 		if shared {
-			return cleanup(fmt.Errorf("plugin %s restore requires an independent instance", ref.Name))
+			return nil, fmt.Errorf("plugin %s restore requires an independent instance", ref.Name)
 		}
-		failCandidate := func(err error) (*Lease, error) {
-			stopErr := invokePluginCallback(ref.Name, "restore.cleanup.stop", func() error { return candidate.Stop(context.WithoutCancel(ctx)) })
-			_, failure := cleanup(errors.Join(err, stopErr))
-			return nil, failure
+		info := candidate.Info()
+		g := newGeneration(candidate, ref)
+		created = append(created, g)
+		if info.Name != ref.Name || info.Version != ref.Version || computeConfigHash(config) != ref.ConfigHash {
+			return nil, fmt.Errorf("plugin %s restored revision does not match", ref.Name)
 		}
-		if candidate.Info().Name != ref.Name || candidate.Info().Version != ref.Version || computeConfigHash(config) != ref.ConfigHash {
-			return failCandidate(fmt.Errorf("plugin %s restored revision does not match", ref.Name))
+		if len(info.Dependencies) != len(dependencies) {
+			return nil, fmt.Errorf("plugin %s dependency references do not match its declaration", ref.Name)
+		}
+		for _, name := range info.Dependencies {
+			if !names[name] {
+				return nil, fmt.Errorf("plugin %s original dependency %s is missing", ref.Name, name)
+			}
+		}
+		for _, dependency := range dependencies {
+			dependency.mu.Lock()
+			dependency.refs++
+			dependency.mu.Unlock()
+			g.bindings = append(g.bindings, dependency)
 		}
 		frozen, err := reflectx.DeepCopyChecked(config)
 		if err != nil {
-			return failCandidate(err)
+			return nil, err
 		}
-		if err := invokePluginCallback(ref.Name, "restore.init", func() error { return candidate.Init(ctx, frozen) }); err != nil {
-			return failCandidate(err)
+		if err := invokePluginCallback(ref.Name, "restore.init", func() error { return candidate.Init(dependencyCtx, frozen) }); err != nil {
+			return nil, err
 		}
-		if err := invokePluginCallback(ref.Name, "restore.start", func() error { return candidate.Start(ctx) }); err != nil {
-			return failCandidate(err)
+		if err := invokePluginCallback(ref.Name, "restore.start", func() error { return candidate.Start(dependencyCtx) }); err != nil {
+			return nil, err
+		}
+		used := view.usedNames()
+		for _, dependency := range dependencies {
+			if !used[dependency.reference.Name] {
+				return nil, fmt.Errorf("plugin %s did not resolve original dependency %s from lifecycle context", ref.Name, dependency.reference.Name)
+			}
 		}
 		if err := ctx.Err(); err != nil {
-			return failCandidate(err)
+			return nil, err
 		}
-		g := newGeneration(candidate, ref)
-		g.refs = 1
-		lease.plugins[ref.Name] = candidate
-		lease.refs = append(lease.refs, ref)
-		lease.generations = append(lease.generations, g)
+		g.started = true
+		cache[identity] = g
+		return g, nil
 	}
-	retiring := make([]*generation, 0, len(lease.generations))
-	for i := len(lease.generations) - 1; i >= 0; i-- {
-		g := lease.generations[i]
-		retireGeneration(g)
-		retiring = append(retiring, g)
+	roots := make(map[string]*generation)
+	for _, ref := range refs {
+		if _, exists := roots[ref.Name]; exists {
+			return cleanup(fmt.Errorf("plugin %s has duplicate root references", ref.Name))
+		}
+		g, err := build(ref)
+		if err != nil {
+			return cleanup(err)
+		}
+		roots[ref.Name] = g
+		lease.roots = append(lease.roots, g)
+	}
+	seen := make(map[*generation]bool)
+	implicit := make(map[string]*generation)
+	ambiguous := make(map[string]bool)
+	var pin func(*generation)
+	pin = func(g *generation) {
+		if seen[g] {
+			return
+		}
+		seen[g] = true
+		g.refs++
+		lease.generations = append(lease.generations, g)
+		name := g.reference.Name
+		if root, ok := roots[name]; ok {
+			lease.plugins[name] = root.plugin
+		} else if previous, ok := implicit[name]; !ok && !ambiguous[name] {
+			implicit[name] = g
+			lease.plugins[name] = g.plugin
+		} else if previous != g {
+			delete(lease.plugins, name)
+			ambiguous[name] = true
+		}
+		for _, dependency := range g.bindings {
+			pin(dependency)
+		}
+	}
+	for _, g := range lease.roots {
+		pin(g)
+	}
+	retiring := make([]*generation, 0, len(created))
+	for i := len(created) - 1; i >= 0; i-- {
+		retireGeneration(created[i])
+		retiring = append(retiring, created[i])
 	}
 	startRetirement(retiring)
 	return lease, nil
@@ -301,12 +394,7 @@ func (l *Lease) Release() {
 	}
 	l.once.Do(func() {
 		for _, g := range l.generations {
-			g.mu.Lock()
-			g.refs--
-			if g.retired && g.refs == 0 {
-				close(g.drained)
-			}
-			g.mu.Unlock()
+			releaseGeneration(g)
 		}
 	})
 }
@@ -349,10 +437,14 @@ func (g *generation) stop(ctx context.Context, force bool) {
 		go func() {
 			var err error
 			returned := false
+			phase := g.stopPhase
+			if phase == "" {
+				phase = "stop"
+			}
 			defer func() {
 				value := recover()
 				if !returned {
-					err = pluginPanic(g.reference.Name, "stop", value)
+					err = pluginPanic(g.reference.Name, phase, value)
 				}
 				stopCancel()
 				g.mu.Lock()
@@ -361,9 +453,14 @@ func (g *generation) stop(ctx context.Context, force bool) {
 					g.err = errors.Join(ErrForcedStop, err)
 				}
 				g.mu.Unlock()
+				releaseDependencyBindings(g)
 				close(g.done)
 			}()
-			err = g.plugin.Stop(stopCtx)
+			g.mu.Lock()
+			bindings := append([]*generation(nil), g.bindings...)
+			g.mu.Unlock()
+			dependencyCtx, _ := contextWithDependencies(stopCtx, bindings)
+			err = g.plugin.Stop(dependencyCtx)
 			returned = true
 		}()
 	})
@@ -373,14 +470,12 @@ func startRetirement(gs []*generation) *Retirement {
 	r := &Retirement{generations: gs}
 	if len(gs) > 0 {
 		go func() {
-			// 集合整体排空后按调用者给出的依赖逆序关闭。
+			// 按依赖逆序逐个排空；依赖引用在拥有者 Stop 完成后才释放。
 			for _, g := range gs {
 				select {
 				case <-g.drained:
 				case <-g.done:
 				}
-			}
-			for _, g := range gs {
 				g.stop(context.Background(), false)
 				<-g.done
 			}
@@ -439,11 +534,15 @@ func (m *PluginManager) ReplaceCandidate(ctx context.Context, name string, candi
 // 候选按依赖顺序启动，清理与排空等待都在发布锁外完成。
 func (m *PluginManager) ReplaceCandidates(ctx context.Context, candidates []Candidate) (*Retirement, error) {
 	type preparedCandidate struct {
-		candidate Candidate
-		info      PluginInfo
-		old       *PluginInstance
-		config    map[string]any
-		started   bool
+		candidate   Candidate
+		info        PluginInfo
+		old         *PluginInstance
+		config      map[string]any
+		started     bool
+		generation  *generation
+		held        []*generation
+		callbackCtx context.Context
+		view        *dependencyView
 	}
 	r := m.Registry
 	prepared := make(map[string]*preparedCandidate, len(candidates))
@@ -462,14 +561,17 @@ func (m *PluginManager) ReplaceCandidates(ctx context.Context, candidates []Cand
 		if !ok {
 			return nil, fmt.Errorf("plugin %s not found", info.Name)
 		}
-		if reflect.TypeOf(item.Plugin).Comparable() && item.Plugin == old.Plugin {
+		if reflect.ValueOf(item.Plugin).Comparable() && item.Plugin == old.Plugin {
 			return nil, fmt.Errorf("plugin %s candidate must be a separate instance", info.Name)
 		}
 		frozen, err := reflectx.DeepCopyChecked(item.Config)
 		if err != nil {
 			return nil, fmt.Errorf("plugin config cannot be snapshotted: %w", err)
 		}
-		prepared[info.Name] = &preparedCandidate{candidate: item, info: info, old: old, config: frozen}
+		ref := Reference{Name: info.Name, Version: info.Version, ConfigHash: computeConfigHash(frozen)}
+		g := newGeneration(item.Plugin, ref)
+		g.dependencies = append([]string(nil), info.Dependencies...)
+		prepared[info.Name] = &preparedCandidate{candidate: item, info: info, old: old, config: frozen, generation: g}
 		infos = append(infos, info)
 	}
 	owned := make([]*preparedCandidate, 0, len(prepared))
@@ -477,7 +579,19 @@ func (m *PluginManager) ReplaceCandidates(ctx context.Context, candidates []Cand
 		errs := []error{cause}
 		for i := len(owned) - 1; i >= 0; i-- {
 			item := owned[i]
-			errs = append(errs, invokePluginCallback(item.info.Name, "candidate.cleanup.stop", func() error { return item.candidate.Plugin.Stop(context.WithoutCancel(ctx)) }))
+			stopCtx := context.WithoutCancel(ctx)
+			if item.callbackCtx != nil {
+				stopCtx = context.WithoutCancel(item.callbackCtx)
+			}
+			errs = append(errs, invokePluginCallback(item.info.Name, "candidate.cleanup.stop", func() error { return item.candidate.Plugin.Stop(stopCtx) }))
+			if item.held != nil {
+				for _, g := range item.held {
+					releaseGeneration(g)
+				}
+				item.held = nil
+			} else {
+				releaseDependencyBindings(item.generation)
+			}
 		}
 		return nil, errors.Join(errs...)
 	}
@@ -485,11 +599,32 @@ func (m *PluginManager) ReplaceCandidates(ctx context.Context, candidates []Cand
 	for _, info := range ordered {
 		item := prepared[info.Name]
 		owned = append(owned, item)
+		visible, err := r.captureDependencies(info.Dependencies)
+		if err != nil {
+			return cleanup(err)
+		}
+		item.held = append(item.held, visible...)
+		preferred := make([]*generation, 0, len(visible))
+		for _, g := range visible {
+			selected := g
+			if replacement, ok := prepared[g.reference.Name]; ok {
+				if !replacement.started {
+					return cleanup(fmt.Errorf("candidate dependency %s is not running for plugin %s", g.reference.Name, info.Name))
+				}
+				selected = replacement.generation
+				selected.mu.Lock()
+				selected.refs++
+				selected.mu.Unlock()
+				item.held = append(item.held, selected)
+			}
+			preferred = append(preferred, selected)
+		}
+		item.callbackCtx, item.view = contextWithDependencies(ctx, preferred)
 		initConfig, err := reflectx.DeepCopyChecked(item.config)
 		if err != nil {
 			return cleanup(err)
 		}
-		if err := invokePluginCallback(info.Name, "candidate.init", func() error { return item.candidate.Plugin.Init(ctx, initConfig) }); err != nil {
+		if err := invokePluginCallback(info.Name, "candidate.init", func() error { return item.candidate.Plugin.Init(item.callbackCtx, initConfig) }); err != nil {
 			return cleanup(fmt.Errorf("failed to init plugin candidate %s: %w", info.Name, err))
 		}
 		for _, dep := range info.Dependencies {
@@ -504,9 +639,29 @@ func (m *PluginManager) ReplaceCandidates(ctx context.Context, candidates []Cand
 				}
 			}
 		}
-		if err := invokePluginCallback(info.Name, "candidate.start", func() error { return item.candidate.Plugin.Start(ctx) }); err != nil {
+		if err := invokePluginCallback(info.Name, "candidate.start", func() error { return item.candidate.Plugin.Start(item.callbackCtx) }); err != nil {
 			return cleanup(fmt.Errorf("failed to start plugin candidate %s: %w", info.Name, err))
 		}
+		used := item.view.usedNames()
+		if !r.legacyBindingsCurrent(visible, used) {
+			return cleanup(fmt.Errorf("plugin %s dependencies changed while preparing candidate", info.Name))
+		}
+		chosen := make(map[*generation]bool)
+		for _, g := range visible {
+			selected := g
+			if used[g.reference.Name] {
+				selected = item.view.plugins[g.reference.Name]
+			}
+			item.generation.bindings = append(item.generation.bindings, selected)
+			chosen[selected] = true
+		}
+		for _, g := range item.held {
+			if !chosen[g] {
+				releaseGeneration(g)
+			}
+		}
+		item.held = nil
+		item.generation.started = true
 		item.started = true
 	}
 	if err := ctx.Err(); err != nil {
@@ -515,9 +670,7 @@ func (m *PluginManager) ReplaceCandidates(ctx context.Context, candidates []Cand
 	newInstances := make(map[string]*PluginInstance, len(prepared))
 	for name, item := range prepared {
 		now := time.Now()
-		ref := Reference{Name: name, Version: item.info.Version, ConfigHash: computeConfigHash(item.config)}
-		newInstances[name] = &PluginInstance{Plugin: item.candidate.Plugin, State: PluginStateRunning, Config: item.config, LoadedAt: now, StartedAt: &now, generation: newGeneration(item.candidate.Plugin, ref)}
-		newInstances[name].generation.dependencies = append([]string(nil), item.info.Dependencies...)
+		newInstances[name] = &PluginInstance{Plugin: item.candidate.Plugin, State: PluginStateRunning, Config: item.config, LoadedAt: now, StartedAt: &now, generation: item.generation}
 	}
 	r.mu.Lock()
 	for name, item := range prepared {

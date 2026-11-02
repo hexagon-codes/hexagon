@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -41,6 +42,15 @@ func (p *generationPlugin) Init(ctx context.Context, config map[string]any) erro
 		return p.initErr
 	}
 	return p.BasePlugin.Init(ctx, config)
+}
+
+func (p *generationPlugin) Start(ctx context.Context) error {
+	for _, name := range p.Info().Dependencies {
+		if _, ok := DependencyFromContext(ctx, name); !ok {
+			return fmt.Errorf("dependency %s is missing", name)
+		}
+	}
+	return p.BasePlugin.Start(ctx)
 }
 
 func (p *generationPlugin) Stop(context.Context) error {

@@ -426,7 +426,7 @@ func (s *FileStore) readItemUnlocked(filePath string) (*fileItem, error) {
 	}
 
 	var fi fileItem
-	if err := json.Unmarshal(data, &fi); err != nil {
+	if err := decodeJSONNumbers(data, &fi); err != nil {
 		return nil, fmt.Errorf("解析记忆文件失败: %w", err)
 	}
 	return &fi, nil

@@ -91,7 +91,7 @@ func (s *InMemoryStore) PutIfRevision(ctx context.Context, namespace []string, k
 		return nil, err
 	}
 	var frozen map[string]any
-	if err := json.Unmarshal(data, &frozen); err != nil {
+	if err := decodeJSONNumbers(data, &frozen); err != nil {
 		return nil, err
 	}
 	item, err := s.put(append([]string(nil), namespace...), key, frozen, &expected, opts...)
@@ -99,7 +99,7 @@ func (s *InMemoryStore) PutIfRevision(ctx context.Context, namespace []string, k
 		return nil, err
 	}
 	item.Value = nil
-	if err := json.Unmarshal(data, &item.Value); err != nil {
+	if err := decodeJSONNumbers(data, &item.Value); err != nil {
 		return nil, err
 	}
 	return item, nil

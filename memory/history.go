@@ -132,7 +132,7 @@ func (m *ScopedMemory) ReadWindow(ctx context.Context, anchor HistoryAnchor, bef
 		return nil, ErrRevisionUnavailable
 	}
 	var document historyDocument
-	if err := json.Unmarshal([]byte(data), &document); err != nil {
+	if err := decodeJSONNumbers([]byte(data), &document); err != nil {
 		return nil, fmt.Errorf("memory: history cannot be decoded: %w", err)
 	}
 	if !document.Scope.equal(m.scope) {

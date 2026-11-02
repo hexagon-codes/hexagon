@@ -69,7 +69,20 @@ func (l *Lifecycle) Init(ctx context.Context, name string, config map[string]any
 	if err != nil {
 		return err
 	}
-	if err := invokePluginCallback(name, "init", func() error { return instance.Plugin.Init(ctx, initConfig) }); err != nil {
+	for _, dependency := range instance.Plugin.Info().Dependencies {
+		if dependency == name {
+			return fmt.Errorf("plugin %s cannot depend on itself", name)
+		}
+	}
+	bindings, err := l.registry.captureDependencies(instance.Plugin.Info().Dependencies)
+	if err != nil {
+		return err
+	}
+	dependencyCtx, view := contextWithDependencies(ctx, bindings)
+	if err := invokePluginCallback(name, "init", func() error { return instance.Plugin.Init(dependencyCtx, initConfig) }); err != nil {
+		for _, dependency := range bindings {
+			releaseGeneration(dependency)
+		}
 		l.registry.mu.Lock()
 		instance.State = PluginStateError
 		instance.Error = err
@@ -77,11 +90,34 @@ func (l *Lifecycle) Init(ctx context.Context, name string, config map[string]any
 		return fmt.Errorf("failed to init plugin %s: %w", name, err)
 	}
 
+	used := view.usedNames()
+	if !l.registry.legacyBindingsCurrent(bindings, used) {
+		cleanupErr := invokePluginCallback(name, "init.cleanup.stop", func() error { return instance.Plugin.Stop(dependencyCtx) })
+		for _, dependency := range bindings {
+			releaseGeneration(dependency)
+		}
+		return errors.Join(fmt.Errorf("plugin %s dependencies changed during initialization", name), cleanupErr)
+	}
 	configHash := computeConfigHash(frozen)
 	l.registry.mu.Lock()
+	if l.registry.plugins[name] != instance {
+		l.registry.mu.Unlock()
+		cleanupErr := invokePluginCallback(name, "init.cleanup.stop", func() error { return instance.Plugin.Stop(dependencyCtx) })
+		for _, dependency := range bindings {
+			releaseGeneration(dependency)
+		}
+		return errors.Join(fmt.Errorf("plugin %s route changed during initialization", name), cleanupErr)
+	}
 	instance.State = PluginStateInitialized
 	instance.Config = frozen
+	instance.generation.mu.Lock()
 	instance.generation.reference.ConfigHash = configHash
+	instance.generation.bindings = bindings
+	instance.generation.legacyBindings = make(map[string]bool)
+	for _, dependency := range bindings {
+		instance.generation.legacyBindings[dependency.reference.Name] = !used[dependency.reference.Name]
+	}
+	instance.generation.mu.Unlock()
 	l.registry.mu.Unlock()
 
 	l.registry.emitEvent(PluginEvent{
@@ -106,36 +142,76 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 		return fmt.Errorf("plugin %s is not ready to start (current: %s)", name, state)
 	}
 
-	// 检查依赖
-	info := instance.Plugin.Info()
-	for _, dep := range info.Dependencies {
-		depInstance, err := l.registry.GetInstance(dep)
+	g := instance.generation
+	if state == PluginStateStopped {
+		previous := g
+		g = newGeneration(instance.Plugin, previous.reference)
+		g.dependencies = append([]string(nil), previous.dependencies...)
+		bindings, err := l.registry.captureDependencies(g.dependencies)
 		if err != nil {
-			return fmt.Errorf("dependency %s not found for plugin %s", dep, name)
+			return err
 		}
-		if depInstance.State != PluginStateRunning {
-			return fmt.Errorf("dependency %s is not running (current: %s)", dep, depInstance.State)
+		g.bindings = bindings
+		g.legacyBindings = make(map[string]bool)
+		for _, dependency := range bindings {
+			g.legacyBindings[dependency.reference.Name] = true
 		}
 	}
-
-	if err := invokePluginCallback(name, "start", func() error { return instance.Plugin.Start(ctx) }); err != nil {
+	g.mu.Lock()
+	bindings := append([]*generation(nil), g.bindings...)
+	legacy := make(map[string]bool, len(g.legacyBindings))
+	for dependency, raw := range g.legacyBindings {
+		legacy[dependency] = raw
+	}
+	g.mu.Unlock()
+	for _, dependency := range bindings {
+		dependency.mu.Lock()
+		started, forced := dependency.started, dependency.forced
+		dependency.mu.Unlock()
+		if !started || forced {
+			if state == PluginStateStopped {
+				releaseDependencyBindings(g)
+			}
+			return fmt.Errorf("dependency %s is not running for plugin %s", dependency.reference.Name, name)
+		}
+	}
+	dependencyCtx, view := contextWithDependencies(ctx, bindings)
+	if err := invokePluginCallback(name, "start", func() error { return instance.Plugin.Start(dependencyCtx) }); err != nil {
+		cleanupErr := invokePluginCallback(name, "start.cleanup.stop", func() error { return instance.Plugin.Stop(dependencyCtx) })
+		releaseDependencyBindings(g)
 		l.registry.mu.Lock()
 		instance.State = PluginStateError
-		instance.Error = err
+		instance.Error = errors.Join(err, cleanupErr)
 		l.registry.mu.Unlock()
-		return fmt.Errorf("failed to start plugin %s: %w", name, err)
+		return fmt.Errorf("failed to start plugin %s: %w", name, errors.Join(err, cleanupErr))
 	}
-
+	used := view.usedNames()
+	for dependency, raw := range legacy {
+		if !raw {
+			used[dependency] = true
+		}
+	}
+	if !l.registry.legacyBindingsCurrent(bindings, used) {
+		cleanupErr := invokePluginCallback(name, "start.cleanup.stop", func() error { return instance.Plugin.Stop(dependencyCtx) })
+		releaseDependencyBindings(g)
+		l.registry.mu.Lock()
+		instance.State = PluginStateError
+		l.registry.mu.Unlock()
+		return errors.Join(fmt.Errorf("plugin %s dependencies changed during startup", name), cleanupErr)
+	}
 	now := time.Now()
 	l.registry.mu.Lock()
-	if instance.State == PluginStateStopped {
-		previous := instance.generation
-		instance.generation = newGeneration(instance.Plugin, previous.reference)
-		instance.generation.dependencies = append([]string(nil), previous.dependencies...)
+	if l.registry.plugins[name] != instance {
+		l.registry.mu.Unlock()
+		cleanupErr := invokePluginCallback(name, "start.cleanup.stop", func() error { return instance.Plugin.Stop(dependencyCtx) })
+		releaseDependencyBindings(g)
+		return errors.Join(fmt.Errorf("plugin %s route changed during startup", name), cleanupErr)
 	}
-	instance.State = PluginStateRunning
-	instance.StartedAt = &now
-	instance.Error = nil
+	instance.generation = g
+	g.mu.Lock()
+	g.started = true
+	g.mu.Unlock()
+	instance.State, instance.StartedAt, instance.Error = PluginStateRunning, &now, nil
 	l.registry.mu.Unlock()
 
 	l.mu.Lock()
@@ -164,17 +240,23 @@ func (l *Lifecycle) Stop(ctx context.Context, name string) error {
 		return fmt.Errorf("plugin %s is not running (current: %s)", name, state)
 	}
 
-	// 检查是否有其他插件依赖此插件
-	for _, info := range l.registry.List() {
-		for _, dep := range info.Dependencies {
-			if dep == name {
-				depInstance, _ := l.registry.GetInstance(info.Name)
-				if depInstance != nil && depInstance.State == PluginStateRunning {
-					return fmt.Errorf("cannot stop plugin %s: plugin %s depends on it", name, info.Name)
-				}
+	// 只阻止仍使用此实际代次的运行依赖者，不把同名新版本误当旧绑定。
+	l.registry.mu.RLock()
+	for dependentName, dependent := range l.registry.plugins {
+		if dependent.State != PluginStateRunning || dependent == instance {
+			continue
+		}
+		dependent.generation.mu.Lock()
+		for _, binding := range dependent.generation.bindings {
+			if binding == instance.generation {
+				dependent.generation.mu.Unlock()
+				l.registry.mu.RUnlock()
+				return fmt.Errorf("cannot stop plugin %s: plugin %s depends on it", name, dependentName)
 			}
 		}
+		dependent.generation.mu.Unlock()
 	}
+	l.registry.mu.RUnlock()
 
 	l.registry.mu.Lock()
 	retireGeneration(instance.generation)

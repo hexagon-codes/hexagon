@@ -184,8 +184,7 @@ func childControlError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
-	var unsafe interface{ UnsafeToReplay() bool }
-	return errors.As(err, &unsafe) && unsafe.UnsafeToReplay()
+	return llm.IsUnsafeToReplay(err)
 }
 
 // runChildTask 复用父运行的任务提交器；没有持久宿主时直接执行，不强制 JSON 限制。

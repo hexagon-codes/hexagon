@@ -155,7 +155,7 @@ func (s *Snapshot) CapturedAt() time.Time { return s.document.CapturedAt }
 func (s *Snapshot) Records() []Record {
 	data, _ := json.Marshal(s.document.Records)
 	var records []Record
-	_ = json.Unmarshal(data, &records)
+	_ = decodeJSONNumbers(data, &records)
 	return records
 }
 
@@ -174,7 +174,7 @@ func (s *Snapshot) MarshalJSON() ([]byte, error) { return json.Marshal(s.documen
 // UnmarshalJSON 验证内容本身；宿主恢复运行时使用 DecodeSnapshot 核对预期 Scope。
 func (s *Snapshot) UnmarshalJSON(data []byte) error {
 	var document snapshotDocument
-	if err := json.Unmarshal(data, &document); err != nil {
+	if err := decodeJSONNumbers(data, &document); err != nil {
 		return fmt.Errorf("memory: failed to decode snapshot: %w", err)
 	}
 	if err := validateSnapshot(document); err != nil {
@@ -212,7 +212,7 @@ func FreezeEntries(scope Scope, source string, entries []coremem.Entry) (*Snapsh
 // DecodeSnapshot 验证持久快照格式、作用域和内容修订，失败不回退到当前共享记忆。
 func DecodeSnapshot(data []byte, scope Scope) (*Snapshot, error) {
 	var document snapshotDocument
-	if err := json.Unmarshal(data, &document); err != nil {
+	if err := decodeJSONNumbers(data, &document); err != nil {
 		return nil, fmt.Errorf("memory: failed to decode snapshot: %w", err)
 	}
 	if !document.Scope.equal(scope) {
@@ -304,7 +304,7 @@ func decodeRecord(item *store.Item, scope Scope) (Record, error) {
 		return Record{}, fmt.Errorf("memory: record payload is missing")
 	}
 	var record Record
-	if err := json.Unmarshal([]byte(data), &record); err != nil {
+	if err := decodeJSONNumbers([]byte(data), &record); err != nil {
 		return Record{}, fmt.Errorf("memory: record cannot be decoded: %w", err)
 	}
 	if !record.Scope.equal(scope) {
@@ -320,6 +320,17 @@ func decodeRecord(item *store.Item, scope Scope) (Record, error) {
 }
 
 func recordKey(id string) string { return "record-" + hash.SHA256(id) }
+
+// 解码动态元数据时保留数字字面值，避免记录和快照往返改变数值及内容摘要。
+func decodeJSONNumbers(data []byte, target any) error {
+	if !json.Valid(data) {
+		return json.Unmarshal(data, target)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	return decoder.Decode(target)
+}
+
 func snapshotRevision(document snapshotDocument) string {
 	document.Revision = ""
 	data, _ := json.Marshal(document)

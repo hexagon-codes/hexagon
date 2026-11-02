@@ -412,7 +412,7 @@ func (s *RedisStore) getItem(ctx context.Context, redisKey string) (*redisItem, 
 	}
 
 	var item redisItem
-	if err := json.Unmarshal(data, &item); err != nil {
+	if err := decodeJSONNumbers(data, &item); err != nil {
 		return nil, fmt.Errorf("解析记忆数据失败: %w", err)
 	}
 	return &item, nil
@@ -452,7 +452,7 @@ func (s *RedisStore) listItems(ctx context.Context, namespace []string) ([]*redi
 			continue
 		}
 		var item redisItem
-		if err := json.Unmarshal([]byte(str), &item); err != nil {
+		if err := decodeJSONNumbers([]byte(str), &item); err != nil {
 			continue
 		}
 		items = append(items, &item)

@@ -28,11 +28,23 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
 )
+
+// 动态 JSON 文档中的数字保持原始精度，避免持久存储及副本返回时改变内容。
+func decodeJSONNumbers(data []byte, target any) error {
+	if !json.Valid(data) {
+		return json.Unmarshal(data, target)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	return decoder.Decode(target)
+}
 
 // MemoryStore 跨会话持久记忆存储接口
 //
@@ -102,7 +114,7 @@ type Item struct {
 	// Key 唯一键（在命名空间内唯一）
 	Key string `json:"key"`
 
-	// Value JSON 文档内容
+	// Value JSON 文档内容；JSON 回读中的动态数字使用 json.Number 保留精度。
 	Value map[string]any `json:"value"`
 
 	// CreatedAt 创建时间

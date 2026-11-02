@@ -37,7 +37,7 @@ func (s *RedisStore) PutIfRevision(ctx context.Context, namespace []string, key 
 		}
 		if err == nil {
 			existing = &redisItem{}
-			if err := json.Unmarshal(data, existing); err != nil {
+			if err := decodeJSONNumbers(data, existing); err != nil {
 				return fmt.Errorf("memory store: failed to decode current revision: %w", err)
 			}
 		}

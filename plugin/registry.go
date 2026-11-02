@@ -92,6 +92,7 @@ func (r *Registry) Unregister(name string) error {
 
 	delete(r.plugins, name)
 	r.mu.Unlock()
+	releaseDependencyBindings(instance.generation)
 
 	// emitEvent 内部会加读锁，必须在写锁释放后调用，否则同一 goroutine 重入死锁
 	r.emitEvent(PluginEvent{
