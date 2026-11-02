@@ -30,9 +30,9 @@ github.com/google/jsonschema-go v0.4.2 h1:tmrUohrwoLZZS/P3x7ex0WAVknEkBZM46iALbc
 github.com/google/jsonschema-go v0.4.2/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/hexagon-codes/ai-core v0.3.0 h1:QGLaJCS78FUTjDTypdbFf9zI8aTHzv0ro39G0RN8Fuw=
+github.com/hexagon-codes/ai-core v0.3.0 h1:yKlKgoIPUcI8aL1dcqG2Hn2pqsNB0Vy/g/6nRdQKkmI=
 github.com/hexagon-codes/ai-core v0.3.0/go.mod h1:GlSdKySC95MIJq7zLgyjBjDpyHB8yhnWvIYBEuOu/to=
-github.com/hexagon-codes/hexagon v0.6.0 h1:5GeBzXtuuf2Z77MJdQvd52ysq8IYe/Z82yPWh0+D04s=
+github.com/hexagon-codes/hexagon v0.6.0 h1:+JmhIuS6IZPw9014nE1I1RodNUTutryYd0Laos0SYmE=
 github.com/hexagon-codes/hexagon v0.6.0/go.mod h1:siqb+itownwS3MdTLZNiX0xFlpdEXMjjhDnWsxrF4Nw=
 github.com/hexagon-codes/toolkit v0.3.7 h1:5DzTogBc+4413cnpa7e4jLZshsDBhLuTHBFWIioeSro=
 github.com/hexagon-codes/toolkit v0.3.7/go.mod h1:ZUcUAUERH2Kzz4IeI+ZT+/S6pdQoXFZEvn60i+juGq4=
