@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/hexagon-codes/hexagon/interrupt"
 	hr "github.com/hexagon-codes/hexagon/runtime"
@@ -478,22 +479,41 @@ func (g *Graph[S]) Stream(ctx context.Context, initialState S, opts ...RunOption
 		x.defaults = config.retryPolicy
 		x.defaultTimeout = config.timeoutMS
 		x.interruptBefore = config.interrupt
+		var sendMu sync.Mutex
 		x.observe = func(event StreamEvent[S]) error {
-			select {
-			case events <- event:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
+			sendMu.Lock()
+			defer sendMu.Unlock()
+			// 为终止错误保留一个槽位，使取消不依赖消费者继续读取。
+			var ticker *time.Ticker
+			defer func() {
+				if ticker != nil {
+					ticker.Stop()
+				}
+			}()
+			for {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if len(events) < cap(events)-1 {
+					events <- event
+					return nil
+				}
+				if ticker == nil {
+					ticker = time.NewTicker(time.Millisecond)
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-ticker.C:
+				}
 			}
 		}
 		state, err := x.run(ctx)
+		if err == nil {
+			err = x.emit(ctx, EventTypeEnd, "", state, nil)
+		}
 		if err != nil {
-			select {
-			case events <- StreamEvent[S]{Type: EventTypeError, State: state, Error: err}:
-			case <-ctx.Done():
-			}
-		} else {
-			_ = x.emit(ctx, EventTypeEnd, "", state, nil)
+			events <- StreamEvent[S]{Type: EventTypeError, State: state, Error: err}
 		}
 	}()
 
