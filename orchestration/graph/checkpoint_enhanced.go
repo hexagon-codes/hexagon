@@ -65,7 +65,9 @@ type EnhancedCheckpoint struct {
 	VisitedNodes   []string `json:"visited_nodes"` // 所有访问过的节点（含重复）
 
 	// 状态数据
-	State     json.RawMessage `json:"state"`
+	State json.RawMessage `json:"state"`
+	// Frontier 保存冻结计划、激活、前驱身份和结果采用记录。
+	Frontier  json.RawMessage `json:"frontier,omitempty"`
 	StateDiff json.RawMessage `json:"state_diff,omitempty"` // 与父检查点的差异
 	StateHash string          `json:"state_hash,omitempty"` // 状态哈希，用于快速比较
 
@@ -469,6 +471,7 @@ func (s *MemoryEnhancedCheckpointSaver) CreateBranch(ctx context.Context, checkp
 		CompletedNodes: append([]string(nil), source.CompletedNodes...),
 		VisitedNodes:   append([]string(nil), source.VisitedNodes...),
 		State:          append(json.RawMessage(nil), source.State...),
+		Frontier:       append(json.RawMessage(nil), source.Frontier...),
 		StateDiff:      append(json.RawMessage(nil), source.StateDiff...),
 		ParentID:       checkpointID,
 		BranchID:       branchID,
@@ -807,6 +810,7 @@ func cloneEnhancedCheckpoint(cp *EnhancedCheckpoint) *EnhancedCheckpoint {
 		CompletedNodes: append([]string(nil), cp.CompletedNodes...),
 		VisitedNodes:   append([]string(nil), cp.VisitedNodes...),
 		State:          append(json.RawMessage(nil), cp.State...),
+		Frontier:       append(json.RawMessage(nil), cp.Frontier...),
 		StateDiff:      append(json.RawMessage(nil), cp.StateDiff...),
 		StateHash:      cp.StateHash,
 		ParentID:       cp.ParentID,

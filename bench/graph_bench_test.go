@@ -13,11 +13,11 @@ type TestState struct {
 	Data    string
 }
 
-func (s TestState) Clone() graph.State {
+func (s TestState) Clone() (graph.State, error) {
 	return TestState{
 		Counter: s.Counter,
 		Data:    s.Data,
-	}
+	}, nil
 }
 
 // BenchmarkGraphCreation 测试图创建性能
@@ -174,7 +174,7 @@ func BenchmarkMapState(b *testing.B) {
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			_ = state.Clone()
+			_, _ = state.Clone()
 		}
 	})
 

@@ -10,9 +10,18 @@ package graph
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
+
+	"github.com/hexagon-codes/hexagon/interrupt"
 )
+
+type graphContinuation struct {
+	Name     string          `json:"name"`
+	State    json.RawMessage `json:"state"`
+	Frontier json.RawMessage `json:"frontier"`
+}
 
 // ============== 子图节点 ==============
 
@@ -41,9 +50,52 @@ func SubgraphNode[S State](name string, subgraph *Graph[S], stateMapper ...*Subg
 				inputState = mapper.Input(state)
 			}
 
-			// 执行子图
-			outputState, err := subgraph.Run(ctx, inputState)
+			x := newPlanExecutor(subgraph, inputState)
+			wasInterrupted, hasState, progress := interrupt.GetInterruptState[*graphContinuation](ctx)
+			if wasInterrupted && !hasState {
+				return state, fmt.Errorf("subgraph continuation type mismatch")
+			}
+			if hasState {
+				if progress == nil || progress.Name != subgraph.Name {
+					return state, fmt.Errorf("subgraph continuation identity mismatch")
+				}
+				var err error
+				x.state, err = subgraph.codec().Decode(progress.State)
+				if err != nil {
+					return state, err
+				}
+				x.frontier, err = subgraph.decodeFrontier(progress.Frontier)
+				if err != nil {
+					return state, err
+				}
+			}
+			outputState, err := x.run(ctx)
 			if err != nil {
+				if _, ok := interrupt.IsInterruptSignal(err); ok {
+					for id, result := range x.frontier.Results {
+						if len(result.Output) == 0 {
+							data, encodeErr := subgraph.codec().Encode(x.outputs[id])
+							if encodeErr != nil {
+								return state, encodeErr
+							}
+							result.Output = data
+							writes, encodeErr := encodeWrites(x.writes[id])
+							if encodeErr != nil {
+								return state, encodeErr
+							}
+							result.Writes = writes
+						}
+					}
+					encoded, encodeErr := subgraph.codec().Encode(outputState)
+					if encodeErr != nil {
+						return state, encodeErr
+					}
+					frontier, encodeErr := subgraph.encodeFrontier(x.frontier)
+					if encodeErr != nil {
+						return state, encodeErr
+					}
+					return state, interrupt.CompositeInterrupt(ctx, "subgraph is waiting", &graphContinuation{Name: subgraph.Name, State: encoded, Frontier: frontier}, err)
+				}
 				return state, fmt.Errorf("subgraph %s failed: %w", name, err)
 			}
 
@@ -433,9 +485,9 @@ func ParallelSubgraphs[S State](name string, subgraphs []*Graph[S], merger State
 			for i, sg := range subgraphs {
 				i, sg := i, sg
 				go func() {
-					// 克隆状态
-					clonedState := state.Clone().(S)
-					output, err := sg.Run(ctx, clonedState)
+					output, err := runIsolatedNode(ctx, sg.Name, func(ctx context.Context, input S) (S, error) {
+						return sg.Run(ctx, input)
+					}, state)
 					results <- result{idx: i, state: output, err: err}
 				}()
 			}
@@ -452,7 +504,9 @@ func ParallelSubgraphs[S State](name string, subgraphs []*Graph[S], merger State
 
 			// 合并结果
 			if merger == nil {
-				// 默认返回最后一个结果
+				if len(outputs) > 1 {
+					return state, fmt.Errorf("parallel subgraphs %q require an explicit state merger", name)
+				}
 				return outputs[len(outputs)-1], nil
 			}
 

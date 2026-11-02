@@ -33,6 +33,7 @@ const NodeTypeBarrier NodeType = 100
 
 // BarrierMerger 屏障合并函数
 // 接收原始状态和所有上游分支的输出状态，返回合并后的状态
+// branchOutputs 仅含完整 State 前驱；映射节点的写集已通过字段 reducer 进入 original。
 type BarrierMerger[S State] func(original S, branchOutputs map[string]S) S
 
 // BarrierNode 创建屏障/延迟节点
@@ -151,7 +152,7 @@ func MapReduceNode[S State](name string, split SplitFunc[S], mapFn MapFunc[S], r
 						}
 					}
 
-					result, err := mapFn(ctx, s)
+					result, err := runIsolatedNode(ctx, fmt.Sprintf("%s[%d]", name, idx), NodeHandler[S](mapFn), s)
 					resultCh <- mapResult{index: idx, state: result, err: err}
 				}(i, shard)
 			}
@@ -219,7 +220,7 @@ func FanOutFanInNode[S State](name string, branches map[string]NodeHandler[S], m
 
 			for branchName, handler := range branches {
 				go func(n string, h NodeHandler[S]) {
-					result, err := h(ctx, state.Clone().(S))
+					result, err := runIsolatedNode(ctx, n, h, state)
 					resultCh <- branchResult{name: n, state: result, err: err}
 				}(branchName, handler)
 			}
@@ -236,7 +237,9 @@ func FanOutFanInNode[S State](name string, branches map[string]NodeHandler[S], m
 
 			// 合并
 			if merger == nil {
-				// 无合并器，返回任意一个结果
+				if len(outputs) > 1 {
+					return state, fmt.Errorf("fan-out node %q requires an explicit state merger", name)
+				}
 				for _, s := range outputs {
 					return s, nil
 				}

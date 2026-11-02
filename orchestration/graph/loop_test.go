@@ -1220,6 +1220,7 @@ func TestRetryLoopNode_ContextCancel(t *testing.T) {
 
 func TestAddLoopBackEdge(t *testing.T) {
 	g, err := NewGraph[TestState]("test").
+		WithExecutionMode(GraphModePregel).
 		AddNode("work", func(ctx context.Context, s TestState) (TestState, error) {
 			s.Counter++
 			return s, nil
@@ -1247,6 +1248,7 @@ func TestAddLoopBackEdge(t *testing.T) {
 
 func TestAddLoopBackEdge_MaxIterations(t *testing.T) {
 	g, err := NewGraph[TestState]("test").
+		WithExecutionMode(GraphModePregel).
 		AddNode("work", func(ctx context.Context, s TestState) (TestState, error) {
 			s.Counter++
 			return s, nil

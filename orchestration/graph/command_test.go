@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // TestCommandGoto 测试 Goto 命令
@@ -135,6 +136,7 @@ func TestAddCommandNode(t *testing.T) {
 	}
 
 	g, err := NewGraph[MapState]("command-graph").
+		WithExecutionMode(GraphModePregel).
 		AddCommandNode("process", commandHandler).
 		AddEdge(START, "process").
 		Build()
@@ -153,6 +155,67 @@ func TestAddCommandNode(t *testing.T) {
 	finalResult, ok := result.Get("result")
 	if !ok || finalResult != "done" {
 		t.Errorf("期望 result=done，实际 %v", finalResult)
+	}
+}
+
+func TestCommandRoutesRemainIsolatedAcrossConcurrentRuns(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	enteredA := make(chan struct{})
+	releaseA := make(chan struct{})
+	g, err := NewGraph[MapState]("isolated-command-runs").WithExecutionMode(GraphModePregel).AddCommandNode("route", func(callCtx context.Context, s MapState) (*Command[MapState], error) {
+		if s["run"] == "A" {
+			return Goto[MapState]("left").WithUpdate(func(state MapState) MapState {
+				close(enteredA)
+				select {
+				case <-releaseA:
+				case <-callCtx.Done():
+				}
+				return state
+			}), nil
+		}
+		return Goto[MapState]("right"), nil
+	}).AddNode("left", func(_ context.Context, s MapState) (MapState, error) { s["route"] = "left"; return s, nil }).AddNode("right", func(_ context.Context, s MapState) (MapState, error) { s["route"] = "right"; return s, nil }).AddEdge(START, "route").AddEdge("left", END).AddEdge("right", END).Build()
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	type outcome struct {
+		state MapState
+		err   error
+	}
+	resultA := make(chan outcome, 1)
+	finishedA := make(chan struct{})
+	go func() {
+		defer close(finishedA)
+		state, err := g.Run(ctx, MapState{"run": "A"})
+		resultA <- outcome{state, err}
+	}()
+	t.Cleanup(func() { cancel(); <-finishedA })
+	select {
+	case <-enteredA:
+	case <-ctx.Done():
+		t.Fatal("run A did not reach its command update")
+	}
+	// A 已取得自己的命令后，让 B 完整结束，固定两个 Run 的交错次序。
+	stateB, err := g.Run(ctx, MapState{"run": "B"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stateB["run"] != "B" || stateB["route"] != "right" {
+		t.Fatalf("run B used another command result: %v", stateB)
+	}
+	close(releaseA)
+	var a outcome
+	select {
+	case a = <-resultA:
+	case <-ctx.Done():
+		t.Fatal("run A did not complete after release")
+	}
+	if a.err != nil {
+		t.Fatal(a.err)
+	}
+	if a.state["run"] != "A" || a.state["route"] != "left" {
+		t.Fatalf("run A used run B's command result: %v", a.state)
 	}
 }
 

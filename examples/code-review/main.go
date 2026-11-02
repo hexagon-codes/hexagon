@@ -45,12 +45,12 @@ type ReviewState struct {
 }
 
 // Clone 克隆状态
-func (s ReviewState) Clone() graph.State {
+func (s ReviewState) Clone() (graph.State, error) {
 	clone := s
 	clone.LogicIssues = append([]Issue{}, s.LogicIssues...)
 	clone.SecurityIssues = append([]Issue{}, s.SecurityIssues...)
 	clone.StyleIssues = append([]Issue{}, s.StyleIssues...)
-	return clone
+	return clone, nil
 }
 
 // Issue 问题

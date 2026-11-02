@@ -90,10 +90,15 @@ type BaseStep struct {
 	timeout      time.Duration
 	dependencies []string
 	metadata     map[string]any
+	replaySafe   bool
 }
 
 // BaseStepOption 基础步骤选项
 type BaseStepOption func(*BaseStep)
+
+// WithStepReplaySafe 仅声明已确认只读或幂等步骤可在未知结果后重放。
+func WithStepReplaySafe(safe bool) BaseStepOption { return func(s *BaseStep) { s.replaySafe = safe } }
+func (s *BaseStep) ReplaySafe() bool              { return s.replaySafe }
 
 // WithStepDescription 设置步骤描述
 func WithStepDescription(desc string) BaseStepOption {
@@ -173,6 +178,7 @@ func (s *BaseStep) Execute(ctx context.Context, input StepInput) (*StepOutput, e
 
 	// 执行（带重试）
 	var lastErr error
+	var lastOutput *StepOutput
 	maxRetries := 0
 	if s.retryPolicy != nil {
 		maxRetries = s.retryPolicy.MaxRetries
@@ -185,6 +191,10 @@ func (s *BaseStep) Execute(ctx context.Context, input StepInput) (*StepOutput, e
 		}
 
 		lastErr = err
+		lastOutput = output
+		if workflowRetryStopped(ctx, err) {
+			return output, err
+		}
 
 		// 检查是否需要重试
 		if attempt < maxRetries && s.retryPolicy != nil {
@@ -198,7 +208,7 @@ func (s *BaseStep) Execute(ctx context.Context, input StepInput) (*StepOutput, e
 		}
 	}
 
-	return nil, lastErr
+	return lastOutput, lastErr
 }
 
 // Validate 验证步骤配置

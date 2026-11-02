@@ -19,7 +19,6 @@ package graph
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 	"time"
 )
@@ -229,122 +228,45 @@ func (g *Graph[S]) StreamRun(ctx context.Context, state S, opts ...StreamRunOpti
 			})
 		}
 
-		// 执行图（简化版，实际应集成到现有执行引擎）
-		currentState := state
-		visited := make(map[string]bool)
-		current := g.EntryPoint
-
-		for current != "" && current != END {
-			if ctx.Err() != nil {
-				ch.Emit(StreamModeEvent{
-					Mode: StreamModeDebug,
-					Type: EventNodeError,
-					Node: current,
-					Data: ctx.Err().Error(),
-				})
+		streamCtx := WithStreamChannel(ctx, ch)
+		events, err := g.Stream(streamCtx, state)
+		if err != nil {
+			ch.Emit(StreamModeEvent{Mode: StreamModeDebug, Type: EventNodeError, Data: err.Error()})
+			return
+		}
+		for event := range events {
+			if event.Type == EventTypeError {
+				ch.Emit(StreamModeEvent{Mode: StreamModeDebug, Type: EventNodeError, Node: event.NodeName, Data: event.Error.Error()})
 				return
 			}
-
-			node, ok := g.Nodes[current]
-			if !ok {
-				break
-			}
-
-			// 记录执行前状态
-			var prevStateJSON []byte
-			if modeSet[StreamModeUpdates] {
-				prevStateJSON, _ = json.Marshal(currentState)
-			}
-
-			// 节点开始事件
-			startTime := time.Now()
 			if modeSet[StreamModeDebug] {
-				ch.Emit(StreamModeEvent{
-					Mode: StreamModeDebug,
-					Type: EventNodeStart,
-					Node: current,
-				})
-			}
-
-			// 执行节点
-			newState, err := node.Handler(ctx, currentState)
-			duration := time.Since(startTime)
-
-			if err != nil {
-				if modeSet[StreamModeDebug] {
-					ch.Emit(StreamModeEvent{
-						Mode: StreamModeDebug,
-						Type: EventNodeError,
-						Node: current,
-						Data: map[string]any{
-							"error":    err.Error(),
-							"duration": duration.String(),
-						},
-					})
+				kind := EventNodeStart
+				if event.Type == EventTypeNodeEnd {
+					kind = EventNodeEnd
 				}
-				return
-			}
-
-			currentState = newState
-
-			// 节点结束事件
-			if modeSet[StreamModeDebug] {
-				ch.Emit(StreamModeEvent{
-					Mode: StreamModeDebug,
-					Type: EventNodeEnd,
-					Node: current,
-					Data: map[string]any{"duration": duration.String()},
-				})
-			}
-
-			// 完整状态快照
-			if modeSet[StreamModeValues] {
-				event := StreamModeEvent{
-					Mode: StreamModeValues,
-					Type: EventStateSnapshot,
-					Node: current,
-					Data: currentState,
+				if event.Type == EventTypeEnd {
+					kind = EventGraphEnd
 				}
-				if cfg.filter == nil || cfg.filter(event) {
-					ch.Emit(event)
+				ch.Emit(StreamModeEvent{Mode: StreamModeDebug, Type: kind, Node: event.NodeName, Data: event.State})
+			}
+			if event.Type != EventTypeNodeEnd {
+				continue
+			}
+			for _, mode := range []StreamMode{StreamModeValues, StreamModeUpdates} {
+				if !modeSet[mode] {
+					continue
+				}
+				kind := EventStateSnapshot
+				if mode == StreamModeUpdates {
+					kind = EventStateUpdate
+				}
+				item := StreamModeEvent{Mode: mode, Type: kind, Node: event.NodeName, Data: event.State}
+				if cfg.filter == nil || cfg.filter(item) {
+					ch.Emit(item)
 				}
 			}
-
-			// 增量更新
-			if modeSet[StreamModeUpdates] {
-				newStateJSON, _ := json.Marshal(currentState)
-				if string(prevStateJSON) != string(newStateJSON) {
-					event := StreamModeEvent{
-						Mode: StreamModeUpdates,
-						Type: EventStateUpdate,
-						Node: current,
-						Data: currentState,
-					}
-					if cfg.filter == nil || cfg.filter(event) {
-						ch.Emit(event)
-					}
-				}
-			}
-
-			// 防止无限循环
-			if visited[current] {
-				break
-			}
-			visited[current] = true
-
-			// 查找下一个节点
-			current = g.findNextNode(current)
 		}
 
-		// 图执行结束事件
-		if modeSet[StreamModeDebug] {
-			ch.Emit(StreamModeEvent{
-				Mode: StreamModeDebug,
-				Type: EventGraphEnd,
-				Node: g.Name,
-				Data: currentState,
-			})
-		}
 	}()
 
 	return ch, nil

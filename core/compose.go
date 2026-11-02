@@ -80,7 +80,7 @@ func StreamToInvoke[I, O any](r Runnable[I, O]) Runnable[I, O] {
 //
 // 执行路径（优先级从高到低）：
 //   - Invoke 路径: r1.Invoke → r2.Invoke
-//   - Stream 路径: r1.Invoke → r2.Stream（或 r1.Stream → Map(r2.Invoke)）
+//   - Stream 路径: r1.Invoke → r2.Stream
 //
 // 类型参数：
 //   - I: 输入类型（第一个 Runnable 的输入）
@@ -125,60 +125,23 @@ func Compose[I, M, O any](r1 Runnable[I, M], r2 Runnable[M, O]) Runnable[I, O] {
 		return r2.Invoke(ctx, mid, opts...)
 	})
 
-	// Transform 路径: 对每个输入元素应用组合管道
+	// Transform 路径按完整流能力组合，不把 delta 隐式当作独立请求。
 	br.WithTransform(func(ctx context.Context, input *StreamReader[I], opts ...Option) (*StreamReader[O], error) {
-		reader, writer := stream.Pipe[O](10)
-		go func() {
-			defer writer.Close()
-			for {
-				select {
-				case <-ctx.Done():
-					writer.CloseWithError(ctx.Err())
-					return
-				default:
-				}
-
-				in, err := input.Recv()
-				if err != nil {
-					return
-				}
-
-				mid, err := r1.Invoke(ctx, in, opts...)
-				if err != nil {
-					writer.CloseWithError(err)
-					return
-				}
-
-				out, err := r2.Invoke(ctx, mid, opts...)
-				if err != nil {
-					writer.CloseWithError(err)
-					return
-				}
-
-				if err := writer.Send(out); err != nil {
-					return
-				}
-			}
-		}()
-		return reader, nil
+		return composeTransform(ctx, input, r1, r2, opts...)
 	})
-
 	return br
 }
 
 // ComposeStream 组合两个 Runnable，输出始终为流
 //
 // 与 Compose 的区别：Stream 方法会尝试使用 r1.Stream + r2.Transform
-// 以获得真正的端到端流式体验。
+// 下游注册原生 Transform 时保留增量管道；否则按其收集后调用的适配合同执行。
 //
 // 执行路径：
 //   - Invoke 路径: r1.Invoke → r2.Invoke（同 Compose）
-//   - Stream 路径: r1.Stream → 对每个中间元素调用 r2.Stream → Merge
+//   - Stream 路径: r1.Stream → r2.Transform；非流下游先完整收集，逐元素调用需显式 MapEach
 func ComposeStream[I, M, O any](r1 Runnable[I, M], r2 Runnable[M, O]) Runnable[I, O] {
-	br := NewRunnable[I, O](
-		r1.Name()+" ~> "+r2.Name(),
-		"composed_stream: "+r1.Description()+" -> "+r2.Description(),
-		// Invoke 路径: r1.Invoke → r2.Invoke
+	br := NewRunnable[I, O](r1.Name()+" ~> "+r2.Name(), "composed_stream: "+r1.Description()+" -> "+r2.Description(),
 		func(ctx context.Context, input I, opts ...Option) (O, error) {
 			mid, err := r1.Invoke(ctx, input, opts...)
 			if err != nil {
@@ -186,83 +149,26 @@ func ComposeStream[I, M, O any](r1 Runnable[I, M], r2 Runnable[M, O]) Runnable[I
 				return zero, err
 			}
 			return r2.Invoke(ctx, mid, opts...)
-		},
-	)
-
-	// Stream 路径: r1.Stream → 逐元素 r2.Invoke → 输出流
+		})
 	br.WithStream(func(ctx context.Context, input I, opts ...Option) (*StreamReader[O], error) {
-		midStream, err := r1.Stream(ctx, input, opts...)
+		callCtx, cancel := context.WithCancel(ctx)
+		mid, err := r1.Stream(callCtx, input, opts...)
 		if err != nil {
+			cancel()
 			return nil, err
 		}
-
-		reader, writer := stream.Pipe[O](10)
-		go func() {
-			defer writer.Close()
-			for {
-				select {
-				case <-ctx.Done():
-					writer.CloseWithError(ctx.Err())
-					return
-				default:
-				}
-
-				mid, err := midStream.Recv()
-				if err != nil {
-					return
-				}
-
-				out, err := r2.Invoke(ctx, mid, opts...)
-				if err != nil {
-					writer.CloseWithError(err)
-					return
-				}
-
-				if err := writer.Send(out); err != nil {
-					return
-				}
-			}
-		}()
-		return reader, nil
+		stop := context.AfterFunc(callCtx, func() { _ = mid.Close() })
+		out, err := r2.Transform(callCtx, mid, opts...)
+		if err != nil {
+			stop()
+			cancel()
+			_ = mid.Close()
+			return nil, err
+		}
+		return forwardOwnedStream(callCtx, out, func() { stop(); cancel(); _ = mid.Close() }), nil
 	})
-
-	// Transform 路径: 对每个输入元素应用完整管道
 	br.WithTransform(func(ctx context.Context, input *StreamReader[I], opts ...Option) (*StreamReader[O], error) {
-		reader, writer := stream.Pipe[O](10)
-		go func() {
-			defer writer.Close()
-			for {
-				select {
-				case <-ctx.Done():
-					writer.CloseWithError(ctx.Err())
-					return
-				default:
-				}
-
-				in, err := input.Recv()
-				if err != nil {
-					return
-				}
-
-				mid, err := r1.Invoke(ctx, in, opts...)
-				if err != nil {
-					writer.CloseWithError(err)
-					return
-				}
-
-				out, err := r2.Invoke(ctx, mid, opts...)
-				if err != nil {
-					writer.CloseWithError(err)
-					return
-				}
-
-				if err := writer.Send(out); err != nil {
-					return
-				}
-			}
-		}()
-		return reader, nil
+		return composeTransform(ctx, input, r1, r2, opts...)
 	})
-
 	return br
 }

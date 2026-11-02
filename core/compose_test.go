@@ -205,9 +205,9 @@ func TestCompose_Collect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Concat 对未注册类型返回最后一个元素 "cde"，len=3 → "3"
-	if result != "3" {
-		t.Fatalf("expected '3', got %q", result)
+	// 完整连接 "ab" 与 "cde" 后再调用 strlen，不能只保留最后一个 delta。
+	if result != "5" {
+		t.Fatalf("expected '5', got %q", result)
 	}
 }
 
@@ -219,7 +219,7 @@ func TestCompose_Transform(t *testing.T) {
 		return fmt.Sprintf("%d", n), nil
 	})
 
-	composed := Compose[int, int, string](r1, r2)
+	composed := Compose[int, int, string](MapEach[int, int](r1), MapEach[int, string](r2))
 
 	sr := stream.FromSlice([]int{1, 2, 3})
 	outSr, err := composed.Transform(context.Background(), sr)

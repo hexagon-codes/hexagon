@@ -13,7 +13,7 @@ type TestState struct {
 	Data    map[string]string
 }
 
-func (s TestState) Clone() State {
+func (s TestState) Clone() (State, error) {
 	data := make(map[string]string)
 	for k, v := range s.Data {
 		data[k] = v
@@ -22,7 +22,7 @@ func (s TestState) Clone() State {
 		Counter: s.Counter,
 		Path:    s.Path,
 		Data:    data,
-	}
+	}, nil
 }
 
 func TestNewGraph(t *testing.T) {
@@ -395,6 +395,7 @@ func TestGraphWithInterrupt(t *testing.T) {
 
 func TestPregelBasicExecution(t *testing.T) {
 	g, err := NewGraph[TestState]("pregel-graph").
+		WithExecutionMode(GraphModePregel).
 		AddNode("step1", func(ctx context.Context, s TestState) (TestState, error) {
 			s.Counter++
 			s.Path += "1"
@@ -437,6 +438,7 @@ func TestPregelBasicExecution(t *testing.T) {
 func TestPregelCyclicGraph(t *testing.T) {
 	// 测试循环图：iterate -> check -> (回到 iterate 或 finish)
 	g, err := NewGraph[TestState]("cyclic-graph").
+		WithExecutionMode(GraphModePregel).
 		AddNode("iterate", func(ctx context.Context, s TestState) (TestState, error) {
 			s.Counter++
 			return s, nil
@@ -488,6 +490,7 @@ func TestPregelCyclicGraph(t *testing.T) {
 func TestPregelMaxSupersteps(t *testing.T) {
 	// 创建一个无限循环的图
 	g, err := NewGraph[TestState]("infinite-graph").
+		WithExecutionMode(GraphModePregel).
 		AddNode("loop", func(ctx context.Context, s TestState) (TestState, error) {
 			s.Counter++
 			return s, nil
@@ -531,6 +534,7 @@ func TestPregelTriggerMode(t *testing.T) {
 
 func TestPregelStreamMode(t *testing.T) {
 	g, err := NewGraph[TestState]("stream-pregel").
+		WithExecutionMode(GraphModePregel).
 		AddNode("step1", func(ctx context.Context, s TestState) (TestState, error) {
 			s.Counter++
 			return s, nil
@@ -602,6 +606,7 @@ func TestPregelEventTypeString(t *testing.T) {
 
 func TestPregelTerminationCheck(t *testing.T) {
 	g, err := NewGraph[TestState]("termination-graph").
+		WithExecutionMode(GraphModePregel).
 		AddNode("iterate", func(ctx context.Context, s TestState) (TestState, error) {
 			s.Counter++
 			return s, nil
@@ -635,6 +640,8 @@ func TestPregelTerminationCheck(t *testing.T) {
 func TestPregelParallelExecution(t *testing.T) {
 	// 测试并行执行：两个独立节点可以并行执行
 	g, err := NewGraph[TestState]("parallel-graph").
+		WithStateMerger(func(_ TestState, outputs []TestState) TestState { return outputs[len(outputs)-1] }).
+		WithExecutionMode(GraphModePregel).
 		AddNode("nodeA", func(ctx context.Context, s TestState) (TestState, error) {
 			s.Counter += 10
 			return s, nil

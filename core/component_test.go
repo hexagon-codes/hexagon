@@ -2629,7 +2629,9 @@ func TestTransform_FromStream(t *testing.T) {
 
 // TestTransform_FromInvoke 测试 Transform 从 Invoke 推导
 func TestTransform_FromInvoke(t *testing.T) {
+	calls := 0
 	r := NewRunnable[string, string]("invoker", "", func(ctx context.Context, input string, opts ...Option) (string, error) {
+		calls++
 		return "I_" + input, nil
 	})
 
@@ -2644,9 +2646,9 @@ func TestTransform_FromInvoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("期望无错误，但得到: %v", err)
 	}
-	expected := []string{"I_a", "I_b", "I_c"}
-	if len(results) != 3 {
-		t.Fatalf("期望 3 个结果，但得到 %d", len(results))
+	expected := []string{"I_abc"}
+	if len(results) != 1 || calls != 1 {
+		t.Fatalf("Invoke adapter must collect once: results=%v calls=%d", results, calls)
 	}
 	for i, v := range results {
 		if v != expected[i] {

@@ -13,6 +13,7 @@ package chain
 import (
 	"context"
 	"fmt"
+	"github.com/hexagon-codes/hexagon/orchestration/internal/typecompat"
 	"reflect"
 )
 
@@ -32,20 +33,7 @@ const (
 
 // checkTypeCompat 按三规则判定上游输出 out 能否流入下游输入 in。
 func checkTypeCompat(out, in reflect.Type) TypeCompat {
-	if out == nil || in == nil {
-		return TypeRuntimeAssert // 类型未知，留运行期
-	}
-	if out == in || out.AssignableTo(in) {
-		return TypeEqual
-	}
-	if in.Kind() == reflect.Interface && out.Implements(in) {
-		return TypeImplements
-	}
-	if out.Kind() == reflect.Interface {
-		// 上游产出接口：具体值运行期才知，可能满足 in → 不在编译期否决，留运行期断言
-		return TypeRuntimeAssert
-	}
-	return TypeIncompatible
+	return TypeCompat(typecompat.Check(out, in))
 }
 
 // TypedNode 是带输入/输出反射类型的链节点，供 Compile 做相邻节点 I/O 校验。

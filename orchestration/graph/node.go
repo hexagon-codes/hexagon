@@ -50,6 +50,10 @@ type Node[S State] struct {
 
 	// Timeout 超时时间（毫秒）
 	Timeout int64
+	// IO 保存异构组件的真实类型与显式字段映射。
+	IO *NodeIO
+	// commandHandler 只保存不可变绑定，命令结果由本次节点执行持有。
+	commandHandler CommandHandler[S]
 }
 
 // NodeHandler 节点处理函数类型
@@ -180,8 +184,7 @@ func EndNode[S State]() *Node[S] {
 // ParallelNode 创建并行执行节点
 // 将多个节点的处理函数并行执行，并合并结果
 //
-// 警告：默认只保留最后一个结果。
-// 如果需要正确合并多个 handler 的结果，请使用 ParallelNodeWithMerger。
+// 多个完整状态结果必须通过 ParallelNodeWithMerger 声明合并规则。
 func ParallelNode[S State](name string, handlers ...NodeHandler[S]) *Node[S] {
 	return ParallelNodeWithMerger(name, nil, handlers...)
 }
@@ -191,7 +194,7 @@ func ParallelNode[S State](name string, handlers ...NodeHandler[S]) *Node[S] {
 // 参数:
 //   - name: 节点名称
 //   - merger: 状态合并函数，用于合并所有 handler 的执行结果。
-//     如果为 nil，默认返回最后一个结果（向后兼容）
+//     多个处理器时不能为 nil，单个处理器可直接返回结果。
 //   - handlers: 要并行执行的处理函数列表
 //
 // StateMerger 定义在 subgraph.go 中：func(original S, outputs []S) S
@@ -215,7 +218,7 @@ func ParallelNodeWithMerger[S State](name string, merger StateMerger[S], handler
 			for i, h := range handlers {
 				i, h := i, h // 捕获变量
 				go func() {
-					s, err := h(ctx, state.Clone().(S))
+					s, err := runIsolatedNode(ctx, fmt.Sprintf("%s[%d]", name, i), h, state)
 					results <- result{index: i, state: s, err: err}
 				}()
 			}
@@ -232,7 +235,9 @@ func ParallelNodeWithMerger[S State](name string, merger StateMerger[S], handler
 
 			// 使用合并器合并所有状态
 			if merger == nil {
-				// 默认返回最后一个结果（向后兼容）
+				if len(states) > 1 {
+					return state, fmt.Errorf("parallel node %q requires an explicit state merger", name)
+				}
 				return states[len(states)-1], nil
 			}
 			return merger(state, states), nil
@@ -330,13 +335,16 @@ func FallbackNode[S State](name string, primaryHandler, fallbackHandler NodeHand
 		Type: NodeTypeFallback,
 		Handler: func(ctx context.Context, state S) (S, error) {
 			// 尝试主处理函数
-			newState, err := primaryHandler(ctx, state)
+			newState, err := runIsolatedNode(ctx, name+" primary", primaryHandler, state)
 			if err == nil {
 				return newState, nil
 			}
+			if nodeControlOrUnknown(err) {
+				return state, err
+			}
 
 			// 主处理失败，执行降级
-			fallbackState, fallbackErr := fallbackHandler(ctx, state)
+			fallbackState, fallbackErr := runIsolatedNode(ctx, name+" fallback", fallbackHandler, state)
 			if fallbackErr != nil {
 				// 降级也失败，返回原始错误
 				return state, fmt.Errorf("primary error: %v, fallback error: %v", err, fallbackErr)

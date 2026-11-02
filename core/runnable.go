@@ -33,8 +33,6 @@ package core
 
 import (
 	"context"
-	"errors"
-	"io"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	stream "github.com/hexagon-codes/ai-core/streamx"
@@ -157,7 +155,7 @@ func ApplyOptions(opts ...Option) *Options {
 // ============== Runnable 六范式接口 ==============
 
 // Runnable 是所有可执行组件的统一接口
-// 六范式统一执行模型，超越 Eino 的四范式
+// 统一暴露六种调用形式，原生处理与适配推导的语义由各方法合同说明。
 //
 // 类型参数：
 //   - I: 输入类型
@@ -296,6 +294,8 @@ func (r *BaseRunnable[I, O]) Invoke(ctx context.Context, input I, opts ...Option
 }
 
 // Stream 流式执行组件
+// 注册的 streamFn/transformFn 按自身合同输出；Invoke-only 的适配只产生一个完整值，
+// 因此不能仅凭实现了 Stream 方法推断组件具备原生增量能力。
 func (r *BaseRunnable[I, O]) Stream(ctx context.Context, input I, opts ...Option) (*StreamReader[O], error) {
 	if r.streamFn != nil {
 		return r.streamFn(ctx, input, opts...)
@@ -372,13 +372,12 @@ func (r *BaseRunnable[I, O]) Collect(ctx context.Context, input *StreamReader[I]
 
 // Transform 流转换
 //
-// 注意：从 Invoke 推导时，goroutine 会正确处理 context 取消和 EOF，
-// 确保不会发生 goroutine 泄漏。
+// 原生 transformFn 直接接收 reader；只有 Stream/Invoke 时先完整收集输入再调用一次。
+// 消费方拥有输入/输出读端，Close 或 context 取消会传播到上游；逐元素业务使用 MapEach。
 func (r *BaseRunnable[I, O]) Transform(ctx context.Context, input *StreamReader[I], opts ...Option) (*StreamReader[O], error) {
 	if r.transformFn != nil {
 		return r.transformFn(ctx, input, opts...)
 	}
-	// 从 Stream 推导：先合并输入流，再调用 Stream
 	if r.streamFn != nil {
 		in, err := stream.Concat(ctx, input)
 		if err != nil {
@@ -386,52 +385,12 @@ func (r *BaseRunnable[I, O]) Transform(ctx context.Context, input *StreamReader[
 		}
 		return r.streamFn(ctx, in, opts...)
 	}
-	// 从 Invoke 推导：对每个输入元素调用 Invoke
 	if r.invokeFn != nil {
-		reader, writer := stream.Pipe[O](10)
-		go func() {
-			defer writer.Close()
-			for {
-				// 先检查 context 是否已取消
-				select {
-				case <-ctx.Done():
-					writer.CloseWithError(ctx.Err())
-					return
-				default:
-				}
-
-				in, err := input.Recv()
-				if err != nil {
-					// 区分 EOF 和真正的错误
-					// EOF 表示输入流正常结束，不需要报错
-					// 其他错误需要传递给输出流
-					// 使用 errors.Is 而非字符串比较，以正确识别被包装的 EOF 错误
-					if !errors.Is(err, io.EOF) && err.Error() != "stream closed" {
-						writer.CloseWithError(err)
-					}
-					return
-				}
-
-				out, err := r.invokeFn(ctx, in, opts...)
-				if err != nil {
-					writer.CloseWithError(err)
-					return
-				}
-
-				// 发送时也检查 context
-				select {
-				case <-ctx.Done():
-					writer.CloseWithError(ctx.Err())
-					return
-				default:
-					if err := writer.Send(out); err != nil {
-						return
-					}
-				}
-			}
-		}()
-		return reader, nil
+		return collectThenInvoke(ctx, input, func(ctx context.Context, value I) (O, error) {
+			return r.invokeFn(ctx, value, opts...)
+		}), nil
 	}
+	_ = input.Close()
 	return stream.FromSlice[O](nil), nil
 }
 

@@ -18,8 +18,6 @@ package graph
 import (
 	"context"
 	"fmt"
-	"sync"
-	"sync/atomic"
 )
 
 // ============== Pregel 触发模式 ==============
@@ -61,8 +59,7 @@ type PregelStateMerger[S State] interface {
 	Merge(base S, states []S) S
 }
 
-// DefaultPregelMerger 默认状态合并器
-// 使用最后一个状态（向后兼容）
+// DefaultPregelMerger 显式选择最后结果的合并器；仅在调用者注入时生效。
 type DefaultPregelMerger[S State] struct{}
 
 // Merge 使用最后一个状态
@@ -75,6 +72,8 @@ func (m *DefaultPregelMerger[S]) Merge(base S, states []S) S {
 
 // PregelConfig Pregel 执行配置
 type PregelConfig struct {
+	RetryPolicy *RetryPolicy
+	NodeTimeout int64
 	// MaxSupersteps 最大超级步数量（防止无限循环）
 	// 默认 100
 	MaxSupersteps int
@@ -147,6 +146,13 @@ func WithPregelDebug(debug bool) PregelOption {
 	}
 }
 
+func WithPregelRetryPolicy(policy *RetryPolicy) PregelOption {
+	return func(c *PregelConfig) { c.RetryPolicy = policy }
+}
+func WithPregelNodeTimeout(milliseconds int64) PregelOption {
+	return func(c *PregelConfig) { c.NodeTimeout = milliseconds }
+}
+
 // PregelExecutorOption PregelExecutor 配置选项
 type PregelExecutorOption[S State] func(*PregelExecutor[S])
 
@@ -168,39 +174,19 @@ type PregelExecutor[S State] struct {
 
 	// 状态合并器
 	merger PregelStateMerger[S]
-
-	// 运行时状态
-	state       S
-	superstep   int32 // 当前超级步
-	activeNodes map[string]bool
-	nodeInputs  map[string][]S // 节点收到的输入消息
-
-	// 前驱统计（由 mu 保护，无需额外锁）
-	predecessors   map[string][]string // node -> predecessors
-	completedPreds map[string]int      // node -> completed predecessor count
-
-	mu sync.Mutex
 }
 
 // NewPregelExecutor 创建 Pregel 执行器
 func NewPregelExecutor[S State](g *Graph[S], opts ...PregelOption) *PregelExecutor[S] {
 	config := DefaultPregelConfig()
+	if g.plan != nil {
+		config.TriggerMode = g.plan.TriggerMode
+	}
 	for _, opt := range opts {
 		opt(config)
 	}
 
-	pe := &PregelExecutor[S]{
-		graph:          g,
-		config:         config,
-		merger:         &DefaultPregelMerger[S]{}, // 默认合并器
-		activeNodes:    make(map[string]bool),
-		nodeInputs:     make(map[string][]S),
-		predecessors:   make(map[string][]string),
-		completedPreds: make(map[string]int),
-	}
-
-	// 构建前驱关系
-	pe.buildPredecessors()
+	pe := &PregelExecutor[S]{graph: g, config: config}
 
 	return pe
 }
@@ -214,315 +200,32 @@ func NewPregelExecutorWithMerger[S State](g *Graph[S], merger PregelStateMerger[
 	return pe
 }
 
-// buildPredecessors 构建前驱关系映射
-func (pe *PregelExecutor[S]) buildPredecessors() {
-	// 从边信息构建前驱映射
-	for _, edge := range pe.graph.Edges {
-		pe.predecessors[edge.To] = append(pe.predecessors[edge.To], edge.From)
-	}
-
-	// 从条件边构建前驱映射
-	for from, condEdges := range pe.graph.conditionalEdges {
-		for _, ce := range condEdges {
-			for _, to := range ce.edges {
-				pe.predecessors[to] = append(pe.predecessors[to], from)
-			}
-		}
-	}
-}
-
 // Run 执行 Pregel 图
 // 返回最终状态和执行的超级步数量
 func (pe *PregelExecutor[S]) Run(ctx context.Context, initialState S) (S, int, error) {
-	if !pe.graph.compiled {
+	if !pe.graph.compiled || pe.graph.plan == nil {
 		return initialState, 0, fmt.Errorf("graph not compiled")
 	}
-
-	pe.mu.Lock()
-	pe.state = initialState
-	pe.superstep = 0
-	pe.mu.Unlock()
-
-	// 初始化：激活入口节点
-	entryPoint := pe.graph.EntryPoint
-	if entryPoint == "" {
-		entryPoint = START
+	if pe.graph.plan.Mode != GraphModePregel {
+		return initialState, 0, fmt.Errorf("graph was not compiled in Pregel mode")
 	}
-	pe.activeNodes[entryPoint] = true
-
-	// 执行超级步循环
-	for {
-		select {
-		case <-ctx.Done():
-			return pe.state, int(pe.superstep), ctx.Err()
-		default:
-		}
-
-		// 检查最大迭代
-		currentStep := int(atomic.LoadInt32(&pe.superstep))
-		if currentStep >= pe.config.MaxSupersteps {
-			return pe.state, currentStep, fmt.Errorf("max supersteps (%d) exceeded", pe.config.MaxSupersteps)
-		}
-
-		// 获取活跃节点列表
-		activeList := pe.getActiveNodes()
-		if len(activeList) == 0 {
-			// 没有活跃节点，执行完成
-			return pe.state, currentStep, nil
-		}
-
-		// 检查自定义终止条件
-		if pe.config.TerminationCheck != nil && pe.config.TerminationCheck(currentStep, activeList) {
-			return pe.state, currentStep, nil
-		}
-
-		// 检查是否只有 END 节点活跃
-		if len(activeList) == 1 && activeList[0] == END {
-			return pe.state, currentStep, nil
-		}
-
-		// 执行当前超级步
-		if err := pe.executeSuperstep(ctx, activeList); err != nil {
-			return pe.state, currentStep, err
-		}
-
-		atomic.AddInt32(&pe.superstep, 1)
+	if pe.config.TriggerMode != pe.graph.plan.TriggerMode {
+		return initialState, 0, fmt.Errorf("trigger mode differs from compiled graph plan")
 	}
-}
-
-// getActiveNodes 获取活跃节点列表
-func (pe *PregelExecutor[S]) getActiveNodes() []string {
-	pe.mu.Lock()
-	defer pe.mu.Unlock()
-
-	nodes := make([]string, 0, len(pe.activeNodes))
-	for node, active := range pe.activeNodes {
-		if active {
-			nodes = append(nodes, node)
-		}
+	local := *pe.graph
+	if pe.graph.frozen != nil {
+		local = *pe.graph.frozen
 	}
-	return nodes
-}
-
-// executeSuperstep 执行单个超级步
-func (pe *PregelExecutor[S]) executeSuperstep(ctx context.Context, activeNodes []string) error {
-	// 过滤掉 START 和 END 节点
-	nodesToExecute := make([]string, 0, len(activeNodes))
-	for _, node := range activeNodes {
-		if node != START && node != END {
-			nodesToExecute = append(nodesToExecute, node)
-		}
+	local.frozen = nil
+	if pe.merger != nil {
+		local.merger = pe.merger.Merge
 	}
-
-	// 清除活跃节点和上轮输入（执行后重新激活后继节点）
-	pe.mu.Lock()
-	pe.activeNodes = make(map[string]bool)
-	// 清理上一轮的节点输入，防止循环图中无限增长导致 OOM
-	pe.nodeInputs = make(map[string][]S)
-	pe.mu.Unlock()
-
-	if len(nodesToExecute) == 0 {
-		// 如果只有 START 活跃，激活其后继节点
-		for _, node := range activeNodes {
-			if node == START {
-				pe.activateSuccessors(node)
-			}
-		}
-		return nil
-	}
-
-	if pe.config.ParallelExecution {
-		return pe.executeNodesParallel(ctx, nodesToExecute)
-	}
-	return pe.executeNodesSequential(ctx, nodesToExecute)
-}
-
-// executeNodesParallel 并行执行节点
-func (pe *PregelExecutor[S]) executeNodesParallel(ctx context.Context, nodes []string) error {
-	var wg sync.WaitGroup
-	errCh := make(chan error, len(nodes))
-	resultCh := make(chan nodeResult[S], len(nodes))
-
-	// 保存执行前的基础状态
-	pe.mu.Lock()
-	baseState := pe.state
-	pe.mu.Unlock()
-
-	for _, nodeName := range nodes {
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
-
-			node, ok := pe.graph.Nodes[name]
-			if !ok {
-				errCh <- fmt.Errorf("node %s not found", name)
-				return
-			}
-
-			// 执行节点（使用基础状态的副本）
-			newState, err := node.Handler(ctx, baseState)
-			if err != nil {
-				errCh <- fmt.Errorf("node %s failed: %w", name, err)
-				return
-			}
-
-			resultCh <- nodeResult[S]{name: name, state: newState}
-		}(nodeName)
-	}
-
-	// 等待所有节点完成
-	go func() {
-		wg.Wait()
-		close(errCh)
-		close(resultCh)
-	}()
-
-	// 收集错误
-	var firstError error
-	for err := range errCh {
-		if firstError == nil {
-			firstError = err
-		}
-	}
-	if firstError != nil {
-		return firstError
-	}
-
-	// 收集所有结果并使用状态合并器合并
-	var results []nodeResult[S]
-	for result := range resultCh {
-		results = append(results, result)
-	}
-
-	// 提取状态列表
-	states := make([]S, len(results))
-	for i, r := range results {
-		states[i] = r.state
-	}
-
-	// 使用合并器合并状态
-	pe.mu.Lock()
-	pe.state = pe.merger.Merge(baseState, states)
-	pe.mu.Unlock()
-
-	// 激活后继节点
-	for _, result := range results {
-		pe.activateSuccessors(result.name)
-	}
-
-	return nil
-}
-
-// executeNodesSequential 顺序执行节点
-func (pe *PregelExecutor[S]) executeNodesSequential(ctx context.Context, nodes []string) error {
-	for _, nodeName := range nodes {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		node, ok := pe.graph.Nodes[nodeName]
-		if !ok {
-			return fmt.Errorf("node %s not found", nodeName)
-		}
-
-		// 执行节点
-		newState, err := node.Handler(ctx, pe.state)
-		if err != nil {
-			return fmt.Errorf("node %s failed: %w", nodeName, err)
-		}
-
-		pe.mu.Lock()
-		pe.state = newState
-		pe.mu.Unlock()
-
-		pe.activateSuccessors(nodeName)
-	}
-
-	return nil
-}
-
-// activateSuccessors 激活后继节点
-//
-// 安全说明：为避免死锁，此方法先在锁内获取状态副本，
-// 然后在锁外调用用户的 router 回调函数，最后再持锁更新活跃节点。
-func (pe *PregelExecutor[S]) activateSuccessors(nodeName string) {
-	// 第一阶段：在锁内获取状态副本和图信息
-	pe.mu.Lock()
-	stateCopy := pe.state // 获取状态副本
-	condEdges := pe.graph.conditionalEdges[nodeName]
-	adjacency := pe.graph.adjacency[nodeName]
-	pe.mu.Unlock()
-
-	// 第二阶段：在锁外计算路由结果（用户回调可能阻塞或获取其他锁）
-	type routeResult struct {
-		target   string
-		nodeName string
-	}
-	var toActivate []routeResult
-
-	// 检查条件边（在锁外调用 router）
-	for _, ce := range condEdges {
-		label := ce.router(stateCopy) // 用户回调在锁外调用
-		if target, ok := ce.edges[label]; ok {
-			toActivate = append(toActivate, routeResult{target: target, nodeName: nodeName})
-		}
-	}
-
-	// 检查普通边
-	for _, target := range adjacency {
-		toActivate = append(toActivate, routeResult{target: target, nodeName: nodeName})
-	}
-
-	// 第三阶段：在锁内更新活跃节点
-	pe.mu.Lock()
-	defer pe.mu.Unlock()
-	for _, route := range toActivate {
-		if pe.shouldActivate(route.target, route.nodeName) {
-			pe.activeNodes[route.target] = true
-		}
-	}
-}
-
-// shouldActivate 检查节点是否应该被激活
-// 根据 TriggerMode 决定是否激活
-// 注意：调用此方法时，外层已持有 pe.mu 锁
-func (pe *PregelExecutor[S]) shouldActivate(node, completedPred string) bool {
-	switch pe.config.TriggerMode {
-	case TriggerAnyPredecessor:
-		// 任意前驱完成即可激活
-		return true
-
-	case TriggerAllPredecessors:
-		// 所有前驱完成才激活
-		// 注意：外层已持有 pe.mu，无需额外加锁
-		preds := pe.predecessors[node]
-		if len(preds) == 0 {
-			return true
-		}
-
-		// 原子地增加并检查计数
-		pe.completedPreds[node]++
-		completed := pe.completedPreds[node]
-		required := len(preds)
-
-		// 如果达到要求，重置计数以便下一轮
-		if completed >= required {
-			pe.completedPreds[node] = 0
-			return true
-		}
-		return false
-
-	default:
-		return true
-	}
-}
-
-// nodeResult 节点执行结果
-type nodeResult[S State] struct {
-	name  string
-	state S
+	x := newPlanExecutor(&local, initialState)
+	x.pregel = pe.config
+	x.defaults = pe.config.RetryPolicy
+	x.defaultTimeout = pe.config.NodeTimeout
+	state, err := x.run(ctx)
+	return state, int(x.frontier.Activation), err
 }
 
 // ============== Graph 扩展方法 ==============
@@ -537,100 +240,45 @@ func (g *Graph[S]) RunPregelMode(ctx context.Context, initialState S, opts ...Pr
 // StreamPregelMode 以 Pregel 模式流式执行图
 // 每个超级步发送一个事件
 func (g *Graph[S]) StreamPregelMode(ctx context.Context, initialState S, opts ...PregelOption) (<-chan PregelEvent[S], error) {
-	if !g.compiled {
+	if !g.compiled || g.plan == nil {
 		return nil, fmt.Errorf("graph not compiled")
 	}
-
+	if g.plan.Mode != GraphModePregel {
+		return nil, fmt.Errorf("graph was not compiled in Pregel mode")
+	}
+	pe := NewPregelExecutor(g, opts...)
+	if pe.config.TriggerMode != g.plan.TriggerMode {
+		return nil, fmt.Errorf("trigger mode differs from compiled graph plan")
+	}
 	events := make(chan PregelEvent[S], 10)
-	executor := NewPregelExecutor(g, opts...)
-
 	go func() {
 		defer close(events)
-
-		executor.mu.Lock()
-		executor.state = initialState
-		executor.superstep = 0
-		executor.mu.Unlock()
-
-		// 初始化
-		entryPoint := g.EntryPoint
-		if entryPoint == "" {
-			entryPoint = START
-		}
-		executor.activeNodes[entryPoint] = true
-
-		// sendEvent 发送事件
-		sendEvent := func(evt PregelEvent[S]) bool {
+		x := newPlanExecutor(g, initialState)
+		x.pregel = pe.config
+		x.defaults = pe.config.RetryPolicy
+		x.defaultTimeout = pe.config.NodeTimeout
+		x.observe = func(event StreamEvent[S]) error {
+			kind := PregelEventSuperstepStart
+			if event.Type == EventTypeNodeEnd {
+				kind = PregelEventSuperstepEnd
+			}
 			select {
+			case events <- PregelEvent[S]{Type: kind, Superstep: int(x.frontier.Activation), State: event.State, ActiveNodes: append([]string(nil), x.frontier.Ready...)}:
+				return nil
 			case <-ctx.Done():
-				return false
-			case events <- evt:
-				return true
+				return ctx.Err()
 			}
 		}
-
-		// 执行超级步循环
-		for {
-			select {
-			case <-ctx.Done():
-				sendEvent(PregelEvent[S]{
-					Type:  PregelEventError,
-					Error: ctx.Err(),
-				})
-				return
-			default:
-			}
-
-			currentStep := int(atomic.LoadInt32(&executor.superstep))
-			if currentStep >= executor.config.MaxSupersteps {
-				sendEvent(PregelEvent[S]{
-					Type:  PregelEventError,
-					Error: fmt.Errorf("max supersteps exceeded"),
-				})
-				return
-			}
-
-			activeList := executor.getActiveNodes()
-			if len(activeList) == 0 || (len(activeList) == 1 && activeList[0] == END) {
-				sendEvent(PregelEvent[S]{
-					Type:      PregelEventComplete,
-					State:     executor.state,
-					Superstep: currentStep,
-				})
-				return
-			}
-
-			// 发送超级步开始事件
-			if !sendEvent(PregelEvent[S]{
-				Type:        PregelEventSuperstepStart,
-				Superstep:   currentStep,
-				ActiveNodes: activeList,
-			}) {
-				return
-			}
-
-			// 执行超级步
-			if err := executor.executeSuperstep(ctx, activeList); err != nil {
-				sendEvent(PregelEvent[S]{
-					Type:  PregelEventError,
-					Error: err,
-				})
-				return
-			}
-
-			// 发送超级步完成事件
-			if !sendEvent(PregelEvent[S]{
-				Type:      PregelEventSuperstepEnd,
-				State:     executor.state,
-				Superstep: currentStep,
-			}) {
-				return
-			}
-
-			atomic.AddInt32(&executor.superstep, 1)
+		state, err := x.run(ctx)
+		kind := PregelEventComplete
+		if err != nil {
+			kind = PregelEventError
+		}
+		select {
+		case events <- PregelEvent[S]{Type: kind, State: state, Error: err, Superstep: int(x.frontier.Activation)}:
+		case <-ctx.Done():
 		}
 	}()
-
 	return events, nil
 }
 

@@ -15,7 +15,7 @@ type WorkflowState struct {
 	Completed bool
 }
 
-func (s WorkflowState) Clone() graph.State {
+func (s WorkflowState) Clone() (graph.State, error) {
 	steps := make([]string, len(s.Steps))
 	copy(steps, s.Steps)
 
@@ -29,7 +29,7 @@ func (s WorkflowState) Clone() graph.State {
 		Steps:     steps,
 		Data:      data,
 		Completed: s.Completed,
-	}
+	}, nil
 }
 
 // TestGraphLinearWorkflow tests a simple linear graph workflow
@@ -241,7 +241,11 @@ func TestGraphMapState(t *testing.T) {
 	}
 
 	// Test Clone
-	cloned := state.Clone().(graph.MapState)
+	copy, err := state.Clone()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloned := copy.(graph.MapState)
 	cloned.Set("new_key", "new_value")
 
 	_, ok = state.Get("new_key")
