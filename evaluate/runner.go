@@ -3,9 +3,13 @@ package evaluate
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/reflectx"
 )
 
 // Runner 评估运行器
@@ -292,24 +296,32 @@ func evaluateSingle(ctx context.Context, input EvalInput, evaluators []namedEval
 	return results
 }
 
-// normalizeEvalResult 保留部分评分事实，并将空返回或执行错误显式记入同一结果。
+// normalizeEvalResult 固定本次评分事实，隔离评估器可能再次使用的结果对象。
+// 复制失败同样是评估错误，保留已取得的标量事实，不共享无法隔离的详情。
 func normalizeEvalResult(name string, result *EvalResult, err error) *EvalResult {
-	if err == nil && result != nil {
-		return result
-	}
 	failed := EvalResult{Name: name}
 	if result != nil {
 		failed = *result
-		if failed.Name == "" {
-			failed.Name = name
+		failed.Name = name
+		if result.Passed != nil {
+			passed := *result.Passed
+			failed.Passed = &passed
+		}
+		failed.SubScores = maps.Clone(result.SubScores)
+		details, copyErr := reflectx.DeepCopyChecked(result.Details)
+		failed.Details = details
+		if copyErr != nil {
+			err = errors.Join(err, fmt.Errorf("evaluate: result details cannot be isolated: %w", copyErr))
 		}
 	}
-	if err == nil {
+	if result == nil && err == nil {
 		failed.Error = "evaluator returned no result"
-	} else if failed.Error == "" {
-		failed.Error = err.Error()
-	} else {
-		failed.Error += "; " + err.Error()
+	} else if err != nil {
+		if failed.Error == "" {
+			failed.Error = err.Error()
+		} else {
+			failed.Error += "; " + err.Error()
+		}
 	}
 	return &failed
 }

@@ -1,16 +1,20 @@
 package mysql
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"time"
 
 	"github.com/hexagon-codes/hexagon/agent/artifact"
 )
+
+var errArtifactNotFound = errors.New("mysql: artifact not found")
 
 // ArtifactStore 与运行权威使用同一宿主数据库，但字节仍由外部 ObjectStore 管理。
 // scope 在装配时绑定，每次查询都带作用域；不关闭注入连接、不隐式迁移。
@@ -97,12 +101,26 @@ func (s *ArtifactStore) get(ctx context.Context, statement string, args ...any) 
 	var data []byte
 	if err := s.db.QueryRowContext(ctx, statement, args...).Scan(&data); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("mysql: artifact not found")
+			return nil, errArtifactNotFound
 		}
 		return nil, err
 	}
+	return decodeArtifactRecord(data)
+}
+
+// decodeArtifactRecord 保留元数据中的数字字面值，同时要求完整的单条 JSON 记录。
+func decodeArtifactRecord(data []byte) (*artifact.Artifact, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
 	var art artifact.Artifact
-	if err := json.Unmarshal(data, &art); err != nil {
+	if err := decoder.Decode(&art); err != nil {
+		return nil, err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("mysql: multiple artifact JSON records")
+		}
 		return nil, err
 	}
 	return &art, nil
@@ -113,7 +131,11 @@ func (s *ArtifactStore) GetByVersion(ctx context.Context, sessionID, name string
 }
 
 func (s *ArtifactStore) GetLatest(ctx context.Context, sessionID, name string) (*artifact.Artifact, error) {
-	return s.get(ctx, `SELECT record FROM hexagon_artifacts WHERE scope=? AND session_id=? AND name=? ORDER BY version DESC,artifact_id LIMIT 1`, s.scope, sessionID, name)
+	art, err := s.get(ctx, `SELECT record FROM hexagon_artifacts WHERE scope=? AND session_id=? AND name=? ORDER BY version DESC,artifact_id LIMIT 1`, s.scope, sessionID, name)
+	if errors.Is(err, errArtifactNotFound) {
+		return nil, nil
+	}
+	return art, err
 }
 
 func (s *ArtifactStore) list(ctx context.Context, sessionID, name string) ([]artifact.Artifact, error) {
@@ -135,11 +157,11 @@ func (s *ArtifactStore) list(ctx context.Context, sessionID, name string) ([]art
 		if err := rows.Scan(&data); err != nil {
 			return nil, err
 		}
-		var art artifact.Artifact
-		if err := json.Unmarshal(data, &art); err != nil {
+		art, err := decodeArtifactRecord(data)
+		if err != nil {
 			return nil, err
 		}
-		result = append(result, art)
+		result = append(result, *art)
 	}
 	return result, rows.Err()
 }

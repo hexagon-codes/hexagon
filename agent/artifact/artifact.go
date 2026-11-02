@@ -94,7 +94,7 @@ type Store interface {
 	// GetByVersion 按名称和版本获取
 	GetByVersion(ctx context.Context, sessionID, name string, version int) (*Artifact, error)
 
-	// GetLatest 获取最新版本
+	// GetLatest 获取最新版本；没有记录时返回 nil,nil，读取失败返回错误。
 	GetLatest(ctx context.Context, sessionID, name string) (*Artifact, error)
 
 	// List 列出会话下所有 artifact（最新版本）
@@ -205,7 +205,10 @@ func (s *Service) Save(ctx context.Context, art Artifact) (string, error) {
 	}
 
 	// 退化路径：Store 未实现原子版本分配，沿用非原子的读-改-写。
-	latest, _ := s.store.GetLatest(ctx, art.SessionID, art.Name)
+	latest, err := s.store.GetLatest(ctx, art.SessionID, art.Name)
+	if err != nil {
+		return "", fmt.Errorf("artifact latest version lookup failed: %w", err)
+	}
 	if latest != nil {
 		art.Version = latest.Version + 1
 	} else {
