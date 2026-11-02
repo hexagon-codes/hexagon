@@ -14,10 +14,13 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/toolkit/util/retry"
 )
 
@@ -114,15 +117,13 @@ func (f *Future[T]) IsDone() bool {
 func (f *Future[T]) Then(fn func(T) (T, error)) *Future[T] {
 	next := NewFuture[T]()
 
-	go func() {
+	go completeFuture(next, func() (T, error) {
 		result, err := f.Get()
 		if err != nil {
-			next.Complete(result, err)
-			return
+			return result, err
 		}
-		newResult, newErr := fn(result)
-		next.Complete(newResult, newErr)
-	}()
+		return fn(result)
+	})
 
 	return next
 }
@@ -131,15 +132,13 @@ func (f *Future[T]) Then(fn func(T) (T, error)) *Future[T] {
 func (f *Future[T]) Catch(fn func(error) (T, error)) *Future[T] {
 	next := NewFuture[T]()
 
-	go func() {
+	go completeFuture(next, func() (T, error) {
 		result, err := f.Get()
 		if err != nil {
-			newResult, newErr := fn(err)
-			next.Complete(newResult, newErr)
-			return
+			return fn(err)
 		}
-		next.Complete(result, nil)
-	}()
+		return result, nil
+	})
 
 	return next
 }
@@ -169,10 +168,7 @@ func WrapAsync[I, O any](r Runnable[I, O]) *AsyncWrapper[I, O] {
 func (w *AsyncWrapper[I, O]) InvokeAsync(ctx context.Context, input I, opts ...Option) *Future[O] {
 	future := NewFuture[O]()
 
-	go func() {
-		result, err := w.runnable.Invoke(ctx, input, opts...)
-		future.Complete(result, err)
-	}()
+	go completeFuture(future, func() (O, error) { return w.runnable.Invoke(ctx, input, opts...) })
 
 	return future
 }
@@ -181,10 +177,7 @@ func (w *AsyncWrapper[I, O]) InvokeAsync(ctx context.Context, input I, opts ...O
 func (w *AsyncWrapper[I, O]) BatchAsync(ctx context.Context, inputs []I, opts ...Option) *Future[[]O] {
 	future := NewFuture[[]O]()
 
-	go func() {
-		results, err := w.runnable.Batch(ctx, inputs, opts...)
-		future.Complete(results, err)
-	}()
+	go completeFuture(future, func() ([]O, error) { return w.runnable.Batch(ctx, inputs, opts...) })
 
 	return future
 }
@@ -197,7 +190,8 @@ func Parallel[T any](futures ...*Future[T]) *Future[[]T] {
 
 	go func() {
 		results := make([]T, len(futures))
-		var firstErr error
+		failures := make([]error, len(futures))
+		var hasSuccess bool
 
 		var wg sync.WaitGroup
 		var mu sync.Mutex
@@ -209,15 +203,14 @@ func Parallel[T any](futures ...*Future[T]) *Future[[]T] {
 				r, err := future.Get()
 				mu.Lock()
 				results[idx] = r
-				if err != nil && firstErr == nil {
-					firstErr = err
-				}
+				failures[idx] = err
+				hasSuccess = hasSuccess || err == nil
 				mu.Unlock()
 			}(i, f)
 		}
 
 		wg.Wait()
-		result.Complete(results, firstErr)
+		result.Complete(results, parallelFutureFailure(failures, hasSuccess))
 	}()
 
 	return result
@@ -229,7 +222,8 @@ func ParallelWithLimit[T any](limit int, futures ...*Future[T]) *Future[[]T] {
 
 	go func() {
 		results := make([]T, len(futures))
-		var firstErr error
+		failures := make([]error, len(futures))
+		var hasSuccess bool
 
 		sem := make(chan struct{}, limit)
 		var wg sync.WaitGroup
@@ -246,15 +240,14 @@ func ParallelWithLimit[T any](limit int, futures ...*Future[T]) *Future[[]T] {
 				r, err := future.Get()
 				mu.Lock()
 				results[idx] = r
-				if err != nil && firstErr == nil {
-					firstErr = err
-				}
+				failures[idx] = err
+				hasSuccess = hasSuccess || err == nil
 				mu.Unlock()
 			}(i, f)
 		}
 
 		wg.Wait()
-		result.Complete(results, firstErr)
+		result.Complete(results, parallelFutureFailure(failures, hasSuccess))
 	}()
 
 	return result
@@ -300,7 +293,7 @@ func Any[T any](futures ...*Future[T]) *Future[T] {
 				// 所有 future 都失败时才返回错误
 				if currentCount == total {
 					var zero T
-					result.Complete(zero, fmt.Errorf("all futures failed: %v", allErrs))
+					result.Complete(zero, fmt.Errorf("all futures failed: %w", errors.Join(allErrs...)))
 				}
 			}
 		}(f)
@@ -311,14 +304,49 @@ func Any[T any](futures ...*Future[T]) *Future[T] {
 
 // ============== 异步工具函数 ==============
 
+// AsyncPanicError 保留框架异步回调的原始panic及栈；副作用未知时不能盲目重放。
+type AsyncPanicError struct {
+	Value any
+	Stack []byte
+}
+
+func (e *AsyncPanicError) Error() string      { return fmt.Sprintf("async callback panicked: %v", e.Value) }
+func (*AsyncPanicError) UnsafeToReplay() bool { return true }
+func (e *AsyncPanicError) Unwrap() error      { cause, _ := e.Value.(error); return cause }
+
+func completeFuture[T any](future *Future[T], call func() (T, error)) {
+	defer func() {
+		if value := recover(); value != nil {
+			var zero T
+			future.Complete(zero, &AsyncPanicError{Value: value, Stack: debug.Stack()})
+		}
+	}()
+	result, err := call()
+	future.Complete(result, err)
+}
+
+type parallelFutureError struct {
+	cause      error
+	hasSuccess bool
+}
+
+func (e *parallelFutureError) Error() string { return e.cause.Error() }
+func (e *parallelFutureError) Unwrap() error { return e.cause }
+func (e *parallelFutureError) UnsafeToReplay() bool {
+	return e.hasSuccess || llm.IsUnsafeToReplay(e.cause)
+}
+func parallelFutureFailure(failures []error, hasSuccess bool) error {
+	if cause := errors.Join(failures...); cause != nil {
+		return &parallelFutureError{cause: cause, hasSuccess: hasSuccess}
+	}
+	return nil
+}
+
 // RunAsync 异步执行函数
 func RunAsync[T any](fn func() (T, error)) *Future[T] {
 	future := NewFuture[T]()
 
-	go func() {
-		result, err := fn()
-		future.Complete(result, err)
-	}()
+	go completeFuture(future, fn)
 
 	return future
 }
@@ -327,10 +355,7 @@ func RunAsync[T any](fn func() (T, error)) *Future[T] {
 func RunAsyncWithContext[T any](ctx context.Context, fn func(context.Context) (T, error)) *Future[T] {
 	future := NewFuture[T]()
 
-	go func() {
-		result, err := fn(ctx)
-		future.Complete(result, err)
-	}()
+	go completeFuture(future, func() (T, error) { return fn(ctx) })
 
 	return future
 }
@@ -339,11 +364,10 @@ func RunAsyncWithContext[T any](ctx context.Context, fn func(context.Context) (T
 func Delay[T any](duration time.Duration, fn func() (T, error)) *Future[T] {
 	future := NewFuture[T]()
 
-	go func() {
+	go completeFuture(future, func() (T, error) {
 		time.Sleep(duration)
-		result, err := fn()
-		future.Complete(result, err)
-	}()
+		return fn()
+	})
 
 	return future
 }
@@ -361,7 +385,7 @@ func Delay[T any](duration time.Duration, fn func() (T, error)) *Future[T] {
 //     delay，避免默认 30s 上限在 delay>30s 时反向裁剪固定延迟（FixedDelay
 //     返回值会被 MaxDelay 封顶）。delay=0 时保留 toolkit 的默认正上限，
 //     FixedDelay 仍返回 0。FixedDelay 路径不叠加抖动，与手写循环一致。
-//   - 重试条件：手写循环对任意非 nil 错误重试，等同 toolkit 默认条件。
+//   - 重试条件：普通失败沿用原次数；中断、取消或未知动作不允许自动重放。
 //   - 最终错误可解包：手写循环重试耗尽直接返回原始 lastErr。toolkit 当前
 //     默认以双 %w 同时保留 ErrMaxAttemptsReached 与原始 lastErr，Hexagon
 //     无需再注入兼容 Option。
@@ -371,12 +395,13 @@ func Delay[T any](duration time.Duration, fn func() (T, error)) *Future[T] {
 func Retry[T any](maxRetries int, delay time.Duration, fn func() (T, error)) *Future[T] {
 	future := NewFuture[T]()
 
-	go func() {
+	go completeFuture(future, func() (T, error) {
 		var result T
 		options := []retry.Option{
 			retry.Attempts(maxRetries + 1),
 			retry.Delay(delay),
 			retry.DelayType(retry.FixedDelay),
+			retry.If(func(err error) bool { return !runnableReplayStopped(err) }),
 		}
 		if delay > 0 {
 			options = append(options, retry.MaxDelay(delay))
@@ -388,11 +413,10 @@ func Retry[T any](maxRetries int, delay time.Duration, fn func() (T, error)) *Fu
 		}, options...)
 		if err != nil {
 			var zero T
-			future.Complete(zero, err)
-			return
+			return zero, err
 		}
-		future.Complete(result, nil)
-	}()
+		return result, nil
+	})
 
 	return future
 }

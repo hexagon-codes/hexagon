@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/hexagon/interrupt"
 	hr "github.com/hexagon-codes/hexagon/runtime"
 )
 
@@ -203,6 +204,9 @@ func joinRecoveryError(current error, executionID string, err error) error {
 }
 
 func workflowRetryStopped(ctx context.Context, err error) bool {
+	if _, interrupted := interrupt.IsInterruptSignal(err); interrupted || errors.Is(err, interrupt.ErrInterrupted) {
+		return true
+	}
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, hr.ErrOperationUnresolved) || errors.Is(err, hr.ErrCommitUnknown) {
 		return true
 	}

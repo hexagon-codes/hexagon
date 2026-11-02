@@ -21,6 +21,8 @@ import (
 	"math"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/hexagon/interrupt"
 	"github.com/hexagon-codes/toolkit/util/circuit"
 	"github.com/hexagon-codes/toolkit/util/retry"
 )
@@ -130,8 +132,8 @@ func (r *RunnableWithFallback[I, O]) Invoke(ctx context.Context, input I, opts .
 	}
 
 	// 检查是否应该降级
-	if !r.shouldFallback(err) {
-		return result, err
+	if !r.shouldFallback(ctx, err) {
+		return result, fallbackFailure(ctx, err)
 	}
 
 	// 尝试降级 Runnables
@@ -145,8 +147,8 @@ func (r *RunnableWithFallback[I, O]) Invoke(ctx context.Context, input I, opts .
 			return result, nil
 		}
 
-		if !r.shouldFallback(err) {
-			return result, err
+		if !r.shouldFallback(ctx, err) {
+			return result, fallbackFailure(ctx, err)
 		}
 	}
 
@@ -161,8 +163,8 @@ func (r *RunnableWithFallback[I, O]) Stream(ctx context.Context, input I, opts .
 		return stream, nil
 	}
 
-	if !r.shouldFallback(err) {
-		return nil, err
+	if !r.shouldFallback(ctx, err) {
+		return nil, fallbackFailure(ctx, err)
 	}
 
 	for i, fallback := range r.fallbacks {
@@ -175,8 +177,8 @@ func (r *RunnableWithFallback[I, O]) Stream(ctx context.Context, input I, opts .
 			return stream, nil
 		}
 
-		if !r.shouldFallback(err) {
-			return nil, err
+		if !r.shouldFallback(ctx, err) {
+			return nil, fallbackFailure(ctx, err)
 		}
 	}
 
@@ -190,8 +192,8 @@ func (r *RunnableWithFallback[I, O]) Batch(ctx context.Context, inputs []I, opts
 		return results, nil
 	}
 
-	if !r.shouldFallback(err) {
-		return nil, err
+	if !r.shouldFallback(ctx, err) {
+		return nil, fallbackFailure(ctx, err)
 	}
 
 	for i, fallback := range r.fallbacks {
@@ -204,8 +206,8 @@ func (r *RunnableWithFallback[I, O]) Batch(ctx context.Context, inputs []I, opts
 			return results, nil
 		}
 
-		if !r.shouldFallback(err) {
-			return nil, err
+		if !r.shouldFallback(ctx, err) {
+			return nil, fallbackFailure(ctx, err)
 		}
 	}
 
@@ -229,8 +231,8 @@ func (r *RunnableWithFallback[I, O]) BatchStream(ctx context.Context, inputs []I
 		return stream, nil
 	}
 
-	if !r.shouldFallback(err) {
-		return nil, err
+	if !r.shouldFallback(ctx, err) {
+		return nil, fallbackFailure(ctx, err)
 	}
 
 	for i, fallback := range r.fallbacks {
@@ -243,15 +245,18 @@ func (r *RunnableWithFallback[I, O]) BatchStream(ctx context.Context, inputs []I
 			return stream, nil
 		}
 
-		if !r.shouldFallback(err) {
-			return nil, err
+		if !r.shouldFallback(ctx, err) {
+			return nil, fallbackFailure(ctx, err)
 		}
 	}
 
 	return nil, ErrAllFallbacksFailed
 }
 
-func (r *RunnableWithFallback[I, O]) shouldFallback(err error) bool {
+func (r *RunnableWithFallback[I, O]) shouldFallback(ctx context.Context, err error) bool {
+	if ctx.Err() != nil || runnableReplayStopped(err) {
+		return false
+	}
 	if len(r.config.ExceptionsToHandle) == 0 {
 		return true
 	}
@@ -262,6 +267,19 @@ func (r *RunnableWithFallback[I, O]) shouldFallback(err error) bool {
 		}
 	}
 	return false
+}
+
+// runnableReplayStopped 保留控制错误的优先级，调用方策略不能重新放行未知动作。
+func runnableReplayStopped(err error) bool {
+	_, interrupted := interrupt.IsInterruptSignal(err)
+	return interrupted || errors.Is(err, interrupt.ErrInterrupted) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || llm.IsUnsafeToReplay(err)
+}
+
+func fallbackFailure(ctx context.Context, err error) error {
+	if cause := ctx.Err(); cause != nil {
+		return errors.Join(err, cause)
+	}
+	return err
 }
 
 // ============== Retry Runnable ==============
@@ -392,9 +410,9 @@ func (r *RunnableWithRetry[I, O]) retryOptions() []retry.Option {
 			retry.DelayType(retry.ExponentialBackoff),
 		)
 	}
-	if r.config.RetryOn != nil {
-		opts = append(opts, retry.If(r.config.RetryOn))
-	}
+	opts = append(opts, retry.If(func(err error) bool {
+		return !runnableReplayStopped(err) && (r.config.RetryOn == nil || r.config.RetryOn(err))
+	}))
 	if r.config.OnRetry != nil {
 		// toolkit 的 n 为一基；Hexagon 的公开合同保持零基。
 		opts = append(opts, retry.OnRetry(func(n int, err error) {
