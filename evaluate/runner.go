@@ -123,7 +123,14 @@ func (r *Runner) EvaluateDataset(ctx context.Context, dataset *Dataset, system S
 	for result := range resultCh {
 		report.Results = append(report.Results, result)
 
-		if result.Error != "" {
+		failed := result.Error != ""
+		for _, evaluation := range result.Results {
+			if evaluation == nil || evaluation.Error != "" {
+				failed = true
+				break
+			}
+		}
+		if failed {
 			report.FailedSamples++
 		} else {
 			report.SuccessSamples++
@@ -131,6 +138,9 @@ func (r *Runner) EvaluateDataset(ctx context.Context, dataset *Dataset, system S
 
 		// 更新汇总统计
 		for name, evalResult := range result.Results {
+			if evalResult == nil {
+				continue
+			}
 			if summary, ok := report.Summary[name]; ok {
 				summary.Count++
 				summary.Mean += evalResult.Score
@@ -147,7 +157,7 @@ func (r *Runner) EvaluateDataset(ctx context.Context, dataset *Dataset, system S
 				summary.Distribution[level]++
 
 				// 更新通过率
-				if evalResult.Passed != nil && *evalResult.Passed {
+				if evalResult.Error == "" && evalResult.Passed != nil && *evalResult.Passed {
 					if summary.PassRate == nil {
 						passRate := 0.0
 						summary.PassRate = &passRate
@@ -204,6 +214,11 @@ func (r *Runner) evaluateSample(ctx context.Context, sample Sample, system Syste
 		result.Duration = time.Since(start)
 		return result
 	}
+	if sysResp == nil {
+		result.Error = "system returned no response"
+		result.Duration = time.Since(start)
+		return result
+	}
 
 	result.Response = sysResp.Response
 
@@ -226,15 +241,7 @@ func (r *Runner) evaluateSample(ctx context.Context, sample Sample, system Syste
 	// 运行所有评估器
 	for _, eval := range r.evaluators {
 		evalResult, err := eval.Evaluate(evalCtx, input)
-		if err != nil {
-			result.Results[eval.Name()] = &EvalResult{
-				Name:  eval.Name(),
-				Score: 0,
-				Error: err.Error(),
-			}
-		} else {
-			result.Results[eval.Name()] = evalResult
-		}
+		result.Results[eval.Name()] = normalizeEvalResult(eval.Name(), evalResult, err)
 	}
 
 	result.Duration = time.Since(start)
@@ -247,18 +254,32 @@ func (r *Runner) EvaluateSingle(ctx context.Context, input EvalInput) (map[strin
 
 	for _, eval := range r.evaluators {
 		result, err := eval.Evaluate(ctx, input)
-		if err != nil {
-			results[eval.Name()] = &EvalResult{
-				Name:  eval.Name(),
-				Score: 0,
-				Error: err.Error(),
-			}
-		} else {
-			results[eval.Name()] = result
-		}
+		results[eval.Name()] = normalizeEvalResult(eval.Name(), result, err)
 	}
 
 	return results, nil
+}
+
+// normalizeEvalResult 保留部分评分事实，并将空返回或执行错误显式记入同一结果。
+func normalizeEvalResult(name string, result *EvalResult, err error) *EvalResult {
+	if err == nil && result != nil {
+		return result
+	}
+	failed := EvalResult{Name: name}
+	if result != nil {
+		failed = *result
+		if failed.Name == "" {
+			failed.Name = name
+		}
+	}
+	if err == nil {
+		failed.Error = "evaluator returned no result"
+	} else if failed.Error == "" {
+		failed.Error = err.Error()
+	} else {
+		failed.Error += "; " + err.Error()
+	}
+	return &failed
 }
 
 // EvaluateBatch 批量评估
