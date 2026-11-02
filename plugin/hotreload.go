@@ -12,6 +12,7 @@ import (
 
 	"github.com/hexagon-codes/toolkit/lang/mapx"
 	"github.com/hexagon-codes/toolkit/util/hash"
+	"github.com/hexagon-codes/toolkit/util/reflectx"
 )
 
 // HotReloadManager 插件热更新管理器
@@ -53,7 +54,9 @@ type HotReloadManager struct {
 	mu sync.RWMutex
 
 	// versions 插件版本记录
-	versions map[string][]PluginVersion
+	versions    map[string][]PluginVersion
+	retirements map[string]*Retirement
+	done        chan struct{}
 }
 
 // HotReloadCallback 热更新回调
@@ -103,6 +106,7 @@ func NewHotReloadManager(manager *PluginManager, opts ...HotReloadOption) *HotRe
 		ctx:          ctx,
 		cancel:       cancel,
 		versions:     make(map[string][]PluginVersion),
+		retirements:  make(map[string]*Retirement),
 	}
 
 	for _, opt := range opts {
@@ -153,9 +157,11 @@ func (m *HotReloadManager) Start() error {
 	}
 
 	m.running = true
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.done = make(chan struct{})
 
 	// 启动监控 goroutine
-	go m.watch()
+	go m.watch(m.ctx, m.done)
 
 	return nil
 }
@@ -163,14 +169,17 @@ func (m *HotReloadManager) Start() error {
 // Stop 停止热更新监控
 func (m *HotReloadManager) Stop() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	if !m.running {
+		m.mu.Unlock()
 		return
 	}
 
 	m.cancel()
 	m.running = false
+	done := m.done
+	m.mu.Unlock()
+	<-done
 }
 
 // IsRunning 返回运行状态
@@ -181,13 +190,14 @@ func (m *HotReloadManager) IsRunning() bool {
 }
 
 // watch 监控配置变化
-func (m *HotReloadManager) watch() {
+func (m *HotReloadManager) watch(ctx context.Context, done chan struct{}) {
+	defer close(done)
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-m.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			m.checkAndReload()
@@ -249,38 +259,25 @@ func (m *HotReloadManager) reloadPlugin(name, path string, modTime time.Time) {
 
 // reloadWithRollback 重新加载插件（带回滚）
 func (m *HotReloadManager) reloadWithRollback(ctx context.Context, name, path string) error {
-	// 获取当前实例
-	instance, err := m.manager.Registry.GetInstance(name)
-	if err != nil {
-		return fmt.Errorf("plugin %s not found: %w", name, err)
-	}
-
-	// 保存当前状态
-	oldState := instance.State
-	oldConfig := instance.Config
-
-	// 尝试停止插件
-	if instance.State == PluginStateRunning {
-		if err := m.manager.Lifecycle.Stop(ctx, name); err != nil {
-			return fmt.Errorf("failed to stop plugin: %w", err)
-		}
-	}
-
-	// 加载新配置
 	loader := NewLoader(m.manager.Registry, m.manager.Lifecycle)
-	if err := loader.LoadFromConfig(ctx, path); err != nil {
-		// 回滚：恢复旧状态
-		if oldState == PluginStateRunning {
-			m.manager.Lifecycle.Init(ctx, name, oldConfig)
-			m.manager.Lifecycle.Start(ctx, name)
-		}
-		return fmt.Errorf("failed to load new config: %w", err)
+	retirement, err := loader.ReplaceFromConfig(ctx, name, path)
+	if err != nil {
+		return err
 	}
-
-	// 保存新版本
+	m.mu.Lock()
+	m.retirements[name] = retirement
+	m.mu.Unlock()
+	instance, _ := m.manager.Registry.GetInstance(name)
 	m.saveVersion(name, instance.Config)
-
 	return nil
+}
+
+// WaitForDrain 等待最近一次成功发布所替换资源排空，不持有发布锁。
+func (m *HotReloadManager) WaitForDrain(ctx context.Context, name string) error {
+	m.mu.RLock()
+	retirement := m.retirements[name]
+	m.mu.RUnlock()
+	return retirement.Wait(ctx)
 }
 
 // getCurrentVersion 获取当前版本
@@ -293,7 +290,8 @@ func (m *HotReloadManager) getCurrentVersion(name string) *PluginVersion {
 		return nil
 	}
 
-	return &versions[len(versions)-1]
+	version := copyPluginVersion(versions[len(versions)-1])
+	return &version
 }
 
 // saveVersion 保存版本
@@ -302,9 +300,9 @@ func (m *HotReloadManager) saveVersion(name string, config map[string]any) {
 	defer m.mu.Unlock()
 
 	version := PluginVersion{
-		Version:  time.Now().Format("20060102-150405"),
+		Version:  time.Now().UTC().Format("20060102T150405.000000000Z"),
 		LoadedAt: time.Now(),
-		Config:   config,
+		Config:   reflectx.DeepCopy(config),
 		Hash:     computeConfigHash(config),
 	}
 
@@ -327,8 +325,15 @@ func (m *HotReloadManager) GetVersionHistory(name string) []PluginVersion {
 	}
 
 	result := make([]PluginVersion, len(versions))
-	copy(result, versions)
+	for i, version := range versions {
+		result[i] = copyPluginVersion(version)
+	}
 	return result
+}
+
+func copyPluginVersion(version PluginVersion) PluginVersion {
+	version.Config = reflectx.DeepCopy(version.Config)
+	return version
 }
 
 // RollbackToVersion 回滚到指定版本
@@ -354,20 +359,17 @@ func (m *HotReloadManager) RollbackToVersion(ctx context.Context, name, version 
 		return fmt.Errorf("version %s not found for plugin %s", version, name)
 	}
 
-	// 停止当前插件
-	if err := m.manager.Lifecycle.Stop(ctx, name); err != nil {
-		return fmt.Errorf("failed to stop plugin: %w", err)
+	candidate, err := m.manager.Registry.CreateFromFactory(name)
+	if err != nil {
+		return err
 	}
-
-	// 使用旧配置初始化并启动
-	if err := m.manager.Lifecycle.Init(ctx, name, targetVersion.Config); err != nil {
-		return fmt.Errorf("failed to init with old config: %w", err)
+	retirement, err := m.manager.ReplaceCandidate(ctx, name, candidate, targetVersion.Config)
+	if err != nil {
+		return err
 	}
-
-	if err := m.manager.Lifecycle.Start(ctx, name); err != nil {
-		return fmt.Errorf("failed to start plugin: %w", err)
-	}
-
+	m.mu.Lock()
+	m.retirements[name] = retirement
+	m.mu.Unlock()
 	return nil
 }
 
@@ -476,37 +478,27 @@ func (m *HotReloadManager) UpdatePlugin(ctx context.Context, name, configPath st
 
 // updateImmediate 立即更新
 func (m *HotReloadManager) updateImmediate(ctx context.Context, name, configPath string, opts UpdateOptions) error {
-	// 备份当前配置
-	var backup *PluginVersion
-	if opts.BackupConfig {
-		backup = m.getCurrentVersion(name)
-	}
-
 	// 重新加载
 	err := m.reloadWithRollback(ctx, name, configPath)
 
-	// 错误时回滚
-	if err != nil && opts.RollbackOnError && backup != nil {
-		m.RollbackToVersion(ctx, name, backup.Version)
-		return fmt.Errorf("update failed and rolled back: %w", err)
-	}
+	// 候选失败时旧路由从未改变，不再次操作旧实例。
 
 	return err
 }
 
 // updateGraceful 优雅更新
 //
-// 在优雅期内等待，然后执行更新。支持 context 取消。
+// 先发布可用候选，再在优雅期内等待旧资源真实排空；超时不会强停旧 Run。
 func (m *HotReloadManager) updateGraceful(ctx context.Context, name, configPath string, opts UpdateOptions) error {
-	// 等待优雅期，同时支持 context 取消
-	select {
-	case <-time.After(opts.GracePeriod):
-		// 优雅期结束，执行更新
-	case <-ctx.Done():
-		return ctx.Err()
+	if err := m.updateImmediate(ctx, name, configPath, opts); err != nil {
+		return err
 	}
-
-	return m.updateImmediate(ctx, name, configPath, opts)
+	if opts.GracePeriod > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.GracePeriod)
+		defer cancel()
+	}
+	return m.WaitForDrain(ctx, name)
 }
 
 // updateScheduled 计划更新

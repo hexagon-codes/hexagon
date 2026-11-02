@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/reflectx"
 )
 
 // Lifecycle 插件生命周期管理器
@@ -18,6 +20,7 @@ type Lifecycle struct {
 	healthCheckTick time.Duration
 	stopChan        chan struct{}
 	stopOnce        sync.Once // 确保 stopChan 只关闭一次
+	operations      sync.Map
 }
 
 // LifecycleOption Lifecycle 选项
@@ -46,23 +49,40 @@ func NewLifecycle(registry *Registry, opts ...LifecycleOption) *Lifecycle {
 
 // Init 初始化插件
 func (l *Lifecycle) Init(ctx context.Context, name string, config map[string]any) error {
-	instance, err := l.registry.GetInstance(name)
+	unlock := l.lockOperation(name)
+	defer unlock()
+	instance, err := l.registry.getInstance(name)
 	if err != nil {
 		return err
 	}
 
-	if instance.State != PluginStateLoaded {
-		return fmt.Errorf("plugin %s is not in loaded state (current: %s)", name, instance.State)
+	state := l.registry.instanceState(instance)
+	if state != PluginStateLoaded {
+		return fmt.Errorf("plugin %s is not in loaded state (current: %s)", name, state)
 	}
 
-	if err := instance.Plugin.Init(ctx, config); err != nil {
+	frozen, err := reflectx.DeepCopyChecked(config)
+	if err != nil {
+		return fmt.Errorf("plugin config cannot be snapshotted: %w", err)
+	}
+	initConfig, err := reflectx.DeepCopyChecked(frozen)
+	if err != nil {
+		return err
+	}
+	if err := invokePluginCallback(name, "init", func() error { return instance.Plugin.Init(ctx, initConfig) }); err != nil {
+		l.registry.mu.Lock()
 		instance.State = PluginStateError
 		instance.Error = err
+		l.registry.mu.Unlock()
 		return fmt.Errorf("failed to init plugin %s: %w", name, err)
 	}
 
+	configHash := computeConfigHash(frozen)
+	l.registry.mu.Lock()
 	instance.State = PluginStateInitialized
-	instance.Config = config
+	instance.Config = frozen
+	instance.generation.reference.ConfigHash = configHash
+	l.registry.mu.Unlock()
 
 	l.registry.emitEvent(PluginEvent{
 		Type:   PluginEventInitialized,
@@ -74,13 +94,16 @@ func (l *Lifecycle) Init(ctx context.Context, name string, config map[string]any
 
 // Start 启动插件
 func (l *Lifecycle) Start(ctx context.Context, name string) error {
-	instance, err := l.registry.GetInstance(name)
+	unlock := l.lockOperation(name)
+	defer unlock()
+	instance, err := l.registry.getInstance(name)
 	if err != nil {
 		return err
 	}
 
-	if instance.State != PluginStateInitialized && instance.State != PluginStateStopped {
-		return fmt.Errorf("plugin %s is not ready to start (current: %s)", name, instance.State)
+	state := l.registry.instanceState(instance)
+	if state != PluginStateInitialized && state != PluginStateStopped {
+		return fmt.Errorf("plugin %s is not ready to start (current: %s)", name, state)
 	}
 
 	// 检查依赖
@@ -95,16 +118,25 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 		}
 	}
 
-	if err := instance.Plugin.Start(ctx); err != nil {
+	if err := invokePluginCallback(name, "start", func() error { return instance.Plugin.Start(ctx) }); err != nil {
+		l.registry.mu.Lock()
 		instance.State = PluginStateError
 		instance.Error = err
+		l.registry.mu.Unlock()
 		return fmt.Errorf("failed to start plugin %s: %w", name, err)
 	}
 
 	now := time.Now()
+	l.registry.mu.Lock()
+	if instance.State == PluginStateStopped {
+		previous := instance.generation
+		instance.generation = newGeneration(instance.Plugin, previous.reference)
+		instance.generation.dependencies = append([]string(nil), previous.dependencies...)
+	}
 	instance.State = PluginStateRunning
 	instance.StartedAt = &now
 	instance.Error = nil
+	l.registry.mu.Unlock()
 
 	l.mu.Lock()
 	l.startOrder = append(l.startOrder, name)
@@ -120,13 +152,16 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 
 // Stop 停止插件
 func (l *Lifecycle) Stop(ctx context.Context, name string) error {
-	instance, err := l.registry.GetInstance(name)
+	unlock := l.lockOperation(name)
+	defer unlock()
+	instance, err := l.registry.getInstance(name)
 	if err != nil {
 		return err
 	}
 
-	if instance.State != PluginStateRunning {
-		return fmt.Errorf("plugin %s is not running (current: %s)", name, instance.State)
+	state := l.registry.instanceState(instance)
+	if state != PluginStateRunning {
+		return fmt.Errorf("plugin %s is not running (current: %s)", name, state)
 	}
 
 	// 检查是否有其他插件依赖此插件
@@ -141,14 +176,26 @@ func (l *Lifecycle) Stop(ctx context.Context, name string) error {
 		}
 	}
 
-	if err := instance.Plugin.Stop(ctx); err != nil {
+	l.registry.mu.Lock()
+	retireGeneration(instance.generation)
+	l.registry.mu.Unlock()
+	retirement := startRetirement([]*generation{instance.generation})
+	if err := retirement.Wait(ctx); err != nil {
+		// 等待取消不等于底层停止失败；退休资源仍会在引用排空后清理。
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		l.registry.mu.Lock()
 		instance.State = PluginStateError
 		instance.Error = err
+		l.registry.mu.Unlock()
 		return fmt.Errorf("failed to stop plugin %s: %w", name, err)
 	}
 
+	l.registry.mu.Lock()
 	instance.State = PluginStateStopped
 	instance.StartedAt = nil
+	l.registry.mu.Unlock()
 
 	l.mu.Lock()
 	// 从启动顺序中移除
@@ -166,6 +213,36 @@ func (l *Lifecycle) Stop(ctx context.Context, name string) error {
 	})
 
 	return nil
+}
+
+type lifecycleOperation struct {
+	mu   sync.Mutex
+	done chan struct{}
+}
+
+// 同名生命周期操作仍串行，但用户回调期间不持有操作锁或注册表锁。
+func (l *Lifecycle) lockOperation(name string) func() {
+	value, _ := l.operations.LoadOrStore(name, &lifecycleOperation{})
+	operation := value.(*lifecycleOperation)
+	for {
+		operation.mu.Lock()
+		if operation.done == nil {
+			done := make(chan struct{})
+			operation.done = done
+			operation.mu.Unlock()
+			return func() {
+				operation.mu.Lock()
+				if operation.done == done {
+					operation.done = nil
+					close(done)
+				}
+				operation.mu.Unlock()
+			}
+		}
+		done := operation.done
+		operation.mu.Unlock()
+		<-done
+	}
 }
 
 // Restart 重启插件
@@ -338,7 +415,7 @@ func (l *Lifecycle) HealthCheck(ctx context.Context) map[string]HealthStatus {
 	results := make(map[string]HealthStatus)
 
 	for _, info := range l.registry.List() {
-		instance, err := l.registry.GetInstance(info.Name)
+		lease, err := l.registry.Acquire(info.Name)
 		if err != nil {
 			results[info.Name] = HealthStatus{
 				Status:    HealthStateUnknown,
@@ -347,17 +424,11 @@ func (l *Lifecycle) HealthCheck(ctx context.Context) map[string]HealthStatus {
 			}
 			continue
 		}
-
-		if instance.State != PluginStateRunning {
-			results[info.Name] = HealthStatus{
-				Status:    HealthStateUnknown,
-				Message:   fmt.Sprintf("plugin not running (state: %s)", instance.State),
-				LastCheck: time.Now(),
-			}
-			continue
-		}
-
-		status := instance.Plugin.Health()
+		status := func() HealthStatus {
+			defer lease.Release()
+			plugin, _ := lease.Plugin(info.Name)
+			return plugin.Health()
+		}()
 		results[info.Name] = status
 
 		l.registry.emitEvent(PluginEvent{

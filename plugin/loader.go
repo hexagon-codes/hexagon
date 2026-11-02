@@ -90,6 +90,60 @@ func (l *Loader) LoadFromConfig(ctx context.Context, configPath string) error {
 	return nil
 }
 
+// ReplaceFromConfig 只构造目标插件的独立候选，成功后原子替换其路由。
+// 同文件内其他插件不被停止、初始化或重新注册。
+func (l *Loader) ReplaceFromConfig(ctx context.Context, name, configPath string) (*Retirement, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+	var config PluginsConfig
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse config: %w", err)
+	}
+	for _, item := range config.Plugins {
+		if item.Name != name {
+			continue
+		}
+		if !item.Enabled {
+			return nil, fmt.Errorf("plugin %s is disabled in candidate config", name)
+		}
+		candidate, err := l.registry.CreateFromFactory(name)
+		if err != nil {
+			return nil, err
+		}
+		manager := &PluginManager{Registry: l.registry, Lifecycle: l.lifecycle}
+		return manager.ReplaceCandidate(ctx, name, candidate, item.Config)
+	}
+	return nil, fmt.Errorf("plugin %s not found in candidate config", name)
+}
+
+// ReplaceAllFromConfig 将配置中的已启用插件作为候选集整体替换。
+// 未出现在候选集中的路由不变；新增插件仍通过正常 Register/Init 入口装配。
+func (l *Loader) ReplaceAllFromConfig(ctx context.Context, configPath string) (*Retirement, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+	var config PluginsConfig
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse config: %w", err)
+	}
+	candidates := make([]Candidate, 0, len(config.Plugins))
+	for _, item := range SortPluginsByPriority(config.Plugins) {
+		if !item.Enabled {
+			continue
+		}
+		candidate, err := l.registry.CreateFromFactory(item.Name)
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, Candidate{Plugin: candidate, Config: item.Config})
+	}
+	manager := &PluginManager{Registry: l.registry, Lifecycle: l.lifecycle}
+	return manager.ReplaceCandidates(ctx, candidates)
+}
+
 // LoadFromDirectory 从目录加载插件配置
 func (l *Loader) LoadFromDirectory(ctx context.Context, dir string) error {
 	entries, err := os.ReadDir(dir)

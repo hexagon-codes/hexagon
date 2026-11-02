@@ -156,6 +156,8 @@ const (
 
 // PluginInstance 插件实例
 type PluginInstance struct {
+	generation *generation
+
 	// Plugin 插件实例
 	Plugin Plugin
 
