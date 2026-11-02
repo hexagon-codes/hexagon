@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	wire "github.com/a2aproject/a2a-go/v2/a2a"
 	"maps"
 	"net/http"
 	"sync"
@@ -45,6 +46,7 @@ type Server struct {
 
 	// subscribers 任务订阅者 (taskID -> []chan)
 	subscribers map[string][]chan StreamEvent
+	executions  map[string]context.CancelFunc
 
 	// httpServer HTTP 服务器
 	httpServer *http.Server
@@ -75,6 +77,7 @@ func NewServer(card *AgentCard, handler TaskHandler, opts ...ServerOption) *Serv
 		store:       memStore,
 		pushStore:   memStore,
 		subscribers: make(map[string][]chan StreamEvent),
+		executions:  make(map[string]context.CancelFunc),
 		corsEnabled: true,
 		corsOrigins: []string{"*"},
 	}
@@ -189,14 +192,14 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(PathAgentCard, s.handleAgentCard)
 
 	// 任务 API (JSON-RPC)
-	mux.HandleFunc(PathTasks, s.handleTasks)
-	mux.HandleFunc(PathTaskSend, s.handleTasks)
-	mux.HandleFunc(PathTaskSendStream, s.handleTasksStream)
-	mux.HandleFunc(PathTaskGet, s.handleTasks)
-	mux.HandleFunc(PathTaskCancel, s.handleTasks)
-	mux.HandleFunc(PathTaskResubscribe, s.handleTasksStream)
-	mux.HandleFunc(PathPushNotificationGet, s.handleTasks)
-	mux.HandleFunc(PathPushNotificationSet, s.handleTasks)
+	mux.HandleFunc(PathTasks, s.handleProtocolRPC)
+	mux.HandleFunc(PathTaskSend, s.handleProtocolRPC)
+	mux.HandleFunc(PathTaskSendStream, s.handleProtocolRPC)
+	mux.HandleFunc(PathTaskGet, s.handleProtocolRPC)
+	mux.HandleFunc(PathTaskCancel, s.handleProtocolRPC)
+	mux.HandleFunc(PathTaskResubscribe, s.handleProtocolRPC)
+	mux.HandleFunc(PathPushNotificationGet, s.handleProtocolRPC)
+	mux.HandleFunc(PathPushNotificationSet, s.handleProtocolRPC)
 }
 
 // corsMiddleware CORS 中间件
@@ -220,7 +223,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			if allowed {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, A2A-Version, A2A-Extensions")
 				w.Header().Set("Access-Control-Max-Age", "86400")
 			}
 
@@ -245,91 +248,8 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", ContentTypeJSON)
-	if err := json.NewEncoder(w).Encode(s.card); err != nil {
+	if err := json.NewEncoder(w).Encode(s.protocolCard()); err != nil {
 		s.writeError(w, NewInternalError(err.Error()), nil)
-	}
-}
-
-// handleTasks 处理任务 API 请求
-func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// 解析 JSON-RPC 请求
-	var req JSONRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, NewParseError(err.Error()), nil)
-		return
-	}
-
-	// 验证 JSON-RPC 版本
-	if req.JSONRPC != "2.0" {
-		s.writeError(w, NewInvalidRequestError("invalid JSON-RPC version"), req.ID)
-		return
-	}
-
-	// 路由到具体方法
-	ctx := r.Context()
-	var result any
-	var rpcErr *Error
-
-	switch req.Method {
-	case MethodSendMessage:
-		result, rpcErr = s.handleSendMessage(ctx, req.Params)
-	case MethodGetTask:
-		result, rpcErr = s.handleGetTask(ctx, req.Params)
-	case MethodListTasks:
-		result, rpcErr = s.handleListTasks(ctx, req.Params)
-	case MethodCancelTask:
-		result, rpcErr = s.handleCancelTask(ctx, req.Params)
-	case MethodSetPushNotification:
-		result, rpcErr = s.handleSetPushNotification(ctx, req.Params)
-	case MethodGetPushNotification:
-		result, rpcErr = s.handleGetPushNotification(ctx, req.Params)
-	default:
-		rpcErr = NewMethodNotFoundError(req.Method)
-	}
-
-	// 返回响应
-	if rpcErr != nil {
-		s.writeError(w, rpcErr, req.ID)
-		return
-	}
-
-	s.writeResult(w, result, req.ID)
-}
-
-// handleTasksStream 处理流式任务 API 请求
-func (s *Server) handleTasksStream(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// 检查是否支持流式
-	if !s.card.Capabilities.Streaming {
-		s.writeError(w, NewUnsupportedOperationError("streaming"), nil)
-		return
-	}
-
-	// 解析 JSON-RPC 请求
-	var req JSONRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, NewParseError(err.Error()), nil)
-		return
-	}
-
-	ctx := r.Context()
-
-	switch req.Method {
-	case MethodSendMessageStream:
-		s.handleSendMessageStream(ctx, w, req.Params)
-	case MethodResubscribe:
-		s.handleResubscribe(ctx, w, req.Params)
-	default:
-		s.writeError(w, NewMethodNotFoundError(req.Method), req.ID)
 	}
 }
 
@@ -342,12 +262,22 @@ func (s *Server) handleSendMessage(ctx context.Context, params json.RawMessage) 
 		return nil, NewInvalidParamsError(err.Error())
 	}
 
+	if req.ReturnImmediately {
+		return nil, NewUnsupportedOperationError("returnImmediately")
+	}
 	// 获取或创建任务
 	task, err := s.getOrCreateTask(ctx, &req)
 	if err != nil {
 		return nil, ToA2AError(err)
 	}
 
+	runCtx, release, beginErr := s.beginExecution(ctx, task.ID)
+	if beginErr != nil {
+		return nil, beginErr
+	}
+	defer release()
+	ctx = runCtx
+	req.Message.TaskID, req.Message.ContextID = task.ID, task.SessionID
 	// 添加消息到历史
 	task.History = append(task.History, req.Message)
 	task.Status = TaskStatus{
@@ -356,33 +286,32 @@ func (s *Server) handleSendMessage(ctx context.Context, params json.RawMessage) 
 	}
 	task.UpdatedAt = time.Now()
 
-	if err := s.store.Update(ctx, task); err != nil {
+	if err := s.commitTask(ctx, task); err != nil {
 		return nil, ToA2AError(err)
+	}
+	if task.Status.State == TaskStateCanceled {
+		return task, nil
 	}
 
 	// 处理任务
 	update, err := s.handler.HandleTask(ctx, task, &req.Message)
-	if err != nil {
-		// 处理失败
-		task.Status = TaskStatus{
-			State:     TaskStateFailed,
-			Timestamp: time.Now(),
-		}
-		task.UpdatedAt = time.Now()
-		s.store.Update(ctx, task)
-		return nil, ToA2AError(err)
-	}
-
-	// 应用更新
+	// 执行错误是任务结果；有效消息和附件必须随失败任务返回。
 	s.applyUpdate(task, update)
-	if err := s.store.Update(ctx, task); err != nil {
+	if err != nil {
+		task.Status.State = TaskStateFailed
+		task.Status.Timestamp = time.Now()
+		if task.Status.Message == nil {
+			message := NewAgentMessage(err.Error())
+			normalizeMessage(&message, task)
+			task.Status.Message = &message
+		}
+	}
+	if err := s.commitTask(ctx, task); err != nil {
 		return nil, ToA2AError(err)
 	}
 
-	// 发送推送通知
-	s.sendPushNotification(ctx, task)
-
-	return task, nil
+	s.notifySubscribers(task.ID, &TaskStatusEvent{ID: task.ID, ContextID: task.SessionID, Status: task.Status, Final: task.Status.State.IsTerminal() || task.Status.State == TaskStateInputRequired || task.Status.State == TaskStateAuthRequired})
+	return projectHistory(task, req.HistoryLimit), nil
 }
 
 // handleSendMessageStream 处理流式发送消息
@@ -392,129 +321,96 @@ func (s *Server) handleSendMessageStream(ctx context.Context, w http.ResponseWri
 		s.writeSSEError(w, NewInvalidParamsError(err.Error()))
 		return
 	}
-
-	// 设置 SSE 头
-	w.Header().Set("Content-Type", ContentTypeSSE)
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		s.writeSSEError(w, NewInternalError("streaming not supported"))
+	if req.ReturnImmediately {
+		s.writeSSEError(w, NewUnsupportedOperationError("returnImmediately"))
 		return
 	}
-
-	// 获取或创建任务
 	task, err := s.getOrCreateTask(ctx, &req)
 	if err != nil {
 		s.writeSSEError(w, ToA2AError(err))
 		return
 	}
-
-	// 添加消息到历史
+	runCtx, release, beginErr := s.beginExecution(ctx, task.ID)
+	if beginErr != nil {
+		s.writeSSEError(w, beginErr)
+		return
+	}
+	defer release()
+	ctx = runCtx
+	normalizeMessage(&req.Message, task)
 	task.History = append(task.History, req.Message)
-	task.Status = TaskStatus{
-		State:     TaskStateWorking,
-		Timestamp: time.Now(),
-	}
-	task.UpdatedAt = time.Now()
-
-	if err := s.store.Update(ctx, task); err != nil {
+	task.Status = TaskStatus{State: TaskStateWorking, Timestamp: time.Now()}
+	if err := s.commitTask(ctx, task); err != nil {
 		s.writeSSEError(w, ToA2AError(err))
 		return
 	}
-
-	// 发送初始状态
-	s.writeSSEEvent(w, EventTypeTaskStatus, &TaskStatusEvent{
-		ID:     task.ID,
-		Status: task.Status,
-	})
+	w.Header().Set("Content-Type", ContentTypeSSE)
+	w.Header().Set("Cache-Control", "no-cache")
+	flusher := w.(http.Flusher)
+	s.writeSSEEvent(w, "task", &TaskEvent{Task: projectHistory(task, req.HistoryLimit)})
 	flusher.Flush()
-
-	// 检查是否支持流式处理
-	streamHandler, isStreaming := s.handler.(StreamingTaskHandler)
-	if !isStreaming {
-		// 非流式处理
-		update, err := s.handler.HandleTask(ctx, task, &req.Message)
-		if err != nil {
-			task.Status = TaskStatus{
-				State:     TaskStateFailed,
-				Timestamp: time.Now(),
-			}
-			task.UpdatedAt = time.Now()
-			s.store.Update(ctx, task)
-			s.writeSSEError(w, ToA2AError(err))
-			return
+	emit := func(update *TaskUpdate, runErr error) bool {
+		if update == nil && runErr == nil {
+			return false
 		}
-
-		// 应用更新
 		s.applyUpdate(task, update)
-		s.store.Update(ctx, task)
-
-		// 发送最终状态
-		s.writeSSEEvent(w, EventTypeTaskStatus, &TaskStatusEvent{
-			ID:     task.ID,
-			Status: task.Status,
-			Final:  true,
-		})
-
-		// 发送完成事件
-		s.writeSSEEvent(w, EventTypeDone, &DoneEvent{Task: task})
+		if runErr != nil {
+			message := NewAgentMessage(runErr.Error())
+			normalizeMessage(&message, task)
+			if task.Status.Message == nil {
+				task.Status.Message = &message
+			}
+			task.Status.State = TaskStateFailed
+			task.Status.Timestamp = time.Now()
+		} else if update.Final && !task.Status.State.IsTerminal() && task.Status.State != TaskStateInputRequired && task.Status.State != TaskStateAuthRequired {
+			task.Status.State = TaskStateCompleted
+			task.Status.Timestamp = time.Now()
+		}
+		if update != nil && update.Message != nil && update.Status == nil {
+			task.Status.Message = update.Message
+		}
+		if err := s.commitTask(ctx, task); err != nil {
+			s.writeSSEError(w, ToA2AError(err))
+			flusher.Flush()
+			return true
+		}
+		if task.Status.State != TaskStateCanceled && update != nil && update.Artifact != nil {
+			event := &ArtifactEvent{ID: task.ID, ContextID: task.SessionID, Artifact: *update.Artifact}
+			s.writeSSEEvent(w, EventTypeArtifact, event)
+			s.notifySubscribers(task.ID, event)
+		}
+		final := task.Status.State.IsTerminal() || task.Status.State == TaskStateInputRequired || task.Status.State == TaskStateAuthRequired
+		status := &TaskStatusEvent{ID: task.ID, ContextID: task.SessionID, Status: task.Status, Final: final}
+		s.writeSSEEvent(w, EventTypeTaskStatus, status)
+		s.notifySubscribers(task.ID, status)
 		flusher.Flush()
+		return final
+	}
+	stream, ok := s.handler.(StreamingTaskHandler)
+	if !ok {
+		update, err := s.handler.HandleTask(ctx, task, &req.Message)
+		emit(update, err)
 		return
 	}
-
-	// 流式处理
-	updates, err := streamHandler.HandleTaskStream(ctx, task, &req.Message)
+	updates, err := stream.HandleTaskStream(ctx, task, &req.Message)
 	if err != nil {
-		s.writeSSEError(w, ToA2AError(err))
+		emit(nil, err)
 		return
 	}
-
-	// 订阅任务更新
-	subChan := make(chan StreamEvent, 100)
-	s.subscribe(task.ID, subChan)
-	defer s.unsubscribe(task.ID, subChan)
-
-	// 处理更新流
 	for {
 		select {
 		case <-ctx.Done():
-			return
-
-		case update, ok := <-updates:
-			if !ok {
-				// 更新流结束
-				s.writeSSEEvent(w, EventTypeDone, &DoneEvent{Task: task})
+			if current, err := s.store.Get(context.WithoutCancel(ctx), task.ID); err == nil && current.Status.State == TaskStateCanceled {
+				s.writeSSEEvent(w, EventTypeTaskStatus, &TaskStatusEvent{ID: task.ID, ContextID: task.SessionID, Status: current.Status, Final: true})
 				flusher.Flush()
+			}
+			return
+		case update, open := <-updates:
+			if !open {
+				emit(nil, fmt.Errorf("task stream ended before final state"))
 				return
 			}
-
-			// 应用更新
-			s.applyUpdate(task, update)
-			s.store.Update(ctx, task)
-
-			// 发送事件
-			if update.Status != nil {
-				s.writeSSEEvent(w, EventTypeTaskStatus, &TaskStatusEvent{
-					ID:     task.ID,
-					Status: task.Status,
-					Final:  update.Final,
-				})
-			}
-			if update.Artifact != nil {
-				s.writeSSEEvent(w, EventTypeArtifact, &ArtifactEvent{
-					ID:       task.ID,
-					Artifact: *update.Artifact,
-				})
-			}
-			flusher.Flush()
-
-			// 如果是最终更新，结束
-			if update.Final {
-				s.writeSSEEvent(w, EventTypeDone, &DoneEvent{Task: task})
-				flusher.Flush()
+			if emit(update, nil) {
 				return
 			}
 		}
@@ -534,9 +430,11 @@ func (s *Server) handleGetTask(ctx context.Context, params json.RawMessage) (*Ta
 	}
 
 	// 截断历史
-	if req.HistoryLength > 0 && len(task.History) > req.HistoryLength {
-		task.History = task.History[len(task.History)-req.HistoryLength:]
+	limit := historyLimit(req.HistoryLimit, req.HistoryLength)
+	if limit != nil && *limit < 0 {
+		return nil, NewInvalidParamsError("historyLength must be non-negative")
 	}
+	task = projectHistory(task, limit)
 
 	return task, nil
 }
@@ -549,13 +447,7 @@ func (s *Server) handleListTasks(ctx context.Context, params json.RawMessage) (*
 			return nil, NewInvalidParamsError(err.Error())
 		}
 	}
-
-	resp, err := s.store.List(ctx, &req)
-	if err != nil {
-		return nil, ToA2AError(err)
-	}
-
-	return resp, nil
+	return s.protocolList(ctx, &req)
 }
 
 // handleCancelTask 处理取消任务
@@ -564,35 +456,27 @@ func (s *Server) handleCancelTask(ctx context.Context, params json.RawMessage) (
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, NewInvalidParamsError(err.Error())
 	}
-
+	s.mu.Lock()
 	task, err := s.store.Get(ctx, req.ID)
 	if err != nil {
+		s.mu.Unlock()
 		return nil, ToA2AError(err)
 	}
-
-	// 检查任务是否可取消
 	if task.Status.State.IsTerminal() {
+		s.mu.Unlock()
 		return nil, NewTaskNotCancelableError(req.ID)
 	}
-
-	// 更新状态
-	task.Status = TaskStatus{
-		State:     TaskStateCanceled,
-		Timestamp: time.Now(),
-	}
+	task.Status = TaskStatus{State: TaskStateCanceled, Timestamp: time.Now()}
 	task.UpdatedAt = time.Now()
-
 	if err := s.store.Update(ctx, task); err != nil {
+		s.mu.Unlock()
 		return nil, ToA2AError(err)
 	}
-
-	// 通知订阅者
-	s.notifySubscribers(task.ID, &TaskStatusEvent{
-		ID:     task.ID,
-		Status: task.Status,
-		Final:  true,
-	})
-
+	if cancel := s.executions[task.ID]; cancel != nil {
+		cancel()
+	}
+	s.mu.Unlock()
+	s.notifySubscribers(task.ID, &TaskStatusEvent{ID: task.ID, ContextID: task.SessionID, Status: task.Status, Final: true})
 	return task, nil
 }
 
@@ -640,74 +524,38 @@ func (s *Server) handleResubscribe(ctx context.Context, w http.ResponseWriter, p
 		s.writeSSEError(w, NewInvalidParamsError(err.Error()))
 		return
 	}
-
-	// 获取任务
+	events := make(chan StreamEvent, 100)
+	s.subscribe(req.TaskID, events)
+	defer s.unsubscribe(req.TaskID, events)
 	task, err := s.store.Get(ctx, req.TaskID)
 	if err != nil {
 		s.writeSSEError(w, ToA2AError(err))
 		return
 	}
-
-	// 设置 SSE 头
+	if task.Status.State.IsTerminal() {
+		s.writeSSEError(w, NewUnsupportedOperationError("cannot subscribe to terminal task"))
+		return
+	}
 	w.Header().Set("Content-Type", ContentTypeSSE)
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		s.writeSSEError(w, NewInternalError("streaming not supported"))
-		return
-	}
-
-	// 如果任务已完成，直接返回最终状态
-	if task.Status.State.IsTerminal() {
-		s.writeSSEEvent(w, EventTypeTaskStatus, &TaskStatusEvent{
-			ID:     task.ID,
-			Status: task.Status,
-			Final:  true,
-		})
-		s.writeSSEEvent(w, EventTypeDone, &DoneEvent{Task: task})
-		flusher.Flush()
-		return
-	}
-
-	// 发送当前状态
-	s.writeSSEEvent(w, EventTypeTaskStatus, &TaskStatusEvent{
-		ID:     task.ID,
-		Status: task.Status,
-	})
+	flusher := w.(http.Flusher)
+	s.writeSSEEvent(w, "task", &TaskEvent{Task: task})
 	flusher.Flush()
-
-	// 订阅更新
-	subChan := make(chan StreamEvent, 100)
-	s.subscribe(task.ID, subChan)
-	defer s.unsubscribe(task.ID, subChan)
-
-	// 等待更新
 	for {
 		select {
 		case <-ctx.Done():
 			return
-
-		case event, ok := <-subChan:
+		case event, ok := <-events:
 			if !ok {
 				return
 			}
-
-			// 发送事件
-			switch e := event.(type) {
-			case *TaskStatusEvent:
-				s.writeSSEEvent(w, EventTypeTaskStatus, e)
-				flusher.Flush()
-				if e.Final {
-					s.writeSSEEvent(w, EventTypeDone, &DoneEvent{})
-					flusher.Flush()
-					return
-				}
-			case *ArtifactEvent:
-				s.writeSSEEvent(w, EventTypeArtifact, e)
-				flusher.Flush()
+			s.writeProtocolEvent(w, event)
+			flusher.Flush()
+			if _, failed := event.(*ErrorEvent); failed {
+				return
+			}
+			if status, ok := event.(*TaskStatusEvent); ok && status.Final {
+				return
 			}
 		}
 	}
@@ -717,18 +565,29 @@ func (s *Server) handleResubscribe(ctx context.Context, w http.ResponseWriter, p
 
 // getOrCreateTask 获取或创建任务
 func (s *Server) getOrCreateTask(ctx context.Context, req *SendMessageRequest) (*Task, error) {
+	if req.ReturnImmediately {
+		return nil, NewUnsupportedOperationError("returnImmediately")
+	}
+	if req.PushNotification != nil {
+		return nil, NewPushNotSupportedError()
+	}
 	if req.TaskID != "" {
 		// 获取已有任务
 		task, err := s.store.Get(ctx, req.TaskID)
 		if err != nil {
 			return nil, err
 		}
+		if task.Status.State.IsTerminal() {
+			return nil, NewUnsupportedOperationError("terminal tasks are immutable")
+		}
 		return task, nil
 	}
 
 	// 创建新任务
 	task := NewTask(s.store.GenerateID())
-	task.SessionID = req.SessionID
+	if req.SessionID != "" {
+		task.SessionID = req.SessionID
+	}
 	if req.Metadata != nil {
 		task.Metadata = req.Metadata
 	}
@@ -751,6 +610,12 @@ func (s *Server) applyUpdate(task *Task, update *TaskUpdate) {
 		return
 	}
 
+	if update.Message != nil {
+		normalizeMessage(update.Message, task)
+	}
+	if update.Status != nil && update.Status.Message != nil {
+		normalizeMessage(update.Status.Message, task)
+	}
 	// 更新状态
 	if update.Status != nil {
 		task.Status = *update.Status
@@ -763,11 +628,26 @@ func (s *Server) applyUpdate(task *Task, update *TaskUpdate) {
 
 	// 添加产物
 	if update.Artifact != nil {
-		if update.Artifact.Append && len(task.Artifacts) > 0 {
-			// 追加到最后一个产物
-			lastArtifact := &task.Artifacts[len(task.Artifacts)-1]
-			lastArtifact.Parts = append(lastArtifact.Parts, update.Artifact.Parts...)
-			lastArtifact.LastChunk = update.Artifact.LastChunk
+		if update.Artifact.ID == "" {
+			if update.Artifact.Append && len(task.Artifacts) > 0 {
+				update.Artifact.ID = task.Artifacts[len(task.Artifacts)-1].ID
+			}
+			if update.Artifact.ID == "" {
+				update.Artifact.ID = string(wire.NewArtifactID())
+			}
+		}
+		index := -1
+		for i := range task.Artifacts {
+			if task.Artifacts[i].ID == update.Artifact.ID {
+				index = i
+				break
+			}
+		}
+		if index >= 0 && update.Artifact.Append {
+			task.Artifacts[index].Parts = append(task.Artifacts[index].Parts, update.Artifact.Parts...)
+			task.Artifacts[index].LastChunk = update.Artifact.LastChunk
+		} else if index >= 0 {
+			task.Artifacts[index] = *update.Artifact
 		} else {
 			update.Artifact.Index = len(task.Artifacts)
 			task.Artifacts = append(task.Artifacts, *update.Artifact)
@@ -810,30 +690,32 @@ func (s *Server) unsubscribe(taskID string, ch chan StreamEvent) {
 	}
 }
 
-// notifySubscribers 通知订阅者
-//
-// 安全说明：使用 recover 防护 send-on-closed-channel panic。
-// 当 Server.Stop() 并发关闭 channel 时，此处的发送可能触发 panic，
-// 通过 recover 将其转为静默跳过。
+// notifySubscribers 保持事件顺序；慢订阅者收到显式错误并结束，不静默丢弃终态。
 func (s *Server) notifySubscribers(taskID string, event StreamEvent) {
-	s.mu.RLock()
-	// 复制一份切片引用，避免长时间持锁
-	subs := make([]chan StreamEvent, len(s.subscribers[taskID]))
-	copy(subs, s.subscribers[taskID])
-	s.mu.RUnlock()
-
-	for _, ch := range subs {
-		func() {
-			defer func() {
-				// 防止向已关闭 channel 发送时 panic
-				recover()
-			}()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	subscribers := s.subscribers[taskID]
+	remaining := subscribers[:0]
+	for _, ch := range subscribers {
+		select {
+		case ch <- event:
+			remaining = append(remaining, ch)
+		default:
+			// 通道由服务创建并持有，已满时腾出一个位置交付明确的流失败。
 			select {
-			case ch <- event:
+			case <-ch:
 			default:
-				// 通道已满，跳过
 			}
-		}()
+			select {
+			case ch <- &ErrorEvent{Error: NewInternalError("task subscription buffer exhausted")}:
+			default:
+			}
+		}
+	}
+	if len(remaining) == 0 {
+		delete(s.subscribers, taskID)
+	} else {
+		s.subscribers[taskID] = remaining
 	}
 }
 
@@ -877,8 +759,7 @@ func (s *Server) writeError(w http.ResponseWriter, err *Error, id any) {
 
 // writeSSEEvent 写入 SSE 事件
 func (s *Server) writeSSEEvent(w http.ResponseWriter, eventType string, data any) {
-	dataBytes, _ := json.Marshal(data)
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, string(dataBytes))
+	s.writeProtocolEvent(w, data)
 }
 
 // writeSSEError 写入 SSE 错误

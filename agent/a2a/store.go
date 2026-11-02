@@ -131,7 +131,7 @@ func (s *MemoryTaskStore) Create(_ context.Context, task *Task) error {
 	task.UpdatedAt = now
 
 	// 保存任务
-	s.tasks[task.ID] = task
+	s.tasks[task.ID] = cloneTask(task)
 
 	// 更新会话索引
 	if task.SessionID != "" {

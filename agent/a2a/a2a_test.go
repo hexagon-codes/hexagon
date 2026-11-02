@@ -119,13 +119,13 @@ func TestPartMarshalJSON(t *testing.T) {
 				t.Fatalf("json.Marshal() error = %v", err)
 			}
 
-			// 解析结果验证类型字段
+			// A2A 1.0 使用内容联合字段，不再发送旧版 type 判别字段。
 			var parsed map[string]any
 			if err := json.Unmarshal(got, &parsed); err != nil {
 				t.Fatalf("json.Unmarshal() error = %v", err)
 			}
-			if parsed["type"] != tt.wantType {
-				t.Errorf("json.Marshal().type = %v, want %v", parsed["type"], tt.wantType)
+			if _, ok := parsed[tt.wantType]; !ok || parsed["type"] != nil {
+				t.Errorf("json.Marshal() content union = %v, want %s only", parsed, tt.wantType)
 			}
 		})
 	}
@@ -139,17 +139,17 @@ func TestUnmarshalPart(t *testing.T) {
 	}{
 		{
 			name:    "TextPart",
-			data:    `{"type":"text","text":"Hello"}`,
+			data:    `{"text":"Hello"}`,
 			wantTyp: PartTypeText,
 		},
 		{
 			name:    "DataPart",
-			data:    `{"type":"data","data":{"key":"value"}}`,
+			data:    `{"data":{"key":"value"}}`,
 			wantTyp: PartTypeData,
 		},
 		{
 			name:    "FilePart",
-			data:    `{"type":"file","file":{"name":"test.txt"}}`,
+			data:    `{"raw":"aGVsbG8=","filename":"test.txt","mediaType":"text/plain"}`,
 			wantTyp: PartTypeFile,
 		},
 	}
@@ -354,6 +354,7 @@ func TestServerClient(t *testing.T) {
 	// 创建测试服务器
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
+	card.URL = ts.URL
 
 	// 创建客户端
 	client := NewClient(ts.URL)

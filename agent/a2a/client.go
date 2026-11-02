@@ -33,6 +33,7 @@ import (
 type Client struct {
 	// baseURL 基础 URL
 	baseURL string
+	rpcURL  string
 
 	// httpClient HTTP 客户端
 	httpClient *http.Client
@@ -65,6 +66,7 @@ func NewClient(baseURL string, opts ...ClientOption) *Client {
 
 	c := &Client{
 		baseURL: baseURL,
+		rpcURL:  baseURL + PathTasks,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -154,22 +156,44 @@ func (c *Client) GetAgentCard(ctx context.Context) (*AgentCard, error) {
 		return nil, fmt.Errorf("decode response failed: %w", err)
 	}
 
+	for _, iface := range card.SupportedInterfaces {
+		if iface.ProtocolBinding == "JSONRPC" && iface.ProtocolVersion == ProtocolVersion {
+			c.mu.Lock()
+			c.rpcURL = iface.URL
+			c.mu.Unlock()
+			break
+		}
+	}
 	return &card, nil
 }
 
 // SendMessage 发送消息（创建或继续任务）
 func (c *Client) SendMessage(ctx context.Context, req *SendMessageRequest) (*Task, error) {
+	result, err := c.Send(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if result.Task == nil {
+		return nil, NewUnsupportedOperationError("response contains a message; use Send to retain message-only results")
+	}
+	return result.Task, nil
+}
+
+// Send 返回标准 Task/Message 联合结果，适用于有状态和无状态 Agent。
+func (c *Client) Send(ctx context.Context, req *SendMessageRequest) (*MessageResult, error) {
 	if c.IsClosed() {
 		return nil, ErrClientClosed
 	}
-
-	var task Task
-	if err := c.callRPC(ctx, MethodSendMessage, req, &task); err != nil {
+	var result MessageResult
+	if err := c.callRPC(ctx, MethodSendMessage, req, &result); err != nil {
 		return nil, err
 	}
-
-	return &task, nil
+	return &result, nil
 }
+
+// WithRPCEndpoint 显式指定 Agent Card 中的 JSONRPC 端点。
+func WithRPCEndpoint(endpoint string) ClientOption { return func(c *Client) { c.rpcURL = endpoint } }
+func (c *Client) protocolEndpoint() string         { c.mu.RLock(); defer c.mu.RUnlock(); return c.rpcURL }
 
 // SendMessageStream 流式发送消息
 // 返回一个事件通道，调用者需要消费所有事件直到通道关闭。
@@ -178,7 +202,7 @@ func (c *Client) SendMessageStream(ctx context.Context, req *SendMessageRequest)
 		return nil, ErrClientClosed
 	}
 
-	url := c.baseURL + PathTaskSendStream
+	url := c.protocolEndpoint()
 
 	// 创建 JSON-RPC 请求
 	rpcReq, err := NewJSONRPCRequest(c.nextRequestID(), MethodSendMessageStream, req)
@@ -196,8 +220,9 @@ func (c *Client) SendMessageStream(ctx context.Context, req *SendMessageRequest)
 		return nil, fmt.Errorf("create http request failed: %w", err)
 	}
 
+	httpReq.Header.Set("A2A-Version", ProtocolVersion)
 	httpReq.Header.Set("Content-Type", ContentTypeJSON)
-	httpReq.Header.Set("Accept", ContentTypeSSE)
+	httpReq.Header.Set("Accept", ContentTypeSSE+", "+ContentTypeJSON)
 	if c.userAgent != "" {
 		httpReq.Header.Set("User-Agent", c.userAgent)
 	}
@@ -223,14 +248,14 @@ func (c *Client) SendMessageStream(ctx context.Context, req *SendMessageRequest)
 	contentType := resp.Header.Get("Content-Type")
 	if !strings.HasPrefix(contentType, ContentTypeSSE) {
 		defer resp.Body.Close()
-		return nil, fmt.Errorf("unexpected content type: %s", contentType)
+		return nil, c.handleHTTPError(resp)
 	}
 
 	// 创建事件通道
 	events := make(chan StreamEvent)
 
 	// 启动 goroutine 读取 SSE 事件
-	go c.readSSEEvents(ctx, resp.Body, events)
+	go c.readSSEEvents(ctx, resp.Body, events, rpcReq.ID)
 
 	return events, nil
 }
@@ -319,7 +344,7 @@ func (c *Client) Resubscribe(ctx context.Context, taskID string) (<-chan StreamE
 		return nil, ErrClientClosed
 	}
 
-	url := c.baseURL + PathTaskResubscribe
+	url := c.protocolEndpoint()
 
 	req := &ResubscribeRequest{TaskID: taskID}
 	rpcReq, err := NewJSONRPCRequest(c.nextRequestID(), MethodResubscribe, req)
@@ -337,8 +362,9 @@ func (c *Client) Resubscribe(ctx context.Context, taskID string) (<-chan StreamE
 		return nil, fmt.Errorf("create http request failed: %w", err)
 	}
 
+	httpReq.Header.Set("A2A-Version", ProtocolVersion)
 	httpReq.Header.Set("Content-Type", ContentTypeJSON)
-	httpReq.Header.Set("Accept", ContentTypeSSE)
+	httpReq.Header.Set("Accept", ContentTypeSSE+", "+ContentTypeJSON)
 	if c.userAgent != "" {
 		httpReq.Header.Set("User-Agent", c.userAgent)
 	}
@@ -359,8 +385,12 @@ func (c *Client) Resubscribe(ctx context.Context, taskID string) (<-chan StreamE
 		return nil, c.handleHTTPError(resp)
 	}
 
+	if !strings.HasPrefix(resp.Header.Get("Content-Type"), ContentTypeSSE) {
+		defer resp.Body.Close()
+		return nil, c.handleHTTPError(resp)
+	}
 	events := make(chan StreamEvent)
-	go c.readSSEEvents(ctx, resp.Body, events)
+	go c.readSSEEvents(ctx, resp.Body, events, rpcReq.ID)
 
 	return events, nil
 }
@@ -374,7 +404,7 @@ func (c *Client) nextRequestID() int64 {
 
 // callRPC 调用 JSON-RPC 方法
 func (c *Client) callRPC(ctx context.Context, method string, params, result any) error {
-	url := c.baseURL + PathTasks
+	url := c.protocolEndpoint()
 
 	// 创建 JSON-RPC 请求
 	rpcReq, err := NewJSONRPCRequest(c.nextRequestID(), method, params)
@@ -392,6 +422,7 @@ func (c *Client) callRPC(ctx context.Context, method string, params, result any)
 		return fmt.Errorf("create http request failed: %w", err)
 	}
 
+	httpReq.Header.Set("A2A-Version", ProtocolVersion)
 	httpReq.Header.Set("Content-Type", ContentTypeJSON)
 	httpReq.Header.Set("Accept", ContentTypeJSON)
 	if c.userAgent != "" {
@@ -421,6 +452,9 @@ func (c *Client) callRPC(ctx context.Context, method string, params, result any)
 		return fmt.Errorf("decode response failed: %w", err)
 	}
 
+	if rpcResp.JSONRPC != "2.0" || fmt.Sprint(rpcResp.ID) != fmt.Sprint(rpcReq.ID) {
+		return fmt.Errorf("invalid JSON-RPC response correlation")
+	}
 	// 检查错误
 	if rpcResp.Error != nil {
 		return rpcResp.Error
@@ -451,104 +485,91 @@ func (c *Client) handleHTTPError(resp *http.Response) error {
 }
 
 // readSSEEvents 读取 SSE 事件
-func (c *Client) readSSEEvents(ctx context.Context, body io.ReadCloser, events chan<- StreamEvent) {
+func (c *Client) readSSEEvents(ctx context.Context, body io.ReadCloser, events chan<- StreamEvent, requestIDs ...any) {
 	defer body.Close()
 	defer close(events)
-
-	scanner := bufio.NewScanner(body)
-	var eventType string
+	reader := bufio.NewReader(body)
 	var data strings.Builder
-
-	for scanner.Scan() {
+	send := func(event StreamEvent) bool {
 		select {
+		case events <- event:
+			return true
 		case <-ctx.Done():
-			// context 取消时尝试发送错误事件，但不阻塞
-			select {
-			case events <- &ErrorEvent{Error: NewInternalError(ctx.Err().Error())}:
-			default:
-			}
-			return
-		default:
-		}
-
-		line := scanner.Text()
-
-		// 空行表示事件结束
-		if line == "" {
-			if eventType != "" && data.Len() > 0 {
-				event := c.parseSSEEvent(eventType, data.String())
-				if event != nil {
-					// 发送事件时检查 context 是否已取消，防止消费者停止消费后 goroutine 阻塞
-					select {
-					case <-ctx.Done():
-						return
-					case events <- event:
-					}
-				}
-
-				// 如果是完成事件，退出
-				if eventType == EventTypeDone {
-					return
-				}
-			}
-			eventType = ""
-			data.Reset()
-			continue
-		}
-
-		// 解析 SSE 字段
-		if value, found := strings.CutPrefix(line, "event:"); found {
-			eventType = strings.TrimSpace(value)
-		} else if value, found := strings.CutPrefix(line, "data:"); found {
-			if data.Len() > 0 {
-				data.WriteString("\n")
-			}
-			data.WriteString(value)
+			return false
 		}
 	}
-
-	if err := scanner.Err(); err != nil {
-		events <- &ErrorEvent{Error: NewInternalError(err.Error())}
+	dispatch := func() bool {
+		if data.Len() == 0 {
+			return false
+		}
+		payload := data.String()
+		data.Reset()
+		if len(requestIDs) > 0 {
+			var response JSONRPCResponse
+			if err := json.Unmarshal([]byte(payload), &response); err != nil {
+				send(&ErrorEvent{Error: NewParseError(err.Error())})
+				return true
+			}
+			if fmt.Sprint(response.ID) != fmt.Sprint(requestIDs[0]) {
+				send(&ErrorEvent{Error: NewInvalidRequestError("invalid stream response correlation")})
+				return true
+			}
+		}
+		event := decodeProtocolEvent(payload)
+		if !send(event) {
+			return true
+		}
+		switch e := event.(type) {
+		case *ErrorEvent:
+			return true
+		case *MessageEvent:
+			send(&DoneEvent{})
+			return true
+		case *TaskEvent:
+			if e.Task.Status.State.IsTerminal() || e.Task.Status.State == TaskStateInputRequired || e.Task.Status.State == TaskStateAuthRequired {
+				send(&DoneEvent{Task: e.Task})
+				return true
+			}
+		case *TaskStatusEvent:
+			if e.Final {
+				send(&DoneEvent{})
+				return true
+			}
+		}
+		return false
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 {
+			line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+			if line == "" {
+				if dispatch() {
+					return
+				}
+			} else if value, ok := strings.CutPrefix(line, "data:"); ok {
+				if data.Len() > 0 {
+					data.WriteByte('\n')
+				}
+				data.WriteString(strings.TrimPrefix(value, " "))
+			}
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if err == io.EOF {
+				send(&ErrorEvent{Error: NewInternalError("stream ended before a final event")})
+			} else {
+				send(&ErrorEvent{Error: NewInternalError(err.Error())})
+			}
+			return
+		}
 	}
 }
 
 // parseSSEEvent 解析 SSE 事件
 func (c *Client) parseSSEEvent(eventType, data string) StreamEvent {
-	data = strings.TrimSpace(data)
-
-	switch eventType {
-	case EventTypeTaskStatus:
-		var event TaskStatusEvent
-		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			return &ErrorEvent{Error: NewParseError(err.Error())}
-		}
-		return &event
-
-	case EventTypeArtifact:
-		var event ArtifactEvent
-		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			return &ErrorEvent{Error: NewParseError(err.Error())}
-		}
-		return &event
-
-	case EventTypeError:
-		var event ErrorEvent
-		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			return &ErrorEvent{Error: NewParseError(err.Error())}
-		}
-		return &event
-
-	case EventTypeDone:
-		var event DoneEvent
-		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			// done 事件可能没有数据
-			return &DoneEvent{}
-		}
-		return &event
-
-	default:
-		return nil
-	}
+	return decodeProtocolEvent(strings.TrimSpace(data))
 }
 
 // ============== Authenticator 接口 ==============

@@ -84,13 +84,13 @@ func (t *MCPProxyToolV2) Execute(ctx context.Context, args map[string]any) (tool
 		return failure, err
 	}
 	if len(texts) == 0 && result.StructuredContent != nil {
-		if hasNonText {
+		if hasNonText || len(result.Meta) > 0 {
 			return tool.NewResult(&PreservedToolResult{CallToolResult: result}), nil
 		}
 		return tool.NewResult(result.StructuredContent), nil
 	}
 	// 混合结果保留原有内容顺序、类型及结构化事实，纯文本维持字符串合同。
-	if hasNonText || result.StructuredContent != nil {
+	if hasNonText || result.StructuredContent != nil || len(result.Meta) > 0 {
 		return tool.NewResult(&PreservedToolResult{CallToolResult: result}), nil
 	}
 
@@ -111,15 +111,6 @@ func (t *MCPProxyToolV2) Validate(args map[string]any) error {
 }
 
 var _ tool.Tool = (*MCPProxyToolV2)(nil)
-
-// sessionCloser 组合 ClientSession 和 Transport 的关闭逻辑
-type sessionCloser struct {
-	session *sdkmcp.ClientSession
-}
-
-func (sc *sessionCloser) Close() error {
-	return sc.session.Close()
-}
 
 // connectingTransport 在初始化失败时保留关闭入口；进程仍由 SDK 连接负责回收。
 type connectingTransport struct {
@@ -152,6 +143,16 @@ func (t *connectingTransport) Connect(ctx context.Context) (sdkmcp.Connection, e
 //	tools, closer, err := mcp.ConnectMCPServerV2(ctx, transport)
 //	defer closer.Close()
 func ConnectMCPServerV2(ctx context.Context, transport sdkmcp.Transport) ([]tool.Tool, io.Closer, error) {
+	session, err := ConnectSession(ctx, transport)
+	if err != nil {
+		return nil, nil, err
+	}
+	return session.Tools(), session, nil
+}
+
+// ConnectSession 连接官方 SDK 会话，统一持有工具、资源、模板和传输生命周期。
+// 调用方在所有会话操作结束后调用 Close；ctx 继续遵循所选传输的生命周期。
+func ConnectSession(ctx context.Context, transport sdkmcp.Transport) (*Session, error) {
 	client := sdkmcp.NewClient(&sdkmcp.Implementation{
 		Name:    "hexagon",
 		Version: "1.0.0",
@@ -168,25 +169,35 @@ func ConnectMCPServerV2(ctx context.Context, transport sdkmcp.Transport) ([]tool
 			stage = "initialize"
 			tracked.closeErr = tracked.connection.Close()
 		}
-		return nil, nil, &ProtocolError{Stage: stage, Cause: err}
+		return nil, &ProtocolError{Stage: stage, Cause: err}
 	}
 
 	// SDK 迭代器读取全部分页，避免只向应用暴露第一页工具。
 	tools := make([]tool.Tool, 0)
-	for mcpTool, err := range session.Tools(ctx, nil) {
-		if err != nil {
-			tracked.closeErr = session.Close()
-			return nil, nil, &ProtocolError{Stage: "tools/list", Cause: err}
+	if session.InitializeResult().Capabilities.Tools != nil {
+		for mcpTool, err := range session.Tools(ctx, nil) {
+			if err != nil {
+				tracked.closeErr = session.Close()
+				return nil, &ProtocolError{Stage: "tools/list", Cause: err}
+			}
+			if mcpTool == nil {
+				tracked.closeErr = session.Close()
+				return nil, &ProtocolError{Stage: "tools/list", Cause: fmt.Errorf("MCP server returned a null tool")}
+			}
+			proxyTool := &MCPProxyToolV2{
+				mcpTool:      mcpTool,
+				session:      session,
+				cachedSchema: sdkSchemaToAICore(mcpTool.InputSchema),
+			}
+			tools = append(tools, proxyTool)
 		}
-		proxyTool := &MCPProxyToolV2{
-			mcpTool:      mcpTool,
-			session:      session,
-			cachedSchema: sdkSchemaToAICore(mcpTool.InputSchema),
-		}
-		tools = append(tools, proxyTool)
 	}
 
-	return tools, &sessionCloser{session: session}, nil
+	result := &Session{session: session, tools: tools}
+	if command, ok := tracked.Transport.(*sdkmcp.CommandTransport); ok {
+		result.command = command.Command
+	}
+	return result, nil
 }
 
 // ConnectStdioServerV2 使用官方 SDK 连接 Stdio MCP Server
@@ -212,6 +223,16 @@ func ConnectStdioServerV2(ctx context.Context, command string, args ...string) (
 //	tools, cleanup, err := mcp.ConnectStdioServerV2WithEnv(ctx, "npx",
 //	    map[string]string{"MYSQL_HOST": "localhost"}, "-y", "@benborla29/mcp-server-mysql")
 func ConnectStdioServerV2WithEnv(ctx context.Context, command string, env map[string]string, args ...string) ([]tool.Tool, func(), error) {
+	session, err := ConnectStdioSession(ctx, command, env, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	return session.Tools(), func() { _ = session.Close() }, nil
+}
+
+// ConnectStdioSession 启动一个 stdio 服务并返回同一官方 SDK 会话。
+// env 合并宿主环境；Close 释放会话和其拥有的子进程。
+func ConnectStdioSession(ctx context.Context, command string, env map[string]string, args ...string) (*Session, error) {
 	cmd := buildStdioCmd(ctx, command, env, args...)
 	// stdio 子进程的 stderr 是唯一可靠的启动诊断通道；限制容量并脱敏后
 	// 再交给上层，避免把凭据或无限刷屏内容带入日志/API。
@@ -221,7 +242,7 @@ func ConnectStdioServerV2WithEnv(ctx context.Context, command string, env map[st
 	cmd.WaitDelay = 5 * time.Second
 	transport := &connectingTransport{Transport: &sdkmcp.CommandTransport{Command: cmd}}
 
-	tools, closer, err := ConnectMCPServerV2(ctx, transport)
+	session, err := ConnectSession(ctx, transport)
 	if err != nil {
 		stdioErr := &StdioConnectError{
 			Stage:  protocolStage(err),
@@ -242,13 +263,10 @@ func ConnectStdioServerV2WithEnv(ctx context.Context, command string, env map[st
 			stdioErr.HasExitCode = true
 			stdioErr.ExitCode = 0
 		}
-		return nil, nil, stdioErr
+		return nil, stdioErr
 	}
 
-	cleanup := func() {
-		closer.Close()
-	}
-	return tools, cleanup, nil
+	return session, nil
 }
 
 // buildStdioCmd 构造 stdio MCP server 的子进程命令。env 非空时合并进 os.Environ()
@@ -279,25 +297,50 @@ func buildStdioCmd(ctx context.Context, command string, env map[string]string, a
 //	tools, closer, err := mcp.ConnectSSEServerV2(ctx, "http://localhost:8080/sse")
 //	defer closer.Close()
 func ConnectSSEServerV2(ctx context.Context, endpoint string) ([]tool.Tool, io.Closer, error) {
-	transport := &sdkmcp.SSEClientTransport{Endpoint: endpoint, HTTPClient: newMCPHTTPClient()}
-	return ConnectMCPServerV2(ctx, transport)
+	session, err := ConnectSSESession(ctx, endpoint, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	return session.Tools(), session, nil
 }
 
-// ConnectStreamableServerV2 uses Streamable HTTP transport (MCP 2025-03-26 standard).
+// ConnectSSESession 使用同一 HTTP 客户端进行 SSE 会话和清理请求。
+// client 可为 nil；非空时保留调用方的认证、代理及传输配置。
+func ConnectSSESession(ctx context.Context, endpoint string, client *http.Client) (*Session, error) {
+	return ConnectSession(ctx, &sdkmcp.SSEClientTransport{Endpoint: endpoint, HTTPClient: sessionHTTPClient(client)})
+}
+
+// ConnectStreamableServerV2 通过官方 SDK 协商 MCP 版本，当前 SDK 支持 2025-11-25。
 //
-// Single-endpoint bidirectional communication via HTTP POST + optional SSE response.
+// 单端点通过 HTTP POST 与可选 SSE 响应通信。
 //
 // Example:
 //
 //	tools, closer, err := mcp.ConnectStreamableServerV2(ctx, "http://localhost:8080/mcp")
 //	defer closer.Close()
 func ConnectStreamableServerV2(ctx context.Context, endpoint string) ([]tool.Tool, io.Closer, error) {
-	transport := &sdkmcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: newMCPHTTPClient()}
-	return ConnectMCPServerV2(ctx, transport)
+	session, err := ConnectStreamableSession(ctx, endpoint, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	return session.Tools(), session, nil
+}
+
+// ConnectStreamableSession 使用 Streamable HTTP 连接同一工具、资源与模板会话。
+// client 的认证传输同时用于正常调用和有界清理，不修改调用方的客户端。
+func ConnectStreamableSession(ctx context.Context, endpoint string, client *http.Client) (*Session, error) {
+	return ConnectSession(ctx, &sdkmcp.StreamableClientTransport{Endpoint: endpoint, HTTPClient: sessionHTTPClient(client)})
 }
 
 func newMCPHTTPClient() *http.Client {
-	client := *http.DefaultClient
+	return sessionHTTPClient(nil)
+}
+
+func sessionHTTPClient(source *http.Client) *http.Client {
+	if source == nil {
+		source = http.DefaultClient
+	}
+	client := *source
 	base := client.Transport
 	if base == nil {
 		base = http.DefaultTransport
@@ -426,15 +469,38 @@ func (s *ServerV2) RegisterTool(t tool.Tool) {
 
 		// 执行工具
 		result, err := t.Execute(ctx, args)
+		if err == nil && !result.Success && result.Error != "" {
+			err = fmt.Errorf("%s", result.Error)
+		}
+		// 协议结果保留原始内容块与结构化数据；业务失败不应丢失已生成附件。
+		if preserved, ok := result.Output.(*PreservedToolResult); ok && preserved != nil && preserved.CallToolResult != nil {
+			response := *preserved.CallToolResult
+			response.IsError = response.IsError || err != nil || !result.Success
+			return &response, nil
+		}
+		if protocol, ok := result.Output.(*sdkmcp.CallToolResult); ok && protocol != nil {
+			response := *protocol
+			response.IsError = response.IsError || err != nil || !result.Success
+			return &response, nil
+		}
 		if err != nil {
+			content := []sdkmcp.Content{&sdkmcp.TextContent{Text: err.Error()}}
+			if result.Output != nil {
+				content = append(content, &sdkmcp.TextContent{Text: fmt.Sprint(result.Output)})
+			}
 			return &sdkmcp.CallToolResult{
-				Content: []sdkmcp.Content{
-					&sdkmcp.TextContent{Text: err.Error()},
-				},
+				Content: content,
 				IsError: true,
 			}, nil
 		}
 
+		if structured, ok := result.Output.(map[string]any); ok {
+			encoded, encodeErr := json.Marshal(structured)
+			if encodeErr != nil {
+				return nil, fmt.Errorf("encode structured tool result: %w", encodeErr)
+			}
+			return &sdkmcp.CallToolResult{StructuredContent: structured, Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: string(encoded)}}}, nil
+		}
 		return &sdkmcp.CallToolResult{
 			Content: []sdkmcp.Content{
 				&sdkmcp.TextContent{Text: fmt.Sprint(result.Output)},

@@ -1,15 +1,16 @@
 // Package a2a 实现 Google A2A (Agent-to-Agent) 协议
 //
 // A2A 是一个开放协议，使 AI Agent 能够安全地相互通信、协调任务、共享上下文。
-// 本包提供了完整的 A2A 协议实现，包括：
+// 本包提供 A2A 1.0 JSONRPC 绑定与 SSE 流，包含：
 //   - AgentCard: Agent 元数据描述
 //   - Task: 任务生命周期管理
 //   - Message: Agent 间消息通信
 //   - Artifact: 任务输出产物
-//   - 推送通知: 服务端主动推送
+//
+// 推送通知、租户路由、gRPC 和 HTTP+JSON 绑定不在当前互操作支持范围。
 //
 // 规范参考:
-//   - Google A2A Protocol: https://google.github.io/A2A/
+//   - Google A2A Protocol: https://a2a-protocol.org/latest/specification/
 //
 // 使用示例:
 //
@@ -84,28 +85,28 @@ const (
 
 const (
 	// MethodSendMessage 发送消息方法
-	MethodSendMessage = "tasks/send"
+	MethodSendMessage = "SendMessage"
 
 	// MethodSendMessageStream 流式发送消息方法
-	MethodSendMessageStream = "tasks/sendSubscribe"
+	MethodSendMessageStream = "SendStreamingMessage"
 
 	// MethodGetTask 获取任务方法
-	MethodGetTask = "tasks/get"
+	MethodGetTask = "GetTask"
 
 	// MethodListTasks 列出任务方法
-	MethodListTasks = "tasks/list"
+	MethodListTasks = "ListTasks"
 
 	// MethodCancelTask 取消任务方法
-	MethodCancelTask = "tasks/cancel"
+	MethodCancelTask = "CancelTask"
 
 	// MethodResubscribe 重新订阅方法
-	MethodResubscribe = "tasks/resubscribe"
+	MethodResubscribe = "SubscribeToTask"
 
 	// MethodSetPushNotification 设置推送通知方法
-	MethodSetPushNotification = "tasks/pushNotification/set"
+	MethodSetPushNotification = "CreateTaskPushNotificationConfig"
 
 	// MethodGetPushNotification 获取推送通知方法
-	MethodGetPushNotification = "tasks/pushNotification/get"
+	MethodGetPushNotification = "GetTaskPushNotificationConfig"
 )
 
 // ============== SSE 事件类型 ==============
@@ -159,14 +160,14 @@ const (
 	// CodeContentTypeNotSupported 不支持的内容类型 (-32005)
 	CodeContentTypeNotSupported = -32005
 
-	// CodeAuthenticationRequired 需要认证 (-32010)
-	CodeAuthenticationRequired = -32010
+	// CodeAuthenticationRequired 需要认证 (-31401)
+	CodeAuthenticationRequired = -31401
 
-	// CodeAuthenticationFailed 认证失败 (-32011)
-	CodeAuthenticationFailed = -32011
+	// CodeAuthenticationFailed 认证失败 (-31401)
+	CodeAuthenticationFailed = -31401
 
-	// CodePermissionDenied 权限不足 (-32012)
-	CodePermissionDenied = -32012
+	// CodePermissionDenied 权限不足 (-31403)
+	CodePermissionDenied = -31403
 )
 
 // ============== 预定义错误 ==============
