@@ -39,7 +39,7 @@ func TestComputerUseLoopActionsObserveAndFinal(t *testing.T) {
 	if err != nil || text != "done" {
 		t.Fatalf("text=%q err=%v", text, err)
 	}
-	want := []string{"model:1:10", "action:first:10", "observe:first", "action:second:20", "observe:second", "model:2:30"}
+	want := []string{"model:1:10", "action:first:10", "observe:first", "action:second:10", "observe:second", "model:2:30"}
 	if !reflect.DeepEqual(events, want) {
 		t.Fatalf("events=%v want=%v", events, want)
 	}

@@ -45,6 +45,8 @@ func RunComputerUse(ctx context.Context, image Image, ports ComputerUseLoopPorts
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
+		// 同轮所有调用都基于模型本次看到的截图，观察结果仅供下一轮使用。
+		sourceWidth, sourceHeight := image.Width, image.Height
 		turn, exchangeErr := ports.Exchange(ctx, ordinal, image)
 		if exchangeErr != nil {
 			return "", exchangeErr
@@ -74,7 +76,7 @@ func RunComputerUse(ctx context.Context, image Image, ports ComputerUseLoopPorts
 				}
 				switch action.Type {
 				case "click", "double_click", "move", "scroll", "drag":
-					action.SourceWidth, action.SourceHeight = image.Width, image.Height
+					action.SourceWidth, action.SourceHeight = sourceWidth, sourceHeight
 				}
 				if err := ports.Execute(ctx, ordinal, call, index, action); err != nil {
 					return "", err
