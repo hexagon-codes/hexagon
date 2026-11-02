@@ -32,6 +32,17 @@ hexagon 是 Hexagon 生态的 **AI Agent 框架（L2）**，向下依赖 toolkit
 | `CostControl.RecordAttempt` | 设置后优先于 Record；持久账本按实际 HTTP attempt ID 幂等入账。部分 usage 的缺失维度保持未知，预算下界与供应商实报 TotalTokens 分开 |
 | `SSEEventSink.EmitStored` / `Follow` | 仅已提交事件信封携带持久 ID/序号；Follow 使用 EventStore 序号追赶，消费者记录游标并去重。即时 delta 不提供持久恢复游标 |
 | `agent.NewToolExecutor` | 将现有 ai-core tools 装配给 `runtime.Config.ToolExecutor`，再按需接 DurableRunner；无需公开 ReAct 内部对象。宿主仍负责工具连接、Lease 及强持久依赖的生命周期 |
+| `RunSpec.IngressDigest` / `SubmissionDigest` | 接收按原输入与身份去重，重复 Submit 不重新解析 latest；持久接收适配器和宿主查回使用同一摘要算法。Signal 身份不冒充 Submit，原输入变化明确冲突；旧记录保留旧算法的原条件查回 |
+| `Snapshot.BudgetStartedAt` | 首次模型派发前保存预算墙钟起点；恢复不重新起算。原快照没有该事实时不能自动补得历史保证；普通轻量执行仍无需持久依赖 |
+| `WaitingTargets` | nil 表示未声明/保持，非 nil 空列表表示当前没有等待；执行核随快照声明完整目标。原子提交只为当前等待集的未消费输入保持 queued；过期目标不盲消费，同 ID 查回不再派发。宿主选择恢复输入时必须与当前等待集对应 |
+| `PrepareModelRequest` / `EventModelDraftReplaced` | 计量与派发共用完整请求派生；不修改传入历史。草稿替换事件以 `replacement_text` 撤回本包装调用的废弃尝试，保留 Continue 之前的前缀；实际费用和回执仍逐次保存 |
+
+## 插件依赖代次与恢复
+
+- 插件实例在初始化时取得声明依赖的使用权，依赖使用权保留到该实例 Stop 完成。单独更新 Provider 可以立即发布新根路由；仍运行的 Tool 继续使用原 Provider，旧 Provider 的 `Retirement.Wait` 等待实际依赖者排空，不表示更新发布失败。
+- `DependencyFromContext(ctx, name)` 在 Init/Start/Stop 回调中返回固定依赖。候选集内的插件通过此入口取得候选依赖，历史恢复通过此入口取得原版本依赖；插件必须缓存这份实际依赖，不能再用当前 `Registry.Get` 替换它。旧插件直接使用 Registry.Get 时按生命周期当时实际可见的代次固定；路由在未完成生命周期回调期间变化且无法确认绑定时，清理未发布实例并明确返回错误，不停止已有运行实例。
+- `Lease.Plugin(name)` 优先返回显式选择的根；只请求 Tool 时，其隐式 Provider 是该 Tool 的实际依赖。根 Provider v2 和 Tool 所依赖的 Provider v1 可同时持有；同名多版本的隐式依赖没有显式根选择时，`Plugin(name)` 返回 false，调用方应使用已经装配好的 Tool。`References()` 和 `RecoverableReferences()` 返回显式根，并通过 `Reference.Dependencies` 递归记录实际依赖，不把旧依赖伪装成当前路由。
+- 恢复独立重建每份固定依赖，不发布旧路由。无法从原引用或生命周期上下文证明依赖绑定时返回 `plugin.ErrDependencyUnavailable`，不静默改用 latest。跨层的 RunPreparer 宿主适配器应在恢复路径把该错误与 `runtime.ErrUnrecoverableSpec` 一起包装并保留原错误，随后禁止派发 Provider；Runtime 核心不依赖 plugin 包。没有依赖树的旧引用仅能恢复实际无依赖的插件，有依赖的旧任务应由原固定版本继续或提供明确迁移。
 
 ## 历史版本策略例外
 

@@ -4,6 +4,14 @@
 
 ## v0.6.0（2026-11-02）
 
+### Fixed
+
+- Workflow 在实际步骤执行协程内记录 panic 失败；Workflow 与 Agent 工具适配统一遍历未知结果错误树，避免重复副作用。
+- A2A 在原子准入时重读任务终态，拒绝旧快照重开已完成任务；Graph 流保留必要错误事件，Fork 使用原 StateCodec。
+- 模型异常终态先于工具派发决议；失败 AfterTool 候选隔离完整结果，包装器重试撤回本次草稿并保留合法 Continue 前缀及用量。截断摘要不采用，压缩计量使用最终请求 Schema、工具和提示。
+- 记忆记录、快照、历史和 Store 的 JSON 解码保留数值精度；插件实例保留实际依赖代次直到使用者排空，持久引用递归保存依赖。
+- 原入站摘要独立于最新路由，重复 Submit 查回原接收；等待目标与快照原子保存，仅未消费的当前目标维持唤醒。预算起点在首次模型派发前持久化，并跨恢复累计。
+
 本节对应本地代码交付目标；没有据此创建或推送 tag，也没有把本地候选 module proxy 验证写成 GitHub 或公共代理已可解析。应用可继续固定原版本，HexClaw 不要求升级；采用本版本的消费者自行完成下列迁移。
 
 ### BREAKING
@@ -23,6 +31,7 @@
 - 轻量 `Runner.Run/Stream` 可使用内存装配，不强制数据库。强持久装配由宿主注入 `*sql.DB`，显式调用 MySQL 适配层迁移，并提供 worker、执行权与接收/恢复入口；构造器不自动建表，也不新增独立持久化微服务。单实例内存/文件存储不等同多 worker 的数据库事务或机器掉电耐久。
 - 必要事件与状态提交关联，已提交事件保留稳定 `Event.ID`/序号；`SSEEventSink.EmitStored` 输出已提交信封，`Follow` 按 EventStore 的序号追赶，消费者保留对应游标并去重。即时 token delta 没有持久恢复游标，仍按声明的 best-effort 合同处理。外部 Receipt、产物字节与运行状态分别核对，不承诺外部 exactly-once。
 - 新增 `memory/store.ConditionalStore` 是可选能力，不扩大原 `MemoryStore` 方法集；需要条件更新的消费者显式使用该能力，并按实际后端声明原子范围。
+- 新增可选 `RunSpec.IngressDigest`、`Snapshot.BudgetStartedAt`、`RunRecord/CommitRequest.WaitingTargets`，不需要新增 SQL 表。旧接收记录的摘要查回沿用原完整请求方案，不能伪造未保存的原入站事实；无预算起点的历史快照不能凭空补出原墙钟。等待目标由执行核声明，存储层不解析私有快照；已接收的同 ID Signal 保持幂等，新 ID 的已完成目标明确拒绝。
 
 ### Added
 
