@@ -383,7 +383,7 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 		// 参考 ai-core/llm/openai 内 BUG-20260523_* 测试套件还原的具体故障模式。
 		callReq, prepareErr := r.buildRunModelRequest(ctx, state, selection)
 		if prepareErr != nil {
-			return nil, prepareErr
+			return canceledStateResult(state), prepareErr
 		}
 		if err := emitter.emit(ctx, Event{
 			Type:  EventLLMStarted,
@@ -423,7 +423,7 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 						"discarded_text": discarded,
 					},
 				}); emitErr != nil {
-					return nil, emitErr
+					return canceledStateResult(state), errors.Join(err, emitErr)
 				}
 				selection = next
 				state.Attributes["provider"] = selection.Name
@@ -440,7 +440,7 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 			return canceledStateResult(state), &ProviderCallError{Err: runErr, State: state.Snapshot()}
 		}
 		if resp == nil {
-			return nil, fmt.Errorf("provider returned no response")
+			return canceledStateResult(state), fmt.Errorf("provider returned no response")
 		}
 
 		if err := runAfterLLM(ctx, r.middleware, state, resp); err != nil {
