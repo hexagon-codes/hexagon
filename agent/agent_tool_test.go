@@ -20,7 +20,8 @@ func TestAgentTool_Execute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Success || res.Output != "sub-answer" {
+	child, ok := res.Output.(ChildRunResult)
+	if !res.Success || !ok || child.Child.Output.Content != "sub-answer" || child.RunID == "" || child.Child.Output.Metadata["run_id"] != child.RunID {
 		t.Errorf("工具结果 = %+v, want Success+sub-answer", res)
 	}
 }

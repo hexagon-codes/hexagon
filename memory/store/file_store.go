@@ -99,14 +99,24 @@ func NewFileStore(baseDir string, opts ...FileStoreOption) (*FileStore, error) {
 
 // Put 存储一条记忆
 func (s *FileStore) Put(ctx context.Context, namespace []string, key string, value map[string]any, opts ...PutOption) error {
+	_, err := s.put(ctx, namespace, key, value, nil, opts...)
+	return err
+}
+
+// PutIfRevision 保证同一 FileStore 实例内的条件更新，不宣称跨进程事务能力。
+func (s *FileStore) PutIfRevision(ctx context.Context, namespace []string, key string, value map[string]any, expected uint64, opts ...PutOption) (*Item, error) {
+	return s.put(ctx, namespace, key, value, &expected, opts...)
+}
+
+func (s *FileStore) put(ctx context.Context, namespace []string, key string, value map[string]any, expected *uint64, opts ...PutOption) (*Item, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	if key == "" {
-		return fmt.Errorf("key 不能为空")
+		return nil, fmt.Errorf("key 不能为空")
 	}
 	if err := validateNamespace(namespace); err != nil {
-		return err
+		return nil, err
 	}
 
 	options := applyPutOptions(opts)
@@ -130,17 +140,37 @@ func (s *FileStore) Put(ctx context.Context, namespace []string, key string, val
 
 	dir := s.namespaceDir(namespace)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("创建命名空间目录失败: %w", err)
+		return nil, fmt.Errorf("创建命名空间目录失败: %w", err)
 	}
 
 	filePath := s.itemPath(namespace, key)
 
-	// 如果已存在，保留原始创建时间
-	if existing, err := s.readItemUnlocked(filePath); err == nil && existing != nil {
+	existing, err := s.readItemUnlocked(filePath)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil && existing.isExpired() {
+		existing = nil
+	}
+	var current uint64
+	if existing != nil {
+		current = existing.Revision
+	}
+	if expected != nil && (*expected != current || *expected == 0 && existing != nil) {
+		return nil, ErrRevisionConflict
+	}
+	if current == ^uint64(0) {
+		return nil, fmt.Errorf("memory store: revision overflow")
+	}
+	item.Revision = current + 1
+	if existing != nil {
 		item.CreatedAt = existing.CreatedAt
 	}
 
-	return s.writeItemUnlocked(filePath, item)
+	if err := s.writeItemUnlocked(filePath, item); err != nil {
+		return nil, err
+	}
+	return item.toItem(), nil
 }
 
 // Get 获取一条记忆
@@ -330,6 +360,7 @@ func (s *FileStore) Close() error {
 
 // fileItem 文件存储的记忆条目（JSON 序列化格式）
 type fileItem struct {
+	Revision  uint64         `json:"revision"`
 	Namespace []string       `json:"namespace"`
 	Key       string         `json:"key"`
 	Value     map[string]any `json:"value"`
@@ -347,6 +378,7 @@ func (fi *fileItem) isExpired() bool {
 
 func (fi *fileItem) toItem() *Item {
 	item := &Item{
+		Revision:  fi.Revision,
 		Key:       fi.Key,
 		CreatedAt: fi.CreatedAt,
 		UpdatedAt: fi.UpdatedAt,

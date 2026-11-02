@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/reflectx"
 )
 
 // ============== 错误定义 ==============
@@ -48,6 +50,15 @@ var (
 
 // Skill 技能定义
 type Skill struct {
+	// Kind 区分可调用 Handler 和仅提供说明与资源的文档技能，零值沿用 Handler。
+	Kind Kind `json:"kind,omitempty"`
+
+	// Scope 是宿主声明的目录作用域；空值表示共享目录，不表示业务授权。
+	Scope string `json:"scope,omitempty"`
+
+	// Document 固定文档来源、不可变修订和资源根；仅文档技能使用。
+	Document *DocumentReference `json:"document,omitempty"`
+
 	// Name 技能名称（唯一标识）
 	Name string `json:"name"`
 
@@ -105,15 +116,19 @@ type Hook func(event HookEvent, skill *Skill)
 // 管理所有已注册的 Skill，提供增删改查和执行能力。
 // 线程安全。
 type Registry struct {
-	skills map[string]*Skill
-	hooks  []Hook
-	mu     sync.RWMutex
+	skills    map[string]*Skill
+	hooks     []Hook
+	mu        sync.RWMutex
+	sources   map[string]DocumentSource
+	revisions map[string]*Skill
 }
 
 // NewRegistry 创建技能注册中心
 func NewRegistry() *Registry {
 	return &Registry{
-		skills: make(map[string]*Skill),
+		skills:    make(map[string]*Skill),
+		sources:   make(map[string]DocumentSource),
+		revisions: make(map[string]*Skill),
 	}
 }
 
@@ -124,13 +139,22 @@ func (r *Registry) Register(s *Skill) error {
 	if s == nil || s.Name == "" {
 		return ErrInvalidSkill
 	}
-	if s.Handler == nil {
+	if err := validateSkill(s); err != nil {
 		return ErrInvalidSkill
+	}
+	frozen, err := freezeSkill(s)
+	if err != nil {
+		return err
 	}
 
 	r.mu.Lock()
 
-	if _, exists := r.skills[s.Name]; exists {
+	key := skillKey(s.Scope, s.Name)
+	if _, exists := r.skills[key]; exists {
+		r.mu.Unlock()
+		return ErrSkillExists
+	}
+	if _, exists := r.revisions[revisionKey(frozen)]; exists {
 		r.mu.Unlock()
 		return ErrSkillExists
 	}
@@ -140,10 +164,13 @@ func (r *Registry) Register(s *Skill) error {
 	}
 	s.Enabled = true
 
-	r.skills[s.Name] = s
+	frozen.CreatedAt = s.CreatedAt
+	frozen.Enabled = true
+	r.skills[key] = frozen
+	r.revisions[revisionKey(frozen)] = copySkill(frozen)
 	hooks := make([]Hook, len(r.hooks))
 	copy(hooks, r.hooks)
-	skillCopy := copySkill(s)
+	skillCopy := copySkill(frozen)
 	r.mu.Unlock()
 
 	// 在锁外调用钩子，防止用户回调中调用 Registry 方法导致死锁
@@ -155,13 +182,13 @@ func (r *Registry) Register(s *Skill) error {
 func (r *Registry) Unregister(name string) error {
 	r.mu.Lock()
 
-	s, exists := r.skills[name]
+	s, exists := r.skills[skillKey("", name)]
 	if !exists {
 		r.mu.Unlock()
 		return ErrSkillNotFound
 	}
 
-	delete(r.skills, name)
+	delete(r.skills, skillKey("", name))
 	hooks := make([]Hook, len(r.hooks))
 	copy(hooks, r.hooks)
 	skillCopy := copySkill(s)
@@ -176,44 +203,52 @@ func (r *Registry) Get(name string) (*Skill, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	s, exists := r.skills[name]
+	s, exists := r.skills[skillKey("", name)]
 	if !exists {
 		return nil, ErrSkillNotFound
 	}
 	return copySkill(s), nil
 }
 
-// copySkill 返回 Skill 的浅拷贝（足以防止外部篡改关键字段）
+// copySkill 复制定义的可变元数据，Handler 按不可变函数引用借用。
 func copySkill(s *Skill) *Skill {
 	c := *s
 	if s.Tags != nil {
 		c.Tags = make([]string, len(s.Tags))
 		copy(c.Tags, s.Tags)
 	}
+	c.Schema = reflectx.DeepCopy(s.Schema)
+	if s.Document != nil {
+		ref := s.Document.Clone()
+		c.Document = &ref
+	}
 	return &c
 }
 
-// List 列出所有已启用的技能（返回副本）
+// List 列出共享作用域内已启用的技能（返回副本）；指定作用域使用 Catalog。
 func (r *Registry) List() []*Skill {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	var result []*Skill
 	for _, s := range r.skills {
-		if s.Enabled {
+		if s.Enabled && s.Scope == "" {
 			result = append(result, copySkill(s))
 		}
 	}
 	return result
 }
 
-// ListAll 列出所有技能（包括已禁用的，返回副本）
+// ListAll 列出共享作用域内全部技能（包括已禁用的，返回副本）。
 func (r *Registry) ListAll() []*Skill {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	result := make([]*Skill, 0, len(r.skills))
 	for _, s := range r.skills {
+		if s.Scope != "" {
+			continue
+		}
 		result = append(result, copySkill(s))
 	}
 	return result
@@ -229,7 +264,7 @@ func (r *Registry) Search(query string) []*Skill {
 	query = strings.ToLower(query)
 	var result []*Skill
 	for _, s := range r.skills {
-		if !s.Enabled {
+		if !s.Enabled || s.Scope != "" {
 			continue
 		}
 		if matchesQuery(s, query) {
@@ -243,7 +278,7 @@ func (r *Registry) Search(query string) []*Skill {
 func (r *Registry) Enable(name string) error {
 	r.mu.Lock()
 
-	s, exists := r.skills[name]
+	s, exists := r.skills[skillKey("", name)]
 	if !exists {
 		r.mu.Unlock()
 		return ErrSkillNotFound
@@ -262,7 +297,7 @@ func (r *Registry) Enable(name string) error {
 func (r *Registry) Disable(name string) error {
 	r.mu.Lock()
 
-	s, exists := r.skills[name]
+	s, exists := r.skills[skillKey("", name)]
 	if !exists {
 		r.mu.Unlock()
 		return ErrSkillNotFound
@@ -287,7 +322,10 @@ func (r *Registry) OnChange(hook Hook) {
 // Execute 查找并执行技能
 func (r *Registry) Execute(ctx context.Context, name string, input map[string]any) (map[string]any, error) {
 	r.mu.RLock()
-	s, exists := r.skills[name]
+	s, exists := r.skills[skillKey("", name)]
+	if exists {
+		s = copySkill(s)
+	}
 	r.mu.RUnlock()
 
 	if !exists {
@@ -295,6 +333,9 @@ func (r *Registry) Execute(ctx context.Context, name string, input map[string]an
 	}
 	if !s.Enabled {
 		return nil, ErrSkillDisabled
+	}
+	if s.Kind == KindDocument {
+		return nil, ErrDocumentNotExecutable
 	}
 	return s.Handler(ctx, input)
 }

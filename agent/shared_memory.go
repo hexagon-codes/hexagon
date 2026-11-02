@@ -6,6 +6,8 @@ import (
 	"os"
 
 	"github.com/hexagon-codes/ai-core/memory"
+	runmemory "github.com/hexagon-codes/hexagon/memory"
+	"github.com/hexagon-codes/toolkit/util/reflectx"
 )
 
 // SharedMemory 团队级共享记忆容器
@@ -88,18 +90,19 @@ func NewSharedMemory(opts ...SharedMemoryOption) *SharedMemory {
 // 写入 shortTerm；如启用则同时写入 longTerm 和 entity。
 // longTerm/entity 写入失败仅输出 stderr 警告，不影响 shortTerm。
 func (sm *SharedMemory) Save(ctx context.Context, entry memory.Entry) error {
+	entry = cloneSharedEntry(entry)
 	if err := sm.shortTerm.Save(ctx, entry); err != nil {
 		return fmt.Errorf("shared memory short-term save failed: %w", err)
 	}
 
 	// 异步写入可选的长期和实体记忆
 	if sm.longTerm != nil {
-		if err := sm.longTerm.Save(ctx, entry); err != nil {
+		if err := sm.longTerm.Save(ctx, cloneSharedEntry(entry)); err != nil {
 			fmt.Fprintf(os.Stderr, "hexagon: shared memory long-term save warning: %v\n", err)
 		}
 	}
 	if sm.entity != nil {
-		if err := sm.entity.Save(ctx, entry); err != nil {
+		if err := sm.entity.Save(ctx, cloneSharedEntry(entry)); err != nil {
 			fmt.Fprintf(os.Stderr, "hexagon: shared memory entity save warning: %v\n", err)
 		}
 	}
@@ -119,7 +122,12 @@ func (sm *SharedMemory) SaveBatch(ctx context.Context, entries []memory.Entry) e
 
 // Get 根据 ID 获取条目（从 shortTerm 查找）
 func (sm *SharedMemory) Get(ctx context.Context, id string) (*memory.Entry, error) {
-	return sm.shortTerm.Get(ctx, id)
+	entry, err := sm.shortTerm.Get(ctx, id)
+	if err != nil || entry == nil {
+		return entry, err
+	}
+	copy := cloneSharedEntry(*entry)
+	return &copy, nil
 }
 
 // Search 搜索共享记忆
@@ -141,7 +149,18 @@ func (sm *SharedMemory) Search(ctx context.Context, query memory.SearchQuery) ([
 		}
 	}
 
-	return results, nil
+	return cloneSharedResults(results, query.ExcludeStale), nil
+}
+
+// Capture 冻结宿主声明的独占 Scope 内选中输入，后续共享更新不改变此 Run。
+// 原 Memory 端口不提供持久 CAS 修订，记录明确标记未版本化；版本条件写使用 ScopedMemory。
+func (sm *SharedMemory) Capture(ctx context.Context, scope runmemory.Scope, source string, query memory.SearchQuery) (*runmemory.Snapshot, error) {
+	query.ExcludeStale = true
+	entries, err := sm.Search(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return runmemory.FreezeEntries(scope, source, entries)
 }
 
 // Delete 删除条目（从 shortTerm 删除）
@@ -366,12 +385,34 @@ func (p *SharedMemoryProxy) Local() memory.Memory {
 
 // tagEntry 为条目添加来源 Agent 标记
 func (p *SharedMemoryProxy) tagEntry(entry memory.Entry) memory.Entry {
+	entry = cloneSharedEntry(entry)
 	if entry.Metadata == nil {
 		entry.Metadata = make(map[string]any)
 	}
 	entry.Metadata["_agent_id"] = p.agentID
 	entry.Metadata["_agent_name"] = p.agentName
 	return entry
+}
+
+// cloneSharedEntry 保类型复制记忆数据；Handler/连接等对象不属于 Entry 的数据合同。
+func cloneSharedEntry(entry memory.Entry) memory.Entry {
+	entry.Metadata = reflectx.DeepCopy(entry.Metadata)
+	entry.Embedding = append([]float32(nil), entry.Embedding...)
+	entry.Media = append([]memory.MediaRef(nil), entry.Media...)
+	for i := range entry.Media {
+		entry.Media[i].Metadata = reflectx.DeepCopy(entry.Media[i].Metadata)
+	}
+	return entry
+}
+
+func cloneSharedResults(entries []memory.Entry, excludeStale bool) []memory.Entry {
+	result := make([]memory.Entry, 0, len(entries))
+	for _, entry := range entries {
+		if !excludeStale || !entry.Stale {
+			result = append(result, cloneSharedEntry(entry))
+		}
+	}
+	return result
 }
 
 // 确保实现了 Memory 接口

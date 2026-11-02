@@ -434,18 +434,8 @@ func (t *agentTool) Execute(ctx context.Context, args map[string]any) (tool.Resu
 		Context: agentCtx,
 	}
 
-	output, err := t.agent.Run(ctx, input)
-	if err != nil {
-		return tool.Result{
-			Success: false,
-			Output:  fmt.Sprintf("agent %q execution failed: %v", t.agent.Name(), err),
-		}, nil
-	}
-
-	return tool.Result{
-		Success: true,
-		Output:  output.Content,
-	}, nil
+	child, err := runChildTask(ctx, t.agent, input, "agent", t.agent.Run)
+	return childToolResult(child, err)
 }
 
 // AgentToolInput AgentAsTool 的输入参数

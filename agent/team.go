@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/hexagon/core"
 	"github.com/hexagon-codes/hexagon/internal/util"
+	"github.com/hexagon-codes/hexagon/interrupt"
 )
 
 // TeamMode 团队工作模式
@@ -247,6 +249,9 @@ func (t *Team) RemoveAgent(agentID string) {
 
 // Run 执行团队任务
 func (t *Team) Run(ctx context.Context, input Input) (Output, error) {
+	if _, ok := ctx.Value(childRunKey{}).(ChildRunResult); !ok {
+		ctx = context.WithValue(ctx, childRunKey{}, ChildRunResult{RunID: childRunID(ctx), TaskID: "team"})
+	}
 	switch t.mode {
 	case TeamModeSequential:
 		return t.runSequential(ctx, input)
@@ -385,43 +390,84 @@ func (t *Team) runCollaborative(ctx context.Context, input Input) (Output, error
 
 	// 并行执行所有 Agent
 	type result struct {
+		index  int
 		agent  Agent
 		output Output
 		err    error
 	}
 
 	results := make(chan result, len(agents))
-	var wg sync.WaitGroup
+	childCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	for _, agent := range agents {
-		wg.Add(1)
-		go func(a Agent) {
-			defer wg.Done()
-			output, err := a.Run(ctx, input)
-			results <- result{agent: a, output: output, err: err}
-		}(agent)
+	for index, agent := range agents {
+		go func(index int, a Agent) {
+			r := result{index: index, agent: a}
+			defer func() {
+				if value := recover(); value != nil {
+					r.err = fmt.Errorf("agent %q panicked: %v", a.ID(), value)
+				}
+				results <- r
+			}()
+			child, err := runChildTask(childCtx, a, input, fmt.Sprintf("member/%d", index), a.Run)
+			r.output, r.err = child.Child.Output, err
+		}(index, agent)
 	}
-
-	// 等待所有完成
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
 
 	// 收集结果
 	var outputs []string
 	var allToolCalls []ToolCallRecord
 	var totalUsage llm.Usage
-
-	for r := range results {
-		if r.err != nil {
-			continue
+	ordered := make([]result, len(agents))
+	for i, a := range agents {
+		ordered[i] = result{index: i, agent: a}
+	}
+	received := make([]bool, len(agents))
+	remaining := len(agents)
+collect:
+	for remaining > 0 {
+		select {
+		case r := <-results:
+			ordered[r.index], received[r.index] = r, true
+			remaining--
+		case <-ctx.Done():
+			// 已返回的事实先收齐；尚未响应取消的成员不谎称已停止。
+			for {
+				select {
+				case r := <-results:
+					ordered[r.index], received[r.index] = r, true
+				default:
+					break collect
+				}
+			}
 		}
-		outputs = append(outputs, fmt.Sprintf("[%s]:\n%s", r.agent.Name(), r.output.Content))
+	}
+	children := make([]ChildResult, 0, len(agents))
+	var failures, waiting []error
+
+	for _, r := range ordered {
+		child := ChildResult{AgentID: r.agent.ID(), AgentName: r.agent.Name(), Status: "returned", Output: r.output}
+		if !received[r.index] {
+			child.Status, child.Error = "cancel_requested", ctx.Err().Error()
+			failures = append(failures, fmt.Errorf("agent %q cancellation pending: %w", r.agent.Name(), ctx.Err()))
+		}
+		if r.err != nil {
+			child.Status, child.Error = "failed", r.err.Error()
+			if _, ok := interrupt.IsInterruptSignal(r.err); ok {
+				child.Status = "waiting"
+				waiting = append(waiting, r.err)
+			} else {
+				failures = append(failures, fmt.Errorf("agent %q: %w", r.agent.Name(), r.err))
+			}
+		}
+		children = append(children, child)
+		outputs = append(outputs, fmt.Sprintf("[%s] (%s):\n%s", r.agent.Name(), child.Status, r.output.Content))
 		allToolCalls = append(allToolCalls, r.output.ToolCalls...)
 		totalUsage.PromptTokens += r.output.Usage.PromptTokens
 		totalUsage.CompletionTokens += r.output.Usage.CompletionTokens
 		totalUsage.TotalTokens += r.output.Usage.TotalTokens
+		totalUsage.CacheCreationTokens += r.output.Usage.CacheCreationTokens
+		totalUsage.CacheReadTokens += r.output.Usage.CacheReadTokens
 	}
 
 	// 格式化输出
@@ -434,16 +480,39 @@ func (t *Team) runCollaborative(ctx context.Context, input Input) (Output, error
 		}
 	}
 
-	return Output{
+	output := Output{
 		Content:   contentBuilder.String(),
 		ToolCalls: allToolCalls,
 		Usage:     totalUsage,
+		Children:  children,
 		Metadata: map[string]any{
 			"mode":        "collaborative",
 			"agent_count": len(agents),
 		},
-	}, nil
+	}
+	if len(waiting) > 0 {
+		failures = append(failures, interrupt.CompositeInterrupt(ctx, "child agents are waiting", nil, waiting...))
+	}
+	if len(failures) > 0 {
+		return output, &TeamExecutionError{Causes: failures}
+	}
+	return output, nil
 }
+
+// TeamExecutionError 保留各成员失败/等待；组合中可能已有成功副作用，不能自动整组重跑。
+type TeamExecutionError struct{ Causes []error }
+
+func (e *TeamExecutionError) Error() string {
+	if e == nil {
+		return "team execution incomplete"
+	}
+	if cause := errors.Join(e.Causes...); cause != nil {
+		return "team execution incomplete: " + cause.Error()
+	}
+	return "team execution incomplete"
+}
+func (e *TeamExecutionError) Unwrap() []error    { return e.Causes }
+func (*TeamExecutionError) UnsafeToReplay() bool { return true }
 
 // runRoundRobin 轮询执行
 //
