@@ -3,27 +3,35 @@ package core
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
+	"runtime/debug"
 	"sync"
 
 	stream "github.com/hexagon-codes/ai-core/streamx"
 )
 
 // forwardOwnedStream 将输出关闭或取消传播到所拥有的上游，正常 EOF 不遮蔽错误。
-func forwardOwnedStream[T any](ctx context.Context, source *StreamReader[T], release func()) *StreamReader[T] {
+func forwardOwnedStream[T any](ctx context.Context, source *StreamReader[T], release func() error) *StreamReader[T] {
 	callCtx, cancel := context.WithCancel(ctx)
 	var once sync.Once
-	closeSource := func() {
+	var closeErr error
+	var writer *StreamWriter[T]
+	closeSource := func() error {
 		once.Do(func() {
-			_ = source.Close()
+			closeErr = source.Close()
 			if release != nil {
-				release()
+				closeErr = errors.Join(closeErr, release())
+			}
+			if closeErr != nil {
+				_ = writer.CloseWithError(closeErr)
 			}
 		})
+		return closeErr
 	}
-	stop := context.AfterFunc(callCtx, closeSource)
-	reader, writer := stream.PipeWithClose[T](10, func() error { cancel(); closeSource(); return nil })
+	reader, outWriter := stream.PipeWithClose[T](10, func() error { cancel(); return closeSource() })
+	writer = outWriter
+	stop := context.AfterFunc(callCtx, func() { _ = closeSource() })
+
 	go func() {
 		defer writer.Close()
 		defer closeSource()
@@ -31,7 +39,7 @@ func forwardOwnedStream[T any](ctx context.Context, source *StreamReader[T], rel
 		defer stop()
 		defer func() {
 			if value := recover(); value != nil {
-				_ = writer.CloseWithError(fmt.Errorf("stream source panicked: %v", value))
+				_ = writer.CloseWithError(&AsyncPanicError{Value: value, Stack: debug.Stack()})
 			}
 		}()
 		for {
@@ -77,7 +85,7 @@ func composeTransform[I, M, O any](ctx context.Context, input *StreamReader[I], 
 		_ = input.Close()
 		return nil, err
 	}
-	return forwardOwnedStream(callCtx, out, func() { stopMid(); stop(); cancel(); _ = mid.Close(); _ = input.Close() }), nil
+	return forwardOwnedStream(callCtx, out, func() error { stopMid(); stop(); cancel(); return errors.Join(mid.Close(), input.Close()) }), nil
 }
 
 func collectThenInvoke[I, O any](ctx context.Context, input *StreamReader[I], invoke func(context.Context, I) (O, error)) *StreamReader[O] {
@@ -86,12 +94,16 @@ func collectThenInvoke[I, O any](ctx context.Context, input *StreamReader[I], in
 	reader, writer := stream.PipeWithClose[O](1, func() error { cancel(); return input.Close() })
 	go func() {
 		defer writer.Close()
-		defer input.Close()
+		defer func() {
+			if err := input.Close(); err != nil {
+				_ = writer.CloseWithError(err)
+			}
+		}()
 		defer cancel()
 		defer stop()
 		defer func() {
 			if value := recover(); value != nil {
-				_ = writer.CloseWithError(fmt.Errorf("stream transform panicked: %v", value))
+				_ = writer.CloseWithError(&AsyncPanicError{Value: value, Stack: debug.Stack()})
 			}
 		}()
 		value, err := stream.Concat(callCtx, input)
@@ -120,12 +132,16 @@ func MapEach[I, O any](r Runnable[I, O]) Runnable[I, O] {
 		reader, writer := stream.PipeWithClose[O](10, func() error { cancel(); return input.Close() })
 		go func() {
 			defer writer.Close()
-			defer input.Close()
+			defer func() {
+				if err := input.Close(); err != nil {
+					_ = writer.CloseWithError(err)
+				}
+			}()
 			defer cancel()
 			defer stop()
 			defer func() {
 				if value := recover(); value != nil {
-					_ = writer.CloseWithError(fmt.Errorf("stream map panicked: %v", value))
+					_ = writer.CloseWithError(&AsyncPanicError{Value: value, Stack: debug.Stack()})
 				}
 			}()
 			for {

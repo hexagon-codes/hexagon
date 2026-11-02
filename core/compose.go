@@ -165,7 +165,7 @@ func ComposeStream[I, M, O any](r1 Runnable[I, M], r2 Runnable[M, O]) Runnable[I
 			_ = mid.Close()
 			return nil, err
 		}
-		return forwardOwnedStream(callCtx, out, func() { stop(); cancel(); _ = mid.Close() }), nil
+		return forwardOwnedStream(callCtx, out, func() error { stop(); cancel(); return mid.Close() }), nil
 	})
 	br.WithTransform(func(ctx context.Context, input *StreamReader[I], opts ...Option) (*StreamReader[O], error) {
 		return composeTransform(ctx, input, r1, r2, opts...)
