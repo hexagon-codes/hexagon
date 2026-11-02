@@ -83,7 +83,7 @@ func (s *SSEEventSink) Emit(ctx context.Context, event Event) error {
 	if err != nil {
 		return fmt.Errorf("runtime/sse: marshal event: %w", err)
 	}
-	if err := s.sw.Write(&sse.Event{Event: string(event.Type), Data: string(payload)}); err != nil {
+	if err := s.sw.Write(&sse.Event{ID: event.ID, Event: string(event.Type), Data: string(payload)}); err != nil {
 		s.closed = true
 		return fmt.Errorf("runtime/sse: write frame: %w", err)
 	}
@@ -152,6 +152,7 @@ type ssePayload struct {
 	Type      EventType     `json:"type"`
 	RunID     string        `json:"run_id,omitempty"`
 	RequestID string        `json:"request_id,omitempty"`
+	AttemptID string        `json:"attempt_id,omitempty"`
 	SessionID string        `json:"session_id,omitempty"`
 	Turn      int           `json:"turn,omitempty"`
 	Sequence  int64         `json:"sequence,omitempty"`
@@ -172,6 +173,7 @@ func buildSSEPayload(e Event) ssePayload {
 		Type:      e.Type,
 		RunID:     e.RunID,
 		RequestID: e.RequestID,
+		AttemptID: e.AttemptID,
 		SessionID: e.SessionID,
 		Turn:      e.Turn,
 		Sequence:  e.Sequence,

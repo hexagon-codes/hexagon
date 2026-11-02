@@ -27,12 +27,19 @@ package artifact
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
 	"sort"
 	"sync"
 	"time"
+)
+
+// ErrArtifactConflict 和 ErrAtomicCreateUnsupported 分别表示 ID 冲突和缺少原子创建能力。
+var (
+	ErrArtifactConflict        = errors.New("artifact ID already exists")
+	ErrAtomicCreateUnsupported = errors.New("artifact store does not support atomic creation")
 )
 
 // Artifact 代表 Agent 生成的一个文件或数据对象
@@ -51,6 +58,13 @@ type Artifact struct {
 
 	// Data 文件内容
 	Data []byte `json:"data,omitempty"`
+
+	// ObjectKey、Digest 与 OperationID 为外部字节保存稳定关联，不使用临时下载 URL 恢复。
+	ObjectKey   string `json:"object_key,omitempty"`
+	Digest      string `json:"digest,omitempty"`
+	OperationID string `json:"operation_id,omitempty"`
+	// RegistrationStatus 与业务采用、实际发送状态分开。
+	RegistrationStatus string `json:"registration_status,omitempty"`
 
 	// Version 版本号（从 1 开始自增）
 	Version int `json:"version"`
@@ -113,6 +127,11 @@ type versionedSaver interface {
 	SaveNextVersion(ctx context.Context, art Artifact) (string, error)
 }
 
+// versionedCreator 将显式 ID 的存在检查、版本分配和创建交给同一存储原子操作。
+type versionedCreator interface {
+	CreateNextVersion(ctx context.Context, art Artifact) (string, error)
+}
+
 // Service artifact 管理服务
 type Service struct {
 	store Store
@@ -133,6 +152,8 @@ type Option func(*Service)
 // 适用于需要严格区分 create / overwrite 语义的场景：当调用方自带 ID 且该 ID
 // 已存在时，默认的 upsert 行为会无声覆盖已有 artifact；开启本选项后将改为报错，
 // 避免误覆盖任意已存在数据。
+// 存储须实现 CreateNextVersion；不支持时返回 ErrAtomicCreateUnsupported，
+// 不再以非原子的 Get→Save 冒充创建保证。未开启该选项的保存语义保持不变。
 func WithFailOnConflict() Option {
 	return func(s *Service) {
 		s.failOnConflict = true
@@ -170,9 +191,11 @@ func (s *Service) Save(ctx context.Context, art Artifact) (string, error) {
 	// 自动生成的 ID 形如 session/name/vN，由原子版本分配保证唯一，不会冲突，
 	// 故此处只需拦截"用户自带 ID 覆盖已存在 artifact"的情形。
 	if s.failOnConflict && art.ID != "" {
-		if _, err := s.store.Get(ctx, art.ID); err == nil {
-			return "", fmt.Errorf("artifact ID 已存在，拒绝覆盖: %s", art.ID)
+		creator, ok := s.store.(versionedCreator)
+		if !ok {
+			return "", ErrAtomicCreateUnsupported
 		}
+		return creator.CreateNextVersion(ctx, art)
 	}
 
 	// 优先走原子路径：由 Store 在锁内完成 "下一个版本号 + 写入"，消除并发竞态。
@@ -272,8 +295,22 @@ func (s *MemoryStore) Save(_ context.Context, art Artifact) (string, error) {
 // 在单次写锁内完成 "扫描当前最大版本号 -> +1 -> 生成 ID -> 写入"，
 // 从而消除 Service.Save 默认路径中 "读-改-写" 之间的并发竞态。
 func (s *MemoryStore) SaveNextVersion(_ context.Context, art Artifact) (string, error) {
+	return s.saveNextVersion(art, false)
+}
+
+// CreateNextVersion 在同一写锁内校验 ID 并创建下一版本，不覆盖既有对象。
+func (s *MemoryStore) CreateNextVersion(_ context.Context, art Artifact) (string, error) {
+	return s.saveNextVersion(art, true)
+}
+
+func (s *MemoryStore) saveNextVersion(art Artifact, create bool) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if create && art.ID != "" {
+		if _, exists := s.artifacts[art.ID]; exists {
+			return "", fmt.Errorf("%w: %s", ErrArtifactConflict, art.ID)
+		}
+	}
 
 	// 锁内扫描当前最大版本号，保证版本分配的原子性。
 	maxVersion := 0

@@ -1,6 +1,4 @@
-// cron_context_guard_test 守卫 D1.1：
-//   cron 上下文（解析/创建/编辑 cron）调 LLM 时必须强制 tools=nil，
-//   从协议层根除 hexclaw 踩过的 tool_use_id 链路 400 bug。
+// 产品元数据不会隐式改变公共执行核的可见工具，工具策略由宿主装配。
 
 package runtime
 
@@ -10,36 +8,6 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 )
-
-func TestIsCronContext_BooleanTrue(t *testing.T) {
-	if !isCronContext(map[string]any{"cron_context": true}) {
-		t.Error("bool true 应识别为 cron context")
-	}
-}
-
-func TestIsCronContext_StringTrue(t *testing.T) {
-	if !isCronContext(map[string]any{"cron_context": "true"}) {
-		t.Error("string \"true\" 应识别为 cron context")
-	}
-	if !isCronContext(map[string]any{"cron_context": "1"}) {
-		t.Error("string \"1\" 应识别为 cron context")
-	}
-}
-
-func TestIsCronContext_AbsentOrFalse(t *testing.T) {
-	if isCronContext(nil) {
-		t.Error("nil metadata 不应是 cron context")
-	}
-	if isCronContext(map[string]any{}) {
-		t.Error("空 metadata 不应是 cron context")
-	}
-	if isCronContext(map[string]any{"cron_context": false}) {
-		t.Error("bool false 不应是 cron context")
-	}
-	if isCronContext(map[string]any{"other_key": "value"}) {
-		t.Error("其它 key 不应是 cron context")
-	}
-}
 
 // guardedToolsProvider 记录 callProvider 时实际收到的 Tools 长度
 type guardedToolsProvider struct {
@@ -67,7 +35,7 @@ func (s *cronGuardSelector) Fallback(_ context.Context, _ ProviderSelection, _ e
 	return ProviderSelection{}, nil
 }
 
-func TestCronContextGuard_ToolsForcedToNil(t *testing.T) {
+func TestProductMetadataKeepsExplicitTools(t *testing.T) {
 	p := &guardedToolsProvider{}
 	runner := NewRunner(Config{ProviderSelector: &cronGuardSelector{p: p}})
 
@@ -75,7 +43,7 @@ func TestCronContextGuard_ToolsForcedToNil(t *testing.T) {
 		{Type: "function", Function: llm.ToolFunctionDef{Name: "fake_tool"}},
 	}
 
-	// 带 cron_context: true 调用，期望 Tools 被强制清空
+	// 宿主提供了工具，即使存在产品字段也须按原合同下发。
 	_, err := runner.Run(context.Background(), Request{
 		Messages: []llm.Message{{Role: llm.RoleUser, Content: "解析定时任务"}},
 		Tools:    tools,
@@ -84,8 +52,8 @@ func TestCronContextGuard_ToolsForcedToNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(p.lastTools) != 0 {
-		t.Errorf("cron_context=true 时 Tools 必须被强制清空，实际收到 %d 个", len(p.lastTools))
+	if len(p.lastTools) != 1 {
+		t.Errorf("explicit tools were changed by product metadata: got %d", len(p.lastTools))
 	}
 }
 

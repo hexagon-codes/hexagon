@@ -20,15 +20,15 @@ func TestBudgetControl_PerRunTokenLimit(t *testing.T) {
 	}
 }
 
-// TestBudgetControl_CrossRunCumulative 验证跨 run 累计记账经统一抽象在 AfterLLM 触发 fail-closed。
+// TestBudgetControl_CrossRunCumulative 验证实际尝试的已知用量触发跨运行预算。
 func TestBudgetControl_CrossRunCumulative(t *testing.T) {
 	overBudget := errors.New("cumulative budget exceeded")
 	bc := NewBudgetControl(BudgetControlConfig{
 		Record: func(_ string, _ llm.Usage) error { return overBudget },
 	})
 	st := &hruntime.State{}
-	resp := &llm.CompletionResponse{Usage: llm.Usage{TotalTokens: 100}}
-	if err := bc.AfterLLM(context.Background(), st, resp); !errors.Is(err, overBudget) {
+	attempt := hruntime.ModelAttempt{ProviderCalled: true, UsageKnown: true, Usage: llm.Usage{TotalTokens: 100}}
+	if err := bc.AfterModelAttempt(context.Background(), st, attempt); !errors.Is(err, overBudget) {
 		t.Errorf("跨 run 累计超限应 fail-closed, got %v", err)
 	}
 }

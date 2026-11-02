@@ -145,6 +145,7 @@ func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, id, s
 					ac.resumeData = data
 					ac.hasResumeData = true
 					ac.isResumeTarget = true
+					ac.resumeTargetID = iID
 					gri.id2DataUsed[iID] = true
 				}
 			}
@@ -172,11 +173,12 @@ func GetCurrentAddress(ctx context.Context) Address {
 // addrCtx 当前地址上下文（存储在 context 中）
 type addrCtx struct {
 	addr              Address
-	interruptState    any  // 从 checkpoint 恢复的中断状态
-	hasInterruptState bool // 是否有中断状态
-	isResumeTarget    bool // 是否为恢复目标
-	resumeData        any  // 恢复数据
-	hasResumeData     bool // 是否有恢复数据
+	interruptState    any    // 从 checkpoint 恢复的中断状态
+	hasInterruptState bool   // 是否有中断状态
+	isResumeTarget    bool   // 是否为恢复目标
+	resumeTargetID    string // 精确地址匹配的恢复身份，不包含仅被选中的祖先
+	resumeData        any    // 恢复数据
+	hasResumeData     bool   // 是否有恢复数据
 }
 
 // getAddrCtx 从 context 获取 addrCtx

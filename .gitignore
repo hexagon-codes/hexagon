@@ -32,3 +32,9 @@ go.work.sum
 # .vscode/
 
 .claude/
+
+# runtime 目录中的 Go 源码须可见，避免全局二进制名称规则隐藏实现。
+!/runtime/
+/runtime/**
+!/runtime/**/
+!/runtime/**/*.go

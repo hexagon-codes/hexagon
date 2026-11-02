@@ -60,7 +60,10 @@ func (classifyingExec) SideEffectOf(call llm.ToolCall) ToolSideEffect {
 
 // TestClassifyPending_DefaultUnsafe 执行器未实现 SideEffectClassifier → 一律 Unsafe（保守默认）。
 func TestClassifyPending_DefaultUnsafe(t *testing.T) {
-	pending := classifyPending(nil, []llm.ToolCall{{Name: "x"}})
+	pending, err := classifyPending(nil, []llm.ToolCall{{Name: "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(pending) != 1 || pending[0].SideEffect != SideEffectUnsafe {
 		t.Errorf("未声明工具应默认 Unsafe, got %+v", pending)
 	}
@@ -68,7 +71,10 @@ func TestClassifyPending_DefaultUnsafe(t *testing.T) {
 
 // TestClassifyPending_Classifier 执行器声明时按声明分类。
 func TestClassifyPending_Classifier(t *testing.T) {
-	pending := classifyPending(classifyingExec{}, []llm.ToolCall{{Name: "read"}, {Name: "write"}})
+	pending, err := classifyPending(classifyingExec{}, []llm.ToolCall{{Name: "read"}, {Name: "write"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if pending[0].SideEffect != SideEffectReadOnly || pending[1].SideEffect != SideEffectUnsafe {
 		t.Errorf("应按 classifier 声明分类, got %+v", pending)
 	}

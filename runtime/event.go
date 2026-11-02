@@ -13,25 +13,29 @@ const EventVersionV1 = "runtime.event.v1"
 type EventType string
 
 const (
-	EventRunStarted          EventType = "run_started"
-	EventProviderSelected    EventType = "provider_selected"
-	EventLLMStarted          EventType = "llm_started"
-	EventLLMChunk            EventType = "llm_chunk"
-	EventLLMCompleted        EventType = "llm_completed"
-	EventToolCallStarted     EventType = "tool_call_started"
-	EventToolCallCompleted   EventType = "tool_call_completed"
-	EventToolCallFailed      EventType = "tool_call_failed"
-	EventProviderFallback    EventType = "provider_fallback"
-	EventBudgetChecked       EventType = "budget_checked"
-	EventBudgetExceeded      EventType = "budget_exceeded"
-	EventContextCompacted    EventType = "context_compacted"
-	EventPermissionRequested EventType = "permission_requested"
-	EventPermissionApproved  EventType = "permission_approved"
-	EventPermissionDenied    EventType = "permission_denied"
-	EventReasoningSanitized  EventType = "reasoning_sanitized"
-	EventCheckpointSaved     EventType = "checkpoint_saved"
-	EventRunFinished         EventType = "run_finished"
-	EventRunFailed           EventType = "run_failed"
+	EventRunStarted           EventType = "run_started"
+	EventProviderSelected     EventType = "provider_selected"
+	EventLLMStarted           EventType = "llm_started"
+	EventLLMChunk             EventType = "llm_chunk"
+	EventLLMCompleted         EventType = "llm_completed"
+	EventModelAttemptStarted  EventType = "model_attempt_started"
+	EventModelAttemptFinished EventType = "model_attempt_finished"
+	EventToolCallStarted      EventType = "tool_call_started"
+	EventToolCallCompleted    EventType = "tool_call_completed"
+	EventToolCallFailed       EventType = "tool_call_failed"
+	EventProviderFallback     EventType = "provider_fallback"
+	EventBudgetChecked        EventType = "budget_checked"
+	EventBudgetExceeded       EventType = "budget_exceeded"
+	EventContextCompacted     EventType = "context_compacted"
+	EventPermissionRequested  EventType = "permission_requested"
+	EventPermissionApproved   EventType = "permission_approved"
+	EventPermissionDenied     EventType = "permission_denied"
+	EventReasoningSanitized   EventType = "reasoning_sanitized"
+	EventCheckpointSaved      EventType = "checkpoint_saved"
+	EventRunFinished          EventType = "run_finished"
+	EventRunFailed            EventType = "run_failed"
+	EventRunWaiting           EventType = "run_waiting"
+	EventRunCancelled         EventType = "run_cancelled"
 
 	// 长时任务进度事件（B-fw5）—— 供 hexeye 等"提交→轮询"长任务把进度作为一类
 	// RuntimeEvent 贯通到 SSE。载荷置于 Event.Payload（*JobProgress），SSE sink 自动透传。
@@ -78,6 +82,8 @@ type Redaction struct {
 
 // Event is emitted by the runtime state machine.
 type Event struct {
+	// ID 仅在必要事实已持久提交后分配；临时 token 不获得恢复游标。
+	ID           string
 	Version      string
 	Type         EventType
 	RunID        string
@@ -89,11 +95,10 @@ type Event struct {
 	TraceID      string
 	SpanID       string
 	ParentSpanID string
+	AttemptID    string
 
-	// State 是运行时**仍在演进的活状态指针**，仅在 emit 回调期间有效。
-	// emit 为同步调用：sink 在回调内读取/Snapshot 是安全的；若需在回调返回后保留或
-	// 异步读取，**必须先 State.Snapshot() 取独立副本**，否则与后续步边界写入构成 data race。
-	// 只需标量视图（Turn/Final/计数）时优先用 StateSummary（已是安全的值拷贝）。
+	// State 是执行核在事件边界产生的只读投影，不传递活跃 RunState。
+	// 数据容器独立，宿主资源句柄遵循 Snapshot 的只读借用合同；标量观察优先 StateSummary。
 	State        *State
 	StateSummary StateSummary
 	Response     *llm.CompletionResponse
@@ -127,5 +132,5 @@ func emit(ctx context.Context, sink EventSink, event Event) error {
 	if sink == nil {
 		return nil
 	}
-	return sink.Emit(ctx, event)
+	return invokeExtension("event_sink", func() error { return sink.Emit(ctx, event) })
 }

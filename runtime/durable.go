@@ -1,11 +1,14 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon/checkpoint"
+	"github.com/hexagon-codes/hexagon/interrupt"
 )
 
 // Snapshot 是一次执行在某个步边界上的持久化状态。
@@ -14,6 +17,10 @@ import (
 // 累计用量与终止信息。Reasoning、Attributes 等运行期派生/易变数据不入快照，以免把
 // 易变细节固化进持久化格式、并降低与具体执行实现的耦合。
 type Snapshot struct {
+	Phase ExecutionPhase `json:"phase,omitempty"`
+	// Spec 与 Codec 固定在途配置及状态编码；nil/零值保留旧检查点读取路径。
+	Spec  *RunSpec   `json:"spec,omitempty"`
+	Codec StateCodec `json:"codec,omitempty"`
 	// RunID 标识一次执行，同时作为持久化命名空间。
 	RunID string `json:"run_id"`
 	// Step 快照所在的步边界（对应 State.Turn）。
@@ -27,15 +34,29 @@ type Snapshot struct {
 	ToolCalls []ToolCallRecord `json:"tool_calls,omitempty"`
 	// Usage 截至本步的累计 token 用量（计量维度）。
 	Usage llm.Usage `json:"usage"`
+	// UsageReportedCalls 与 UsageMissingCalls 保留实际模型调用的回执完整性，恢复后不重新计数。
+	UsageReportedCalls        int `json:"usage_reported_calls,omitempty"`
+	UsageMissingCalls         int `json:"usage_missing_calls,omitempty"`
+	UsagePartialCalls         int `json:"usage_partial_calls,omitempty"`
+	UsageKnownTokenLowerBound int `json:"usage_known_token_lower_bound,omitempty"`
 	// Final 标记执行是否已得出最终答案。
 	Final bool `json:"final,omitempty"`
 	// FinalText 最终答案文本（Final 为真时有效）。
-	FinalText string `json:"final_text,omitempty"`
+	FinalText             string          `json:"final_text,omitempty"`
+	StopReason            StopReason      `json:"stop_reason,omitempty"`
+	ModelFinishReason     string          `json:"model_finish_reason,omitempty"`
+	MessageRevision       uint64          `json:"message_revision,omitempty"`
+	AppliedContextUpdates map[string]bool `json:"applied_context_updates,omitempty"`
+	Structured            json.RawMessage `json:"structured,omitempty"`
+	Tools                 *ToolSnapshot   `json:"tools,omitempty"`
 	// Pending 非空表示这是一个「步内意图快照」：该步的工具调用已发起但尚未确认全部
 	// 完成（崩溃窗口）。它记录这些工具的重放安全性，供 Resume 判定能否安全续跑——
 	// 含 Unsafe 工具时 Resume fail-closed（ErrUnsafeReplay），全部可重放安全时重跑该步。
 	// 步正常完成后的完成快照不带 Pending（同步号覆盖意图快照）。
 	Pending []PendingTool `json:"pending,omitempty"`
+	// PendingToolCallStart 是本步工具在累计 ToolCalls 中的起点；nil 表示旧快照。
+	PendingToolCallStart *int                       `json:"pending_tool_call_start,omitempty"`
+	Waiting              *interrupt.PersistedSignal `json:"waiting,omitempty"`
 }
 
 // ToolSideEffect 声明一次工具调用在「崩溃后重放」语义下的安全性。
@@ -70,7 +91,7 @@ type PendingTool struct {
 
 // UnsafeNotDone 报告一组待确认工具中，是否存在「尚未完成且不可安全重放」的工具。
 //
-// doneIDs 是快照里已完成（结果已记录）的工具调用 ID 集合。已完成的工具即使是 Unsafe
+// doneIDs 是当前 Pending 所属步内已完成的工具调用 ID 集合，不包含此前轮次。已完成的工具即使是 Unsafe
 // 也可安全跳过（副作用已发生且已记录）；只有尚未完成的 Unsafe 工具才需 fail-closed
 // （无法确定其副作用是否已发生）。这把 fail-closed 窗口从「整步含任一 Unsafe」收窄到
 // 「真正在途的那个 Unsafe」。
@@ -86,22 +107,85 @@ func UnsafeNotDone(pending []PendingTool, doneIDs map[string]bool) bool {
 	return false
 }
 
+// pendingToolRecordStart 为旧快照从最近工具消息组恢复本步范围，不能用历史同 ID 代替本步结果。
+func pendingToolRecordStart(s Snapshot) int {
+	if s.PendingToolCallStart != nil && *s.PendingToolCallStart >= 0 && *s.PendingToolCallStart <= len(s.ToolCalls) {
+		return *s.PendingToolCallStart
+	}
+	if s.Step == 0 {
+		return 0
+	}
+	for i := len(s.Messages) - 1; i >= 0; i-- {
+		message := s.Messages[i]
+		if message.Role != llm.RoleAssistant {
+			continue
+		}
+		if len(message.ToolCalls) != len(s.Pending) {
+			return len(s.ToolCalls)
+		}
+		ids := make(map[string]bool, len(s.Pending))
+		for index, pending := range s.Pending {
+			ref := message.ToolCalls[index]
+			if ref.ID != pending.Call.ID || ref.Name != pending.Call.Name || ref.Arguments != pending.Call.Arguments {
+				return len(s.ToolCalls)
+			}
+			ids[ref.ID] = true
+		}
+		completed := make(map[string]bool)
+		for _, result := range s.Messages[i+1:] {
+			if result.Role == llm.RoleTool && ids[result.ToolCallID] {
+				completed[result.ToolCallID] = true
+			}
+		}
+		if len(completed) <= len(s.ToolCalls) {
+			return len(s.ToolCalls) - len(completed)
+		}
+		break
+	}
+	return len(s.ToolCalls)
+}
+
+func pendingCompletedToolIDs(s Snapshot) map[string]bool {
+	done := make(map[string]bool)
+	for index := pendingToolRecordStart(s); index < len(s.ToolCalls); index++ {
+		record := &s.ToolCalls[index]
+		if record.ID != "" {
+			if !record.Result.NeedsReconciliation {
+				done[record.ID] = true
+			}
+		}
+	}
+	return done
+}
+
 // SnapshotState 从运行时 State 抽取当前步的 Snapshot。runID 标识本次执行。
 //
-// 切片做浅拷贝快照，避免与仍在演进的 State 共享底层数组。
+// 消息及协议续传字节独立复制，避免与仍在演进的 State 共享可变存储。
 func SnapshotState(state *State, runID string) Snapshot {
 	if state == nil {
 		return Snapshot{RunID: runID}
 	}
 	snapshot := Snapshot{
-		RunID:     runID,
-		Step:      state.Turn,
-		Messages:  append([]llm.Message(nil), state.Messages...),
-		ToolCalls: append([]ToolCallRecord(nil), state.ToolCalls...),
-		Usage:     state.Usage,
-		Final:     state.Final,
-		FinalText: state.FinalText,
+		Phase:                 state.phase,
+		RunID:                 runID,
+		Step:                  state.Turn,
+		Messages:              CloneOutputMessages(state.Messages),
+		ToolCalls:             append([]ToolCallRecord(nil), state.ToolCalls...),
+		Usage:                 state.Usage,
+		Final:                 state.Final,
+		FinalText:             state.FinalText,
+		StopReason:            state.stopReason,
+		ModelFinishReason:     state.modelFinishReason,
+		MessageRevision:       state.MessageRevision,
+		AppliedContextUpdates: cloneUpdateIDs(state.appliedContextUpdates),
+		Structured:            append(json.RawMessage(nil), state.structured...),
+		Tools:                 cloneRuntimeToolSnapshot(state.toolSnapshot),
+		Waiting:               clonePersistedSignal(state.waitingSaved),
 	}
+	snapshot.UsageReportedCalls = usageCount(state.Attributes, UsageReportedCallsMetadataKey)
+	snapshot.UsageMissingCalls = usageCount(state.Attributes, UsageMissingCallsMetadataKey)
+	snapshot.UsagePartialCalls = usageCount(state.Attributes, UsagePartialCallsMetadataKey)
+	snapshot.UsageKnownTokenLowerBound = usageCount(state.Attributes, UsageKnownTokenLowerBoundMetadataKey)
 	if state.outputMessages != nil {
 		messages := cloneOutputMessages(state.outputMessages)
 		snapshot.OutputMessages = &messages
@@ -115,16 +199,35 @@ func SnapshotState(state *State, runID string) Snapshot {
 // 等运行期属性在恢复后的首次调用时重新填充）。
 func (s Snapshot) RestoreState() *State {
 	state := &State{
-		Turn:       s.Step,
-		Messages:   append([]llm.Message(nil), s.Messages...),
-		ToolCalls:  append([]ToolCallRecord(nil), s.ToolCalls...),
-		Usage:      s.Usage,
-		Final:      s.Final,
-		FinalText:  s.FinalText,
-		Attributes: map[string]any{},
+		phase:                 s.Phase,
+		Turn:                  s.Step,
+		Messages:              CloneOutputMessages(s.Messages),
+		ToolCalls:             append([]ToolCallRecord(nil), s.ToolCalls...),
+		Usage:                 s.Usage,
+		Final:                 s.Final,
+		FinalText:             s.FinalText,
+		stopReason:            s.StopReason,
+		modelFinishReason:     s.ModelFinishReason,
+		MessageRevision:       s.MessageRevision,
+		appliedContextUpdates: cloneUpdateIDs(s.AppliedContextUpdates),
+		structured:            append(json.RawMessage(nil), s.Structured...),
+		toolSnapshot:          cloneRuntimeToolSnapshot(s.Tools),
+		Attributes:            map[string]any{},
+		waitingSaved:          clonePersistedSignal(s.Waiting),
+	}
+	if len(s.Pending) > 0 {
+		state.pendingToolStart = pendingToolRecordStart(s)
 	}
 	if s.OutputMessages != nil {
 		state.outputMessages = cloneOutputMessages(*s.OutputMessages)
+	}
+	if s.UsageReportedCalls > 0 || s.UsageMissingCalls > 0 {
+		state.setUsageEvidence(s.UsageReportedCalls, s.UsageMissingCalls)
+	}
+	state.Attributes[UsagePartialCallsMetadataKey] = s.UsagePartialCalls
+	state.Attributes[UsageKnownTokenLowerBoundMetadataKey] = s.UsageKnownTokenLowerBound
+	if s.UsagePartialCalls > 0 && s.UsageMissingCalls == 0 {
+		state.Attributes[UsageSourceMetadataKey] = "partial"
 	}
 	return state
 }
@@ -139,6 +242,8 @@ func (s Snapshot) RestoreState() *State {
 //   - Save 后置：随后对同一 RunID 的 Load 返回该 RunID 上最近一次成功 Save 的快照。
 //   - 幂等：以 (RunID, Step) 为持久化键，同一步重复 Save 覆盖该步快照。
 //   - Load 后置：命名空间无任何快照时 ok=false、err=nil。
+//   - 消息中的 ProviderContinuation 只用于私有恢复，标准消息 JSON 不包含它；自定义
+//     实现需显式保存该字段并保持消息位置及调用归属，不能把它写入公开响应或日志。
 //
 // DurableExecution 面向执行、checkpoint.Checkpointer 面向存储，前者用后者落地，
 // 二者职责分离、各自可替换。
@@ -152,6 +257,63 @@ type DurableExecution interface {
 // checkpointDurable 是 DurableExecution 的默认实现，委托给框架唯一的 checkpoint.Checkpointer。
 type checkpointDurable struct {
 	cp checkpoint.Checkpointer
+}
+
+// 检查点内部封装显式保存续传内容，公开 Snapshot/Message JSON 仍不暴露该字段。
+// 内嵌 Snapshot 保持已有检查点的扁平字段，旧记录可直接读取。
+type durableSnapshotEnvelope struct {
+	Snapshot
+	MessageContinuations []durableMessageContinuation `json:"message_continuations,omitempty"`
+	OutputContinuations  []durableMessageContinuation `json:"output_continuations,omitempty"`
+}
+
+type durableMessageContinuation struct {
+	Index        int                       `json:"index"`
+	Role         llm.Role                  `json:"role"`
+	ToolCallID   string                    `json:"tool_call_id,omitempty"`
+	ToolCallIDs  []string                  `json:"tool_call_ids,omitempty"`
+	Continuation *llm.ProviderContinuation `json:"continuation"`
+}
+
+func snapshotContinuations(messages []llm.Message) []durableMessageContinuation {
+	var continuations []durableMessageContinuation
+	for i, message := range messages {
+		if message.ProviderContinuation == nil {
+			continue
+		}
+		entry := durableMessageContinuation{
+			Index:        i,
+			Role:         message.Role,
+			ToolCallID:   message.ToolCallID,
+			Continuation: message.ProviderContinuation.Clone(),
+		}
+		for _, call := range message.ToolCalls {
+			entry.ToolCallIDs = append(entry.ToolCallIDs, call.ID)
+		}
+		continuations = append(continuations, entry)
+	}
+	return continuations
+}
+
+func restoreContinuations(messages []llm.Message, continuations []durableMessageContinuation) error {
+	seen := make(map[int]bool, len(continuations))
+	for _, entry := range continuations {
+		if entry.Index < 0 || entry.Index >= len(messages) || seen[entry.Index] || entry.Continuation == nil {
+			return fmt.Errorf("runtime: invalid checkpoint continuation position")
+		}
+		message := &messages[entry.Index]
+		if message.Role != llm.RoleAssistant || message.Role != entry.Role || message.ToolCallID != entry.ToolCallID || len(message.ToolCalls) != len(entry.ToolCallIDs) {
+			return fmt.Errorf("runtime: checkpoint continuation message identity differs")
+		}
+		for i, call := range message.ToolCalls {
+			if call.ID != entry.ToolCallIDs[i] {
+				return fmt.Errorf("runtime: checkpoint continuation tool identity differs")
+			}
+		}
+		seen[entry.Index] = true
+		message.ProviderContinuation = entry.Continuation.Clone()
+	}
+	return nil
 }
 
 // NewDurableExecution 用给定的 Checkpointer 构造默认 DurableExecution。
@@ -171,14 +333,93 @@ func (d checkpointDurable) Save(ctx context.Context, snap Snapshot) error {
 	if snap.RunID == "" {
 		return fmt.Errorf("runtime: DurableExecution.Save requires a non-empty RunID")
 	}
-	return checkpoint.PutValue(ctx, d.cp, checkpoint.Checkpoint{
+	data, err := EncodeSnapshot(snap)
+	if err != nil {
+		return err
+	}
+	return d.cp.Put(ctx, checkpoint.Checkpoint{
 		Namespace: snap.RunID,
 		ID:        snapshotID(snap.Step),
 		Metadata:  map[string]string{"step": snapshotID(snap.Step)},
-	}, snap)
+		Payload:   data,
+	})
 }
 
 func (d checkpointDurable) Load(ctx context.Context, runID string) (Snapshot, bool, error) {
-	snap, _, ok, err := checkpoint.LatestValue[Snapshot](ctx, d.cp, runID)
-	return snap, ok, err
+	stored, ok, err := d.cp.Latest(ctx, runID)
+	if err != nil || !ok {
+		return Snapshot{}, ok, err
+	}
+	snapshot, err := DecodeSnapshot(stored.Payload)
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	if snapshot.RunID != runID {
+		return Snapshot{}, false, fmt.Errorf("runtime: checkpoint run identity mismatch")
+	}
+	return snapshot, true, nil
+}
+
+// EncodeSnapshot 是检查点与事务适配共同使用的私有状态编码，显式保留 continuation。
+func EncodeSnapshot(snap Snapshot) ([]byte, error) {
+	if snap.RunID == "" {
+		return nil, fmt.Errorf("runtime: snapshot run ID is required")
+	}
+	if snap.Spec != nil {
+		if err := snap.Spec.Validate(); err != nil {
+			return nil, err
+		}
+		if snap.Spec.RunID != snap.RunID {
+			return nil, ErrUnrecoverableSpec
+		}
+	}
+	envelope := durableSnapshotEnvelope{Snapshot: snap, MessageContinuations: snapshotContinuations(snap.Messages)}
+	if snap.OutputMessages != nil {
+		envelope.OutputContinuations = snapshotContinuations(*snap.OutputMessages)
+	}
+	return json.Marshal(envelope)
+}
+
+// DecodeSnapshot 只读取快照，不把损坏或不支持的格式当作首次运行。
+func DecodeSnapshot(data []byte) (Snapshot, error) {
+	if !json.Valid(data) {
+		return Snapshot{}, fmt.Errorf("runtime: invalid snapshot JSON")
+	}
+	var envelope durableSnapshotEnvelope
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&envelope); err != nil {
+		return Snapshot{}, err
+	}
+	if envelope.RunID == "" {
+		return Snapshot{}, fmt.Errorf("runtime: snapshot run ID is missing")
+	}
+	switch envelope.Phase {
+	case "", PhaseBeforeModel, PhasePendingTools, PhaseAfterTurn, PhaseFinal:
+	default:
+		return Snapshot{}, fmt.Errorf("%w: unknown execution phase", ErrUnrecoverableSpec)
+	}
+	if envelope.Codec != (StateCodec{}) && envelope.Codec != (StateCodec{Type: "runtime.Snapshot", Version: SnapshotCodecVersion}) {
+		return Snapshot{}, ErrUnrecoverableSpec
+	}
+	if envelope.Spec != nil {
+		if err := envelope.Spec.Validate(); err != nil {
+			return Snapshot{}, err
+		}
+		if envelope.Spec.RunID != envelope.RunID {
+			return Snapshot{}, ErrUnrecoverableSpec
+		}
+	}
+	if err := restoreContinuations(envelope.Messages, envelope.MessageContinuations); err != nil {
+		return Snapshot{}, err
+	}
+	if envelope.OutputMessages == nil && len(envelope.OutputContinuations) != 0 {
+		return Snapshot{}, fmt.Errorf("runtime: checkpoint continuation output is missing")
+	}
+	if envelope.OutputMessages != nil {
+		if err := restoreContinuations(*envelope.OutputMessages, envelope.OutputContinuations); err != nil {
+			return Snapshot{}, err
+		}
+	}
+	return envelope.Snapshot, nil
 }

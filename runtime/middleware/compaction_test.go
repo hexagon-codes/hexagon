@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -72,9 +73,9 @@ func TestCompaction_CustomCompactor(t *testing.T) {
 	c := Compaction{
 		MaxTokens: 1,
 		Count:     func([]llm.Message) int { return 999 }, // 强制超阈值
-		Compact: func(_ context.Context, m []llm.Message) []llm.Message {
+		Compact: func(_ context.Context, m []llm.Message) ([]llm.Message, error) {
 			called = true
-			return m[:1] // 自定义：只留第一条
+			return m[:1], nil // 自定义：只留第一条
 		},
 	}
 	st := &hruntime.State{Messages: msgs(10), Attributes: map[string]any{}}
@@ -89,6 +90,40 @@ func TestCompaction_CustomCompactor(t *testing.T) {
 	}
 }
 
+// 压缩失败或取消时，候选消息及其中的修改不得覆盖原始历史。
+func TestCompaction_FailurePreservesHistory(t *testing.T) {
+	failure := errors.New("summary unavailable")
+	for _, cancel := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled_%v", cancel), func(t *testing.T) {
+			ctx, stop := context.WithCancel(t.Context())
+			defer stop()
+			original := msgs(3)
+			state := &hruntime.State{Messages: original}
+			c := Compaction{
+				MaxTokens: 1,
+				Compact: func(_ context.Context, candidate []llm.Message) ([]llm.Message, error) {
+					candidate[0].Content = "modified candidate"
+					if cancel {
+						stop()
+						return candidate[:1], nil
+					}
+					return nil, failure
+				},
+			}
+			wantErr := failure
+			if cancel {
+				wantErr = context.Canceled
+			}
+			if err := c.BeforeLLM(ctx, state); !errors.Is(err, wantErr) {
+				t.Fatalf("error = %v, want %v", err, wantErr)
+			}
+			if !reflect.DeepEqual(state.Messages, msgs(3)) {
+				t.Fatal("failed compaction changed original history")
+			}
+		})
+	}
+}
+
 // 自定义触发条件保留应用既有阈值口径，不启用额外 token 预算。
 func TestCompaction_CustomTrigger(t *testing.T) {
 	for _, trigger := range []bool{false, true} {
@@ -96,9 +131,9 @@ func TestCompaction_CustomTrigger(t *testing.T) {
 			called := false
 			c := Compaction{
 				ShouldCompact: func([]llm.Message) bool { return trigger },
-				Compact: func(_ context.Context, messages []llm.Message) []llm.Message {
+				Compact: func(_ context.Context, messages []llm.Message) ([]llm.Message, error) {
 					called = true
-					return messages[:1]
+					return messages[:1], nil
 				},
 			}
 			st := &hruntime.State{Messages: msgs(3)}

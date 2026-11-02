@@ -119,6 +119,28 @@ func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context
 	return ctx
 }
 
+// IsResumeRequested 查询原始中断身份是否被本次定向恢复选中，不消费恢复数据。
+func IsResumeRequested(ctx context.Context, interruptID string) bool {
+	gri := getGlobalResumeInfo(ctx)
+	if gri == nil {
+		return false
+	}
+	gri.mu.Lock()
+	defer gri.mu.Unlock()
+	_, ok := gri.id2ResumeData[interruptID]
+	return ok
+}
+
+// ResumeTargetID 返回当前地址精确命中的目标，包括无载荷的恢复。
+// 仅为后代目标充当祖先的上下文返回空；命中不等于持久消费，任务采用后才能消费。
+func ResumeTargetID(ctx context.Context) (string, bool) {
+	address := getAddrCtx(ctx)
+	if address == nil || address.resumeTargetID == "" {
+		return "", false
+	}
+	return address.resumeTargetID, true
+}
+
 // ============== 泛型状态访问 ==============
 
 // GetInterruptState 获取中断时保存的组件状态

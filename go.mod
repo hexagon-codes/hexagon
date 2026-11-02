@@ -1,20 +1,34 @@
 module github.com/hexagon-codes/hexagon
 
-go 1.25.13
+go 1.26.10
 
 retract [v0.5.10, v0.5.11]
 
 require (
-	github.com/hexagon-codes/ai-core v0.2.12
-	github.com/hexagon-codes/toolkit v0.3.5
+	github.com/hexagon-codes/ai-core v0.3.0
+	github.com/hexagon-codes/toolkit v0.3.7
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/redis/go-redis/v9 v9.18.0
-	golang.org/x/net v0.54.0
-	golang.org/x/sync v0.21.0
+	golang.org/x/image v0.44.0
+	golang.org/x/net v0.60.0
+	golang.org/x/sync v0.23.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
+	github.com/coder/websocket v1.8.15 // indirect
+	github.com/openai/openai-go/v3 v3.91.0 // indirect
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
+	github.com/tidwall/gjson v1.19.0 // indirect
+	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/pretty v1.2.1 // indirect
+	github.com/tidwall/sjson v1.2.5 // indirect
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
+)
+
+require (
+	github.com/a2aproject/a2a-go/v2 v2.7.0
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
@@ -31,9 +45,9 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/crypto v0.52.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/time v0.8.0 // indirect
-	google.golang.org/protobuf v1.36.8 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 )
