@@ -6,6 +6,10 @@
 
 ### Fixed
 
+- core Retry/Fallback和Workflow步骤统一遵守中断、取消及未知结果的不可重放分类；Future并行组合保留完整错误树和结果，框架异步回调panic转为含栈失败。图的并行纯等待保存全部目标，StateMachine在取消边界停止新派发。
+- Agent/Team流转换复用逐元素适配器的关闭与错误传播；同一Input的文本增量可按序Collect，Context冲突明确返回。结构化修正先核对模型非正常终态，保留原原因和已知用量。
+- Artifact自动身份基于完整元组生成，避免会话/名称斜杠碰撞；A2A重复创建先查重，任务移动同步索引，配置存取隔离且只构造实际需要的默认存储；阻塞Handler不以Working静默结束SSE。
+- MCP导入及导出保留Schema额外关键字；评估StopOnError停止后续派发，CustomEvaluator保留失败中的部分结果。同步事件、数值、子结果及未注册Concat的既有测试合同。
 - A2A 任务存取和历史投影统一传播可失败复制的错误；不能隔离的值不被插入、覆盖或成功投影，失败创建不淘汰已有任务；常规 typed 数据、时间和大整数保持可用。
 
 - MapReduce、Pregel 超级步与 Workflow ParallelStep 收敛分支事实并传递完整错误树，纯等待与混合失败分开决议；并行 ForEach 在实际 worker 中捕获 panic，保留普通失败重试及正常取消合同。
@@ -31,6 +35,8 @@
 
 ### BREAKING
 
+- **Agent工具结果与动态数字**：AgentAsTool的Output为ChildRunResult，读取Child.Output.Content或ModelToolContent()；Memory Store动态JSON数值为json.Number，Go消费者调整float64断言并按需显式转换。JSON数值字面保持精度，完整子结果不再压成字符串。
+- **自动产物ID**：新ID是不透明的完整元组身份；版本从Version字段读取。旧ID原样可读，显式ID的既有保存选择保持。
 - **图状态复制**：`graph.State.Clone()` 改为 `(State, error)`；自定义状态和调用方必须处理复制错误，不能回退为共享可变引用。完整 `State` 返回值与声明写集分开，并行完整状态汇合需配置明确的 `StateMerger`，不能依赖最后完成者覆盖。
 - **图模式**：默认构建模式为 DAG；循环图在 `Build` 前调用 `WithExecutionMode(GraphModePregel)`，需要时同时指定 `WithTriggerMode`。`RunPregelMode` 不再用于事后改变已编译模式；Run、Stream 与恢复消费同一计划。普通出边全部参与分发，一条路径到达 END 不代表全部分支结束。
 - **压缩回调**：`middleware.Compactor` 改为 `func(context.Context, []llm.Message) ([]llm.Message, error)`。回调显式返回错误；`BeforeLLM` 保持中间件入口合同，向 Runner 透传错误，失败消息不被采用，原消息及实际摘要用量保留。
