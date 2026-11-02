@@ -11,10 +11,12 @@ import (
 // UsageAccumulator 由同一运行及其嵌套调用共享，只累计使用量，不决定预算政策。
 // 零值可用；首次记录token时开始计时。实例开始使用后不得复制。
 type UsageAccumulator struct {
-	tokens       atomic.Int64
-	microDollars atomic.Int64
-	started      atomic.Int64
-	startOnce    sync.Once
+	tokens        atomic.Int64
+	microDollars  atomic.Int64
+	costMu        sync.Mutex
+	costRemainder float64
+	started       atomic.Int64
+	startOnce     sync.Once
 }
 
 // UsageSnapshot 是一组无共享可变引用的计量读数，不承诺跨字段事务快照。
@@ -32,7 +34,17 @@ func (u *UsageAccumulator) RecordTokens(tokens int) {
 
 // RecordCost 以微美元精度累计调用方提供的费用，不包含定价或持久化。
 func (u *UsageAccumulator) RecordCost(costUSD float64) {
-	u.microDollars.Add(int64(math.Round(costUSD * 1_000_000)))
+	u.costMu.Lock()
+	defer u.costMu.Unlock()
+	u.recordCost(costUSD)
+}
+
+// recordCost 保留小于记账单位的余量，不因逐笔舍入永久丢失费用。
+func (u *UsageAccumulator) recordCost(costUSD float64) {
+	exact := costUSD*1_000_000 + u.costRemainder
+	whole := math.Round(exact)
+	u.costRemainder = exact - whole
+	u.microDollars.Add(int64(whole))
 }
 
 // Snapshot 返回当前计量；未开始时StartedAt为零值。
@@ -65,7 +77,15 @@ func (u *UsageAccumulator) CheckLimits(maxTokens int64, maxDuration time.Duratio
 // 本方法不建立分配关系；分配／归还政策由持有者负责。
 func (u *UsageAccumulator) RefundUnused(tokens int64, costUSD float64) {
 	refundUsage(&u.tokens, tokens)
-	refundUsage(&u.microDollars, int64(math.Round(costUSD*1_000_000)))
+	if costUSD > 0 {
+		u.costMu.Lock()
+		defer u.costMu.Unlock()
+		u.recordCost(-costUSD)
+		if value := u.microDollars.Load(); value < 0 || (value == 0 && u.costRemainder < 0) {
+			u.microDollars.Store(0)
+			u.costRemainder = 0
+		}
+	}
 }
 
 func refundUsage(counter *atomic.Int64, amount int64) {
