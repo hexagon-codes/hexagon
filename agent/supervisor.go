@@ -304,23 +304,10 @@ func (s *SupervisorAgent) Collect(ctx context.Context, input *stream.StreamReade
 
 // Transform 转换流
 func (s *SupervisorAgent) Transform(ctx context.Context, input *stream.StreamReader[Input], opts ...core.Option) (*stream.StreamReader[Output], error) {
-	reader, writer := stream.Pipe[Output](10)
-	go func() {
-		defer writer.Close()
-		for {
-			in, err := input.Recv()
-			if err != nil {
-				return
-			}
-			result, err := s.Run(ctx, in)
-			if err != nil {
-				writer.CloseWithError(err)
-				return
-			}
-			writer.Send(result)
-		}
-	}()
-	return reader, nil
+	runnable := core.NewRunnable(s.Name(), s.Description(), func(ctx context.Context, in Input, _ ...core.Option) (Output, error) {
+		return s.Run(ctx, in)
+	})
+	return core.MapEach(runnable).Transform(ctx, input, opts...)
 }
 
 // BatchStream 批量流式执行

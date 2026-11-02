@@ -202,23 +202,10 @@ func (a *SequentialAgent) Collect(ctx context.Context, input *stream.StreamReade
 
 // Transform 转换流
 func (a *SequentialAgent) Transform(ctx context.Context, input *stream.StreamReader[Input], opts ...core.Option) (*stream.StreamReader[Output], error) {
-	reader, writer := stream.Pipe[Output](10)
-	go func() {
-		defer writer.Close()
-		for {
-			in, err := input.Recv()
-			if err != nil {
-				return
-			}
-			result, err := a.Run(ctx, in)
-			if err != nil {
-				writer.CloseWithError(err)
-				return
-			}
-			writer.Send(result)
-		}
-	}()
-	return reader, nil
+	runnable := core.NewRunnable(a.Name(), a.Description(), func(ctx context.Context, in Input, _ ...core.Option) (Output, error) {
+		return a.Run(ctx, in)
+	})
+	return core.MapEach(runnable).Transform(ctx, input, opts...)
 }
 
 // BatchStream 批量流式执行
@@ -413,23 +400,10 @@ func (a *ParallelAgent) Collect(ctx context.Context, input *stream.StreamReader[
 
 // Transform 转换流
 func (a *ParallelAgent) Transform(ctx context.Context, input *stream.StreamReader[Input], opts ...core.Option) (*stream.StreamReader[Output], error) {
-	reader, writer := stream.Pipe[Output](10)
-	go func() {
-		defer writer.Close()
-		for {
-			in, err := input.Recv()
-			if err != nil {
-				return
-			}
-			result, err := a.Run(ctx, in)
-			if err != nil {
-				writer.CloseWithError(err)
-				return
-			}
-			writer.Send(result)
-		}
-	}()
-	return reader, nil
+	runnable := core.NewRunnable(a.Name(), a.Description(), func(ctx context.Context, in Input, _ ...core.Option) (Output, error) {
+		return a.Run(ctx, in)
+	})
+	return core.MapEach(runnable).Transform(ctx, input, opts...)
 }
 
 // BatchStream 批量流式执行
@@ -616,23 +590,10 @@ func (a *LoopAgent) Collect(ctx context.Context, input *stream.StreamReader[Inpu
 
 // Transform 转换流
 func (a *LoopAgent) Transform(ctx context.Context, input *stream.StreamReader[Input], opts ...core.Option) (*stream.StreamReader[Output], error) {
-	reader, writer := stream.Pipe[Output](10)
-	go func() {
-		defer writer.Close()
-		for {
-			in, err := input.Recv()
-			if err != nil {
-				return
-			}
-			result, err := a.Run(ctx, in)
-			if err != nil {
-				writer.CloseWithError(err)
-				return
-			}
-			writer.Send(result)
-		}
-	}()
-	return reader, nil
+	runnable := core.NewRunnable(a.Name(), a.Description(), func(ctx context.Context, in Input, _ ...core.Option) (Output, error) {
+		return a.Run(ctx, in)
+	})
+	return core.MapEach(runnable).Transform(ctx, input, opts...)
 }
 
 // BatchStream 批量流式执行
