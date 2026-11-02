@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math/big"
 	"mime"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -23,6 +25,25 @@ type wireSchemas struct {
 	pending map[string]bool
 }
 
+// wireIDKey 保留标识类型，并按精确数值归一化等值整数表示。
+func wireIDKey(raw json.RawMessage) string {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) != nil {
+		return ""
+	}
+	switch id := value.(type) {
+	case string:
+		return "s:" + id
+	case json.Number:
+		if number, ok := new(big.Rat).SetString(id.String()); ok && number.IsInt() {
+			return "n:" + number.RatString()
+		}
+	}
+	return ""
+}
+
 // request只登记tools/list的真实请求身份，不记录业务请求载荷。
 func (w *wireSchemas) request(data []byte) string {
 	var request struct {
@@ -32,7 +53,10 @@ func (w *wireSchemas) request(data []byte) string {
 	if json.Unmarshal(data, &request) != nil || request.Method != "tools/list" || len(request.ID) == 0 {
 		return ""
 	}
-	id := string(bytes.TrimSpace(request.ID))
+	id := wireIDKey(request.ID)
+	if id == "" {
+		return ""
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.pending == nil {
@@ -59,7 +83,7 @@ func (w *wireSchemas) capture(data []byte) {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	id := string(bytes.TrimSpace(response.ID))
+	id := wireIDKey(response.ID)
 	if response.Method != "" || !w.pending[id] {
 		return
 	}
@@ -134,9 +158,15 @@ func (t *schemaHTTPTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	}
 	if err == nil && response.Body != nil {
 		mediaType, _, parseErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
-		if parseErr == nil && (mediaType == "application/json" || mediaType == "text/event-stream") {
-			response.Body = &schemaResponseBody{ReadCloser: response.Body, schemas: t.schemas, sse: mediaType == "text/event-stream"}
+		capture := parseErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 && (mediaType == "application/json" || mediaType == "text/event-stream")
+		if response.StatusCode >= 300 {
+			t.schemas.forget(id)
 		}
+		// 202可能由后续独立SSE返回结果，不能因接纳响应结束而删除其身份。
+		if response.StatusCode == http.StatusAccepted {
+			id = ""
+		}
+		response.Body = &schemaResponseBody{ReadCloser: response.Body, schemas: t.schemas, sse: mediaType == "text/event-stream", requestID: id, captured: !capture}
 	}
 	return response, err
 }
@@ -149,6 +179,16 @@ type schemaResponseBody struct {
 	event     []byte
 	eventName string
 	captured  bool
+	requestID string
+	resumable atomic.Bool
+}
+
+func (b *schemaResponseBody) Close() error {
+	err := b.ReadCloser.Close()
+	if !b.resumable.Load() {
+		b.schemas.forget(b.requestID)
+	}
+	return err
 }
 
 func (b *schemaResponseBody) dispatch() {
@@ -169,6 +209,10 @@ func (b *schemaResponseBody) line(line []byte) {
 		return
 	}
 	switch string(field) {
+	case "id":
+		if len(bytes.TrimSpace(value)) > 0 {
+			b.resumable.Store(true)
+		}
 	case "event":
 		b.eventName = strings.TrimSpace(string(value))
 	case "data":
@@ -205,6 +249,9 @@ func (b *schemaResponseBody) Read(p []byte) (int, error) {
 			b.pending = nil
 			b.captured = true
 		}
+	}
+	if err != nil && !b.resumable.Load() {
+		b.schemas.forget(b.requestID)
 	}
 	return n, err
 }

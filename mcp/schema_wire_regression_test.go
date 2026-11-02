@@ -8,6 +8,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,9 +16,23 @@ import (
 func TestMCPWireSchemaMatchesAcceptedResponse(t *testing.T) {
 	// 独立合同使用固定原始JSON，不以适配后的Schema计算期望。
 	raw := json.RawMessage(`{"type":"object","properties":{"n":{"type":"integer","enum":[9007199254740993]}},"required":["n"]}`)
-	for _, mode := range []string{"json", "json-parameter", "sse", "sse-eof-newline", "sse-eof-no-newline", "ignored-event-before-response"} {
+	for _, mode := range []string{"json", "json-parameter", "sse", "sse-eof-newline", "sse-eof-no-newline", "ignored-event-before-response", "json-id-exponent", "sse-resume"} {
 		t.Run(mode, func(t *testing.T) {
+			var resumeMu sync.Mutex
+			var resumeID json.RawMessage
 			host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "GET" && mode == "sse-resume" {
+					if r.Header.Get("Last-Event-ID") != "progress" {
+						t.Error("missing resume identity")
+					}
+					resumeMu.Lock()
+					id := append(json.RawMessage(nil), resumeID...)
+					resumeMu.Unlock()
+					w.Header().Set("Content-Type", "text/event-stream")
+					body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"tools": []any{map[string]any{"name": "exact", "inputSchema": raw}}}})
+					fmt.Fprintf(w, "data: %s\n\n", body)
+					return
+				}
 				if r.Method != "POST" {
 					w.WriteHeader(405)
 					return
@@ -39,8 +54,19 @@ func TestMCPWireSchemaMatchesAcceptedResponse(t *testing.T) {
 				if request.Method == "initialize" {
 					result = map[string]any{"protocolVersion": "2025-11-25", "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]any{"name": "test", "version": "1"}}
 				}
+				if mode == "json-id-exponent" && request.Method != "initialize" {
+					request.ID = append(request.ID, []byte("e0")...)
+				}
+				if mode == "sse-resume" && request.Method != "initialize" {
+					resumeMu.Lock()
+					resumeID = append(json.RawMessage(nil), request.ID...)
+					resumeMu.Unlock()
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprint(w, "id: progress\nretry: 1\n\n")
+					return
+				}
 				body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
-				if request.Method == "initialize" || mode == "json" || mode == "json-parameter" {
+				if request.Method == "initialize" || mode == "json" || mode == "json-parameter" || mode == "json-id-exponent" {
 					contentType := "application/json"
 					if mode == "json-parameter" && request.Method != "initialize" {
 						contentType = `application/json; profile="text/event-stream"`
@@ -66,7 +92,11 @@ func TestMCPWireSchemaMatchesAcceptedResponse(t *testing.T) {
 			defer host.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			tools, closer, err := ConnectMCPServerV2(ctx, &sdk.StreamableClientTransport{Endpoint: host.URL, DisableStandaloneSSE: true, MaxRetries: -1})
+			retries := -1
+			if mode == "sse-resume" {
+				retries = 1
+			}
+			tools, closer, err := ConnectMCPServerV2(ctx, &sdk.StreamableClientTransport{Endpoint: host.URL, DisableStandaloneSSE: true, MaxRetries: retries})
 			if err != nil {
 				t.Fatal(err)
 			}
