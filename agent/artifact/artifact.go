@@ -27,6 +27,7 @@ package artifact
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"slices"
@@ -36,6 +37,12 @@ import (
 
 	"github.com/hexagon-codes/toolkit/util/reflectx"
 )
+
+// VersionID 为完整会话、名称和版本生成稳定的不透明身份；旧ID仍由Get原样读取。
+func VersionID(sessionID, name string, version int) string {
+	key := fmt.Sprintf("%d:%s%d:%s:%d", len(sessionID), sessionID, len(name), name, version)
+	return fmt.Sprintf("art_%x", sha256.Sum256([]byte(key)))
+}
 
 // ErrArtifactConflict 和 ErrAtomicCreateUnsupported 分别表示 ID 冲突和缺少原子创建能力。
 var (
@@ -189,7 +196,7 @@ func (s *Service) Save(ctx context.Context, art Artifact) (string, error) {
 	}
 
 	// 冲突检测：仅当调用方自带 ID 且开启 failOnConflict 时生效。
-	// 自动生成的 ID 形如 session/name/vN，由原子版本分配保证唯一，不会冲突，
+	// 自动ID由完整会话、名称及原子分配的版本生成，元组边界不依赖斜杠分隔，
 	// 故此处只需拦截"用户自带 ID 覆盖已存在 artifact"的情形。
 	if s.failOnConflict && art.ID != "" {
 		creator, ok := s.store.(versionedCreator)
@@ -215,7 +222,7 @@ func (s *Service) Save(ctx context.Context, art Artifact) (string, error) {
 		art.Version = 1
 	}
 	if art.ID == "" {
-		art.ID = fmt.Sprintf("%s/%s/v%d", art.SessionID, art.Name, art.Version)
+		art.ID = VersionID(art.SessionID, art.Name, art.Version)
 	}
 	return s.store.Save(ctx, art)
 }
@@ -337,7 +344,7 @@ func (s *MemoryStore) saveNextVersion(art Artifact, create bool) (string, error)
 	art.Version = maxVersion + 1
 
 	if art.ID == "" {
-		art.ID = fmt.Sprintf("%s/%s/v%d", art.SessionID, art.Name, art.Version)
+		art.ID = VersionID(art.SessionID, art.Name, art.Version)
 	}
 
 	cloned, err := cloneArtifact(&art)

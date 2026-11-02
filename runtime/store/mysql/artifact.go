@@ -65,7 +65,7 @@ func (s *ArtifactStore) save(ctx context.Context, art artifact.Artifact, allocat
 		art.Version = maximum + 1
 	}
 	if art.ID == "" {
-		art.ID = fmt.Sprintf("%s/%s/v%d", art.SessionID, art.Name, art.Version)
+		art.ID = artifact.VersionID(art.SessionID, art.Name, art.Version)
 	}
 	if art.CreatedAt.IsZero() {
 		art.CreatedAt = time.Now().UTC()
