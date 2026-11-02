@@ -2,9 +2,11 @@ package browserruntime
 
 import (
 	"context"
+	"errors"
 	"github.com/hexagon-codes/ai-core/tool"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMCPDriverFailedCreationKeepsNoUnreleasedPage(t *testing.T) {
@@ -74,5 +76,38 @@ func TestMCPDriverUnconfirmedClosePreservesTaskOwnership(t *testing.T) {
 	}
 	if closeCalls != 2 {
 		t.Fatal("completed cleanup was repeated")
+	}
+}
+
+func TestMCPDriverUnconfirmedCreationCleanupDoesNotAllocateAgain(t *testing.T) {
+	calls := 0
+	d := &MCPDriver{ListTools: func(context.Context, string) ([]ToolSchema, error) {
+		return []ToolSchema{{Name: "browser_tabs"}, {Name: "browser_run_code_unsafe"}}, nil
+	}, CallTool: func(_ context.Context, _ string, _ string, args map[string]any) (tool.Result, error) {
+		calls++
+		code, _ := args["code"].(string)
+		if strings.Contains(code, "hexclaw_closed_page") {
+			return tool.NewErrorResult(errors.New("cleanup unavailable")), nil
+		}
+		return tool.NewResult("malformed observation"), nil
+	}}
+	c := New(d, Options{})
+	if err := c.RegisterSession(SessionRef{ID: "s", ServerName: "server", ProfileID: "p", Generation: 1, OwnsBrowser: true}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.Acquire(context.Background(), TaskRef{ID: "first", OwnerID: "owner"}, Target{ProfileID: "p"})
+	var unknown *UnknownCallError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("cleanup uncertainty missing: %v", err)
+	}
+	before := calls
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	_, err = c.Acquire(ctx, TaskRef{ID: "second", OwnerID: "owner"}, Target{ProfileID: "p"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("profile reused before reconciliation: %v", err)
+	}
+	if calls != before {
+		t.Fatal("page allocation repeated after unknown cleanup")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	_ "image/png"  // 注册PNG截图解码器。
 	"math"
 	"strings"
+	"time"
 
 	_ "golang.org/x/image/webp" // 注册WebP截图解码器。
 
@@ -18,7 +19,6 @@ import (
 
 	"github.com/hexagon-codes/hexagon/internal/util"
 	hexagonmcp "github.com/hexagon-codes/hexagon/mcp"
-	"time"
 )
 
 // ToolSchema 是现有MCP服务暴露的工具名称及输入合同。
@@ -670,7 +670,7 @@ func (d *MCPDriver) ClosePage(ctx context.Context, server, pageID string) (coret
 	if err != nil {
 		return coretool.Result{}, err
 	}
-	code := `async (page) => { const context = page.context(); const registry = context[Symbol.for('hexclaw.browser.identity')]; if (!registry) return { hexclaw_closed_page: false, reason:'identity_unavailable' }; const id=` + encoded + `; const target=context.pages().find(p=>registry.pages.get(p)===id); if(!target) return {hexclaw_closed_page: !!registry.closed?.has(id), reason:registry.closed?.has(id)?'already_closed':'identity_not_found'}; if(!target.isClosed()) await target.close(); if(registry.closed) registry.closed.add(id); return {hexclaw_closed_page:true}; }`
+	code := `async (page) => { const context = page.context(); const registry = context[Symbol.for('hexclaw.browser.identity')]; if (!registry) return { hexclaw_closed_page: false, reason:'identity_unavailable' }; const id=` + encoded + `; const target=context.pages().find(p=>registry.pages.get(p)===id || registry.aliases?.get(p)?.has(id)); if(!target) return {hexclaw_closed_page: !!registry.closed?.has(id), reason:registry.closed?.has(id)?'already_closed':'identity_not_found'}; if(!target.isClosed()) await target.close(); if(registry.closed) registry.closed.add(id); return {hexclaw_closed_page:true}; }`
 	result, err := d.call(ctx, server, tool, map[string]any{"code": code})
 	if err != nil {
 		return result, err
