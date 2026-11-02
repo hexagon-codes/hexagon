@@ -41,6 +41,9 @@ type TaskHandler interface {
 	// 返回:
 	//   - TaskUpdate: 任务更新（状态、消息、产物等）
 	//   - error: 处理错误
+	// 阻塞 SendMessage 必须返回终止状态或 input-required/auth-required 等待状态；
+	// 非终态返回会保留有效输出并标记执行失败，通过 InvalidAgentResponse 报告。
+	// Final 仅表达最终更新，不能单独证明任务业务已完成。
 	HandleTask(ctx context.Context, task *Task, msg *Message) (*TaskUpdate, error)
 }
 

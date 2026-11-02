@@ -2,8 +2,9 @@ package a2a
 
 import (
 	"encoding/json"
-	wire "github.com/a2aproject/a2a-go/v2/a2a"
 	"time"
+
+	wire "github.com/a2aproject/a2a-go/v2/a2a"
 )
 
 // ============== Agent Card ==============
@@ -383,7 +384,7 @@ func (p *DataPart) MarshalJSON() ([]byte, error) {
 func UnmarshalPart(data []byte) (Part, error) {
 	var value wire.Part
 	if err := json.Unmarshal(data, &value); err != nil {
-		return nil, err
+		return nil, ErrInvalidMessage
 	}
 	result := localPart(&value)
 	if result == nil {

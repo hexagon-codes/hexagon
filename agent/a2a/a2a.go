@@ -160,6 +160,9 @@ const (
 	// CodeContentTypeNotSupported 不支持的内容类型 (-32005)
 	CodeContentTypeNotSupported = -32005
 
+	// CodeInvalidAgentResponse 表示执行结果不满足当前方法的响应合同 (-32006)。
+	CodeInvalidAgentResponse = -32006
+
 	// CodeAuthenticationRequired 需要认证 (-31401)
 	CodeAuthenticationRequired = -31401
 

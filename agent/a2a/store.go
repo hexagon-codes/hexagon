@@ -2,12 +2,12 @@ package a2a
 
 import (
 	"context"
-	"maps"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/hexagon-codes/hexagon/internal/util"
+	"github.com/hexagon-codes/toolkit/util/reflectx"
 )
 
 // ============== TaskStore 接口 ==============
@@ -242,6 +242,9 @@ func (s *MemoryTaskStore) List(_ context.Context, opts *ListTasksRequest) (*List
 	if opts.Limit > 0 && len(tasks) > opts.Limit {
 		tasks = tasks[:opts.Limit]
 	}
+	for i, task := range tasks {
+		tasks[i] = cloneTask(task)
+	}
 
 	return &ListTasksResponse{
 		Tasks: tasks,
@@ -386,29 +389,10 @@ func sortTasksByCreatedAt(tasks []*Task) {
 	})
 }
 
-// cloneTask 对任务执行深拷贝, 隔离引用类型字段, 避免存储内部状态被调用方污染。
-//
-// 回归: B13/B14 — Get/Update 借此实现 copy-on-read / 写入隔离。
-// 拷贝范围: History 切片、Artifacts 切片、Metadata map 均独立分配;
-// 标量与不可变值 (ID/Status/时间戳) 直接复制。
+// cloneTask 递归复制协议消息、产物和元数据，隔离读写双方持有的嵌套引用。
+// 保留 Go 数值类型、媒体字节与时间值，不经 JSON 往返改变数据表示。
 func cloneTask(task *Task) *Task {
-	if task == nil {
-		return nil
-	}
-
-	cloned := *task
-
-	if task.History != nil {
-		cloned.History = slices.Clone(task.History)
-	}
-	if task.Artifacts != nil {
-		cloned.Artifacts = slices.Clone(task.Artifacts)
-	}
-	if task.Metadata != nil {
-		cloned.Metadata = maps.Clone(task.Metadata)
-	}
-
-	return &cloned
+	return reflectx.DeepCopy(task)
 }
 
 // ============== PushConfigStore 接口 ==============

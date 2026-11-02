@@ -621,6 +621,20 @@ func parseSchemaMap(m map[string]any) *llm.Schema {
 	}
 
 	s := &llm.Schema{}
+	if v, ok := m["$schema"].(string); ok {
+		s.Dialect = v
+	}
+	if v, ok := m["$ref"].(string); ok {
+		s.Ref = v
+	}
+	if defs, ok := m["$defs"].(map[string]any); ok {
+		s.Defs = make(map[string]*llm.Schema, len(defs))
+		for name, definition := range defs {
+			if definition, ok := definition.(map[string]any); ok {
+				s.Defs[name] = parseSchemaMap(definition)
+			}
+		}
+	}
 
 	if v, ok := m["type"].(string); ok {
 		s.Type = v
@@ -759,6 +773,19 @@ func aicoreSchemaToSDKMap(s *llm.Schema, root bool) map[string]any {
 	}
 
 	result := map[string]any{}
+	if s.Dialect != "" {
+		result["$schema"] = s.Dialect
+	}
+	if s.Ref != "" {
+		result["$ref"] = s.Ref
+	}
+	if len(s.Defs) > 0 {
+		defs := make(map[string]any, len(s.Defs))
+		for name, definition := range s.Defs {
+			defs[name] = aicoreSchemaToSDKMap(definition, false)
+		}
+		result["$defs"] = defs
+	}
 
 	if s.Type != "" {
 		result["type"] = s.Type

@@ -298,6 +298,12 @@ func (s *Server) handleSendMessage(ctx context.Context, params json.RawMessage) 
 	update, err := s.handler.HandleTask(ctx, task, &req.Message)
 	// 执行错误是任务结果；有效消息和附件必须随失败任务返回。
 	s.applyUpdate(task, update)
+	var invalidResponse *Error
+	if err == nil && !task.Status.State.IsTerminal() && task.Status.State != TaskStateInputRequired && task.Status.State != TaskStateAuthRequired {
+		// 阻塞处理器返回后没有后台完成通路，不能把中间状态作为成功响应。
+		invalidResponse = NewError(CodeInvalidAgentResponse, "blocking task handler returned without a terminal or interrupted state", map[string]any{"taskId": task.ID})
+		err = invalidResponse
+	}
 	if err != nil {
 		task.Status.State = TaskStateFailed
 		task.Status.Timestamp = time.Now()
@@ -312,6 +318,9 @@ func (s *Server) handleSendMessage(ctx context.Context, params json.RawMessage) 
 	}
 
 	s.notifySubscribers(task.ID, &TaskStatusEvent{ID: task.ID, ContextID: task.SessionID, Status: task.Status, Final: task.Status.State.IsTerminal() || task.Status.State == TaskStateInputRequired || task.Status.State == TaskStateAuthRequired})
+	if invalidResponse != nil && task.Status.State == TaskStateFailed {
+		return nil, invalidResponse
+	}
 	return projectHistory(task, req.HistoryLimit), nil
 }
 
