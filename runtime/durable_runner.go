@@ -112,14 +112,7 @@ func originalIngressDigest(request Request) (string, error) {
 		return "", err
 	}
 	request.Strategy = nil
-	data, err := json.Marshal(struct {
-		Input    frozenRequest `json:"input"`
-		Strategy string        `json:"strategy"`
-	}{frozenRequest{Request: request, Continuations: snapshotContinuations(request.Messages)}, name})
-	if err != nil {
-		return "", err
-	}
-	return ContentDigest(data)
+	return digestIngress(frozenRequest{Request: request, Continuations: snapshotContinuations(request.Messages)}, name)
 }
 
 // Execute 只消费 Worker 已取得的执行权；未找到/坏快照不会退回首次执行。

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/schema"
@@ -197,7 +198,11 @@ func (r *DefaultRunner) invokeStructured(ctx context.Context, req Request, callR
 			accepted.Content = string(raw)
 			accepted.ToolCalls = nil
 			if len(response.ToolCalls) > 0 {
-				accepted.FinishReason = "stop"
+				// 合成结果工具的正常工具结束映射为最终输出，暂停等原终态仍由执行核决议。
+				switch strings.ToLower(strings.TrimSpace(response.FinishReason)) {
+				case "tool_calls", "tool_use", "function_call":
+					accepted.FinishReason = "stop"
+				}
 			}
 			if len(response.ToolCalls) > 0 || response.Content != accepted.Content {
 				accepted.ProviderContinuation = nil

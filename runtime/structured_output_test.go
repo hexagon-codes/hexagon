@@ -26,6 +26,32 @@ func runtimeResultCall(id, arguments string, tokens int) *llm.CompletionResponse
 	}
 }
 
+// 结果工具的参数验证成功不改变暂停、取消或未知停止原因。
+func TestStructuredResultToolPreservesNonNaturalFinish(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		stop   StopReason
+	}{
+		{"pause_turn", StopReasonPauseTurn},
+		{"cancelled", StopReasonModelCancelled},
+		{"provider_stopped", StopReasonModelStopped},
+		{"tool_calls", StopReasonEndTurn},
+		{"tool_use", StopReasonEndTurn},
+		{"function_call", StopReasonEndTurn},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			response := runtimeResultCall("result-call", `{"count":2}`, 3)
+			response.FinishReason = tc.reason
+			provider := &fakeProvider{name: "structured", responses: []*llm.CompletionResponse{response}}
+			runner := NewRunner(Config{ProviderSelector: StaticProviderSelector{Provider: provider}})
+			result, err := runner.Run(t.Context(), Request{ID: "finish", StructuredOutput: &StructuredOutputSpec{Mode: StructuredModeTool, ToolName: "final_result", Schema: runtimeResultSchema(), MaxRepairs: 1}})
+			if err != nil || result == nil || result.StopReason != tc.stop || result.ModelFinishReason != tc.reason || string(result.Structured) != `{"count":2}` || result.Usage.TotalTokens != 3 || provider.calls != 1 {
+				t.Fatalf("result tool changed finish semantics: result=%+v calls=%d error=%v", result, provider.calls, err)
+			}
+		})
+	}
+}
+
 func TestStructuredSpecFreezesSchemaAndRejectsInvalidConfiguration(t *testing.T) {
 	original := &StructuredOutputSpec{Schema: runtimeResultSchema()}
 	frozen, err := cloneStructuredOutputSpec(original)

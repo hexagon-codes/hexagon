@@ -81,6 +81,19 @@ type frozenRequest struct {
 	Continuations []durableMessageContinuation `json:"message_continuations,omitempty"`
 }
 
+// digestIngress 统一原始请求和分叉请求的规范表示，不把进程内策略句柄放入摘要。
+func digestIngress(input frozenRequest, strategy string) (string, error) {
+	input.Request.Strategy, input.Strategy = nil, nil
+	data, err := json.Marshal(struct {
+		Input    frozenRequest `json:"input"`
+		Strategy string        `json:"strategy"`
+	}{input, strategy})
+	if err != nil {
+		return "", err
+	}
+	return ContentDigest(data)
+}
+
 // FreezeRunSpec 复制可序列化请求并排除运行期句柄，保存私有 continuation。
 func FreezeRunSpec(request Request, resources []ContentReference) (RunSpec, error) {
 	resources = append([]ContentReference(nil), resources...)
@@ -223,6 +236,7 @@ func stableJSONContent(content json.RawMessage) (json.RawMessage, error) {
 
 // Fork 创建重新执行的规格与 lineage，不继承原 Run 的进度、操作或提交身份。
 // 此方法只产生值，不创建任务或执行任何外部动作。
+// 分叉后的冻结请求成为新入站基准；重复 Submit 应使用该请求，而非父运行准备前的不同输入。
 func (s RunSpec) Fork(newRunID string) (RunSpec, error) {
 	if err := s.Validate(); err != nil {
 		return RunSpec{}, err
@@ -252,6 +266,16 @@ func (s RunSpec) Fork(newRunID string) (RunSpec, error) {
 		return RunSpec{}, err
 	}
 	fork.ParentRunID, fork.RunID = s.RunID, newRunID
+	var ingress frozenRequest
+	decoder := json.NewDecoder(bytes.NewReader(fork.Request))
+	decoder.UseNumber()
+	if err := decoder.Decode(&ingress); err != nil {
+		return RunSpec{}, fmt.Errorf("%w: invalid fork input: %w", ErrUnrecoverableSpec, err)
+	}
+	fork.IngressDigest, err = digestIngress(ingress, fork.Strategy)
+	if err != nil {
+		return RunSpec{}, err
+	}
 	return fork, nil
 }
 
