@@ -29,6 +29,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 )
@@ -78,10 +79,23 @@ type MemoryStore interface {
 	DeleteNamespace(ctx Context, namespace []string) error
 }
 
+// ErrRevisionConflict 表示条件更新的预期修订与当前持久记录不一致。
+var ErrRevisionConflict = errors.New("memory store: revision conflict")
+
+// ConditionalStore 是需要防止覆盖他人修改的消费侧条件写能力。
+// expected=0 仅创建不存在的键；否则只更新该修订。成功返回实际保存的独立条目。
+// 内存与文件实现只保证同一 Store 实例内原子性；Redis 实现使用服务端 WATCH 事务。
+type ConditionalStore interface {
+	MemoryStore
+	PutIfRevision(ctx Context, namespace []string, key string, value map[string]any, expected uint64, opts ...PutOption) (*Item, error)
+}
+
 // Item 记忆条目
 //
 // 每条记忆是一个带命名空间的 JSON 文档
 type Item struct {
+	// Revision 是存储记录的条件写修订，与 Entry 的语义谱系版本分开。
+	Revision uint64 `json:"revision"`
 	// Namespace 命名空间路径
 	Namespace []string `json:"namespace"`
 

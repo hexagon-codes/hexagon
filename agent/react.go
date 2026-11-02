@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/hexagon-codes/hexagon/core"
 	"github.com/hexagon-codes/hexagon/hooks"
 	"github.com/hexagon-codes/hexagon/internal/util"
+	hexmemory "github.com/hexagon-codes/hexagon/memory"
 	agentruntime "github.com/hexagon-codes/hexagon/runtime"
 )
 
@@ -30,6 +33,14 @@ Think step by step:
 6. Provide a final answer
 
 Always be helpful, accurate, and concise.`
+
+type memorySnapshotKey struct{}
+
+// ContextWithMemorySnapshot 注入宿主按显式作用域取得的固定记忆视图。
+// 恢复时宿主应解码原 RunSpec 引用，不重新查询共享记忆的最新版本；nil 表示显式空视图。
+func ContextWithMemorySnapshot(ctx context.Context, snapshot *hexmemory.Snapshot) context.Context {
+	return context.WithValue(ctx, memorySnapshotKey{}, snapshot)
+}
 
 // ReActAgent 实现 ReAct (Reasoning + Acting) 模式的 Agent
 // ReAct 模式让 Agent 交替进行推理和行动，直到完成任务
@@ -63,11 +74,11 @@ func (a *ReActAgent) Run(ctx context.Context, input Input) (Output, error) {
 		return Output{}, fmt.Errorf("LLM provider not configured")
 	}
 
-	runID := util.GenerateID("run")
+	runID := childRunID(ctx)
 	startTime := time.Now()
 	hookManager := hooks.ManagerFromContext(ctx)
 
-	runner := a.newRunner(runID, hookManager)
+	runner := a.newRunner()
 	result, err := runner.RunWithSink(ctx, a.newRequest(ctx, input, runID), a.runtimeHookSink(runID, input, startTime, hookManager))
 	return a.finishRun(ctx, input, runID, result, err, hookManager)
 }
@@ -87,19 +98,19 @@ func (a *ReActAgent) Resume(ctx context.Context, runID string, input Input) (Out
 	startTime := time.Now()
 	hookManager := hooks.ManagerFromContext(ctx)
 
-	runner := a.newRunner(runID, hookManager)
+	runner := a.newRunner()
 	result, err := runner.Resume(ctx, runID, a.newRequest(ctx, input, runID), a.runtimeHookSink(runID, input, startTime, hookManager))
 	return a.finishRun(ctx, input, runID, result, err, hookManager)
 }
 
 // newRunner 按 Agent 配置构造底层 runtime runner（Run/Resume 共用）。
-func (a *ReActAgent) newRunner(runID string, hookManager *hooks.Manager) *agentruntime.DefaultRunner {
+func (a *ReActAgent) newRunner() *agentruntime.DefaultRunner {
 	return agentruntime.NewRunner(agentruntime.Config{
 		ProviderSelector: agentruntime.StaticProviderSelector{
 			Provider: a.config.LLM,
 			Name:     a.config.LLM.Name(),
 		},
-		ToolExecutor:    &agentToolExecutor{tools: a.config.Tools, runID: runID, hookManager: hookManager},
+		ToolExecutor:    NewToolExecutor(a.config.Tools...),
 		DefaultMaxTurns: a.config.MaxIterations,
 		Middleware:      a.config.Middleware,
 		Durable:         a.config.Durable,
@@ -225,7 +236,23 @@ type agentToolExecutor struct {
 	hookManager *hooks.Manager
 }
 
+// NewToolExecutor 将 ai-core 工具装配到标准 Runtime，保留子结果 DTO、结果卸载和
+// 可选补登记/副作用分类能力。工具切片独立复制，句柄只读借用；连接及 Lease 由宿主关闭。
+//
+//	executor := agent.NewToolExecutor(agent.NewAgentTool(child))
+//	runner := runtime.NewRunner(runtime.Config{ProviderSelector: selector, ToolExecutor: executor})
+func NewToolExecutor(tools ...tool.Tool) agentruntime.ToolExecutor {
+	return &agentToolExecutor{tools: slices.Clone(tools)}
+}
+
 func (e *agentToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (agentruntime.ToolResult, error) {
+	runID, hookManager := e.runID, e.hookManager
+	if invocation, ok := agentruntime.ToolInvocationFromContext(ctx); ok {
+		runID = invocation.RunID
+	}
+	if hookManager == nil {
+		hookManager = hooks.ManagerFromContext(ctx)
+	}
 	var targetTool tool.Tool
 	for _, t := range e.tools {
 		if t.Name() == call.Name {
@@ -247,9 +274,9 @@ func (e *agentToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (age
 	if toolID == "" {
 		toolID = util.GenerateID("tool")
 	}
-	if e.hookManager != nil {
-		e.hookManager.TriggerToolStart(ctx, &hooks.ToolStartEvent{
-			RunID:    e.runID,
+	if hookManager != nil {
+		hookManager.TriggerToolStart(ctx, &hooks.ToolStartEvent{
+			RunID:    runID,
 			ToolName: call.Name,
 			ToolID:   toolID,
 			Input:    args,
@@ -257,10 +284,29 @@ func (e *agentToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (age
 	}
 	start := time.Now()
 	toolResult, execErr := targetTool.Execute(ctx, args)
+	if offloader, ok := ctx.Value(toolResultOffloaderKey{}).(*ToolResultOffloader); ok && execErr == nil {
+		toolResult, execErr = offloader.Offload(ctx, toolResult)
+		if execErr != nil {
+			if pending, ok := toolResult.Output.(StoredToolResult); ok && pending.StorageError != "" {
+				execErr = &ToolResultStorageError{Cause: execErr}
+			} else {
+				execErr = &agentruntime.RunPersistenceError{Phase: "tool result offload", Err: execErr}
+			}
+		}
+	}
+	var structured *agentruntime.StructuredPayload
+	payload, encodeErr := encodeAgentToolPayload(toolResult)
+	if encodeErr == nil {
+		structured = &agentruntime.StructuredPayload{Kind: payload.Kind, Version: payload.Version, Data: payload.Data}
+	} else if _, durable := agentruntime.TaskExecutorFromContext(ctx); durable {
+		execErr = errors.Join(execErr, &agentruntime.RunPersistenceError{Phase: "tool result encoding", Err: encodeErr})
+	}
+	var storageError *ToolResultStorageError
+	needsReconciliation := errors.As(execErr, &storageError)
 	durationMs := time.Since(start).Milliseconds()
-	if e.hookManager != nil {
-		e.hookManager.TriggerToolEnd(ctx, &hooks.ToolEndEvent{
-			RunID:    e.runID,
+	if hookManager != nil {
+		hookManager.TriggerToolEnd(ctx, &hooks.ToolEndEvent{
+			RunID:    runID,
 			ToolName: call.Name,
 			ToolID:   toolID,
 			Output:   toolResult,
@@ -270,16 +316,22 @@ func (e *agentToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (age
 	}
 	if execErr != nil {
 		msg := fmt.Sprintf("Error: tool execution failed: %v", execErr)
-		return agentruntime.ToolResult{
-			Content: msg, Raw: toolResult, Error: execErr.Error(),
+		result := agentruntime.ToolResult{
+			Content: msg, Raw: toolResult, Error: execErr.Error(), ContentParts: toolResultParts(toolResult),
+			Structured: structured, NeedsReconciliation: needsReconciliation,
 			Status: agentruntime.ToolStatusError, DurationMs: durationMs,
-		}, nil
+		}
+		if childControlError(execErr) {
+			return result, execErr
+		}
+		return result, nil
 	}
 	// 无 Go 级 execErr 时，仍尊重 ai-core 工具契约：tool.Result.Success=false 即软失败
 	// （formatToolResult 已把它渲染成 "Error: ..."，这里补上结构化状态/错误，避免上层再嗅探正文）。
 	res := agentruntime.ToolResult{
-		Content: formatToolResult(toolResult), Raw: toolResult,
-		Status: agentruntime.ToolStatusSuccess, DurationMs: durationMs,
+		Content: formatToolResult(toolResult), Raw: toolResult, ContentParts: toolResultParts(toolResult),
+		Structured: structured,
+		Status:     agentruntime.ToolStatusSuccess, DurationMs: durationMs,
 	}
 	if !toolResult.Success {
 		res.Status = agentruntime.ToolStatusError
@@ -287,6 +339,48 @@ func (e *agentToolExecutor) Execute(ctx context.Context, call llm.ToolCall) (age
 	}
 	return res, nil
 }
+
+// ReconcileToolResult 只补登记显式存储回执中的原对象；原工具不再执行。
+// 回执的采用和核对任务归 Runtime 同一提交权威，Agent 不另写完成账本。
+func (e *agentToolExecutor) ReconcileToolResult(ctx context.Context, _ llm.ToolCall, previous agentruntime.ToolResult) (agentruntime.ToolResult, bool, error) {
+	if previous.Structured == nil || previous.Structured.Kind != agentToolResultKind {
+		return previous, false, nil
+	}
+	decoded, err := decodeAgentToolPayload(typedToolOutput{Kind: previous.Structured.Kind, Version: previous.Structured.Version, Data: previous.Structured.Data})
+	if err != nil {
+		return previous, true, &agentruntime.RunPersistenceError{Phase: "decode tool result", Err: err}
+	}
+	pending, ok := decoded.Output.(StoredToolResult)
+	if !ok || pending.StorageError == "" {
+		return previous, false, nil
+	}
+	offloader, _ := ctx.Value(toolResultOffloaderKey{}).(*ToolResultOffloader)
+	if offloader == nil {
+		return previous, true, &ToolResultStorageError{Cause: fmt.Errorf("original tool result artifact storage is not configured")}
+	}
+	repaired, repairErr := offloader.Repair(ctx, pending)
+	result := previous
+	result.Raw = repaired
+	result.ContentParts = toolResultParts(repaired)
+	result.Content = formatToolResult(repaired)
+	payload, encodeErr := encodeAgentToolPayload(repaired)
+	if encodeErr != nil {
+		return previous, true, &agentruntime.RunPersistenceError{Phase: "encode reconciled tool result", Err: encodeErr}
+	}
+	result.Structured = &agentruntime.StructuredPayload{Kind: payload.Kind, Version: payload.Version, Data: payload.Data}
+	result.NeedsReconciliation = repairErr != nil
+	result.Status, result.Error = agentruntime.ToolStatusSuccess, ""
+	if repairErr != nil {
+		result.Status, result.Error = agentruntime.ToolStatusError, repairErr.Error()
+		return result, true, &ToolResultStorageError{Cause: repairErr}
+	}
+	if !repaired.Success {
+		result.Status, result.Error = agentruntime.ToolStatusError, repaired.Error
+	}
+	return result, true, nil
+}
+
+var _ agentruntime.ToolResultReconciler = (*agentToolExecutor)(nil)
 
 func outputFromRuntime(result *agentruntime.Result) Output {
 	if result == nil {
@@ -299,18 +393,40 @@ func outputFromRuntime(result *agentruntime.Result) Output {
 		Metadata:   result.Metadata,
 		StopReason: result.StopReason,
 	}
+	childIndexes := make(map[string]int)
 	for _, call := range result.ToolCalls {
 		rec := ToolCallRecord{Name: call.Name}
 		args, _ := tool.ParseArgs(call.Arguments)
 		rec.Arguments = args
-		if tr, ok := call.Result.Raw.(tool.Result); ok {
-			rec.Result = tr
-		} else if call.Result.Error != "" {
-			rec.Result = tool.Result{Success: false, Error: call.Result.Error}
+		tr, decodeErr := recoverToolResult(call.Result)
+		if decodeErr != nil {
+			rec.Result = tool.Result{Success: false, Error: decodeErr.Error(), Output: call.Result.Structured}
 		} else {
-			rec.Result = tool.NewResult(call.Result.Content)
+			rec.Result = tr
 		}
 		out.ToolCalls = append(out.ToolCalls, rec)
+		if call.Result.Error != "" {
+			recordedError := call.Result.Error
+			if decodeErr != nil {
+				recordedError = errors.Join(errors.New(recordedError), decodeErr).Error()
+			}
+			out.ToolCalls[len(out.ToolCalls)-1].Result.Success, out.ToolCalls[len(out.ToolCalls)-1].Result.Error = false, recordedError
+		}
+		if child, ok := childResultFromTool(rec.Result.Output); ok {
+			if index, exists := childIndexes[child.RunID]; exists {
+				out.Children[index] = child.Child
+			} else {
+				childIndexes[child.RunID] = len(out.Children)
+				out.Children = append(out.Children, child.Child)
+			}
+		}
+	}
+	for _, child := range out.Children {
+		out.Usage.PromptTokens += child.Output.Usage.PromptTokens
+		out.Usage.CompletionTokens += child.Output.Usage.CompletionTokens
+		out.Usage.TotalTokens += child.Output.Usage.TotalTokens
+		out.Usage.CacheCreationTokens += child.Output.Usage.CacheCreationTokens
+		out.Usage.CacheReadTokens += child.Output.Usage.CacheReadTokens
 	}
 	return out
 }
@@ -434,14 +550,21 @@ func (a *ReActAgent) buildInitialMessages(ctx context.Context, input Input) []ll
 	}
 
 	// 从记忆中获取历史上下文
-	if a.config.Memory != nil {
-		entries, _ := a.config.Memory.Search(ctx, memory.SearchQuery{
+	var entries []memory.Entry
+	if snapshot, ok := ctx.Value(memorySnapshotKey{}).(*hexmemory.Snapshot); ok {
+		if snapshot != nil {
+			entries = snapshot.Entries()
+		}
+	} else if a.config.Memory != nil {
+		entries, _ = a.config.Memory.Search(ctx, memory.SearchQuery{
 			Limit:     10,
 			OrderDesc: true,
 		})
+		slices.Reverse(entries)
+	}
+	if len(entries) > 0 {
 		// 按时间正序添加
-		for i := len(entries) - 1; i >= 0; i-- {
-			entry := entries[i]
+		for _, entry := range entries {
 			messages = append(messages, llm.Message{
 				Role:    llm.Role(entry.Role),
 				Content: entry.Content,
@@ -484,12 +607,13 @@ func (a *ReActAgent) buildToolDefinitions() []llm.ToolDefinition {
 const maxToolResultChars = 8000
 
 func formatToolResult(result tool.Result) string {
-	if !result.Success {
+	if !result.Success && result.Output == nil {
 		return fmt.Sprintf("Error: %s", result.Error)
 	}
-
 	var s string
 	switch v := result.Output.(type) {
+	case interface{ ModelToolContent() string }:
+		s = v.ModelToolContent()
 	case string:
 		s = v
 	case []byte:
@@ -502,8 +626,35 @@ func formatToolResult(result tool.Result) string {
 			s = string(b)
 		}
 	}
-
+	if !result.Success {
+		s = fmt.Sprintf("Error: %s\n%s", result.Error, s)
+	}
 	return truncateToolResult(s, maxToolResultChars)
+}
+
+// 持久恢复只按执行器写入的固定 DTO 解码；普通 Raw map 保持普通 JSON 值。
+func recoverToolResult(result agentruntime.ToolResult) (tool.Result, error) {
+	if result.Structured != nil && result.Structured.Kind == agentToolResultKind {
+		return decodeAgentToolPayload(typedToolOutput{Kind: result.Structured.Kind, Version: result.Structured.Version, Data: result.Structured.Data})
+	}
+	if tr, ok := result.Raw.(tool.Result); ok {
+		return tr, nil
+	}
+	output := result.Raw
+	if output == nil {
+		output = result.Content
+	}
+	return tool.Result{Success: result.Error == "" && result.Status != agentruntime.ToolStatusError, Error: result.Error, Output: output}, nil
+}
+
+func childResultFromTool(value any) (ChildRunResult, bool) {
+	if stored, ok := value.(StoredToolResult); ok {
+		return childResultFromTool(stored.Result.Output)
+	}
+	if child, ok := value.(ChildRunResult); ok {
+		return child, true
+	}
+	return ChildRunResult{}, false
 }
 
 // truncateToolResult 截断过长的工具结果，保留开头和结尾。

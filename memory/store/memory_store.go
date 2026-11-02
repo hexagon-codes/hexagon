@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -75,8 +76,38 @@ func NewInMemoryStore(opts ...InMemoryOption) *InMemoryStore {
 
 // Put 存储一条记忆
 func (s *InMemoryStore) Put(_ context.Context, namespace []string, key string, value map[string]any, opts ...PutOption) error {
+	_, err := s.put(namespace, key, value, nil, opts...)
+	return err
+}
+
+// PutIfRevision 在同一个实例锁内验证修订并更新，冲突不会留下写入。
+func (s *InMemoryStore) PutIfRevision(ctx context.Context, namespace []string, key string, value map[string]any, expected uint64, opts ...PutOption) (*Item, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// 条件写遵守 JSON 文档合同，输入、存储与返回值各自独立。
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var frozen map[string]any
+	if err := json.Unmarshal(data, &frozen); err != nil {
+		return nil, err
+	}
+	item, err := s.put(append([]string(nil), namespace...), key, frozen, &expected, opts...)
+	if err != nil {
+		return nil, err
+	}
+	item.Value = nil
+	if err := json.Unmarshal(data, &item.Value); err != nil {
+		return nil, err
+	}
+	return item, nil
+}
+
+func (s *InMemoryStore) put(namespace []string, key string, value map[string]any, expected *uint64, opts ...PutOption) (*Item, error) {
 	if key == "" {
-		return fmt.Errorf("key 不能为空")
+		return nil, fmt.Errorf("key 不能为空")
 	}
 
 	options := applyPutOptions(opts)
@@ -101,13 +132,27 @@ func (s *InMemoryStore) Put(_ context.Context, namespace []string, key string, v
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 如果已存在，保留原始创建时间
-	if existing, ok := s.items[storeKey]; ok {
+	existing := s.items[storeKey]
+	if existing != nil && existing.IsExpired() {
+		existing = nil
+	}
+	var current uint64
+	if existing != nil {
+		current = existing.Revision
+	}
+	if expected != nil && (*expected != current || *expected == 0 && existing != nil) {
+		return nil, ErrRevisionConflict
+	}
+	if current == ^uint64(0) {
+		return nil, fmt.Errorf("memory store: revision overflow")
+	}
+	item.Revision = current + 1
+	if existing != nil {
 		item.CreatedAt = existing.CreatedAt
 	}
 
 	s.items[storeKey] = item
-	return nil
+	return copyItem(item), nil
 }
 
 // Get 获取一条记忆
@@ -126,7 +171,9 @@ func (s *InMemoryStore) Get(_ context.Context, namespace []string, key string) (
 	if item.IsExpired() {
 		// 惰性清理过期条目
 		s.mu.Lock()
-		delete(s.items, storeKey)
+		if s.items[storeKey] == item {
+			delete(s.items, storeKey)
+		}
 		s.mu.Unlock()
 		return nil, nil
 	}
@@ -329,6 +376,7 @@ func copyItem(item *Item) *Item {
 	}
 
 	copied := &Item{
+		Revision:  item.Revision,
 		Key:       item.Key,
 		CreatedAt: item.CreatedAt,
 		UpdatedAt: item.UpdatedAt,

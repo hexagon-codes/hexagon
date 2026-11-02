@@ -48,7 +48,8 @@ func TestAgentAsTool_Execute(t *testing.T) {
 	if !result.Success {
 		t.Fatal("expected success")
 	}
-	if result.Output != "echo: hello world" {
+	child, ok := result.Output.(ChildRunResult)
+	if !ok || child.Child.Output.Content != "echo: hello world" {
 		t.Fatalf("expected 'echo: hello world', got %v", result.Output)
 	}
 }

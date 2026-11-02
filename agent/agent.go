@@ -68,6 +68,18 @@ type Output struct {
 
 	// Metadata 额外元数据
 	Metadata map[string]any `json:"metadata,omitempty"`
+
+	// Children 保留组合执行中每个成员的完整返回；成员返回不等于领域业务完成。
+	Children []ChildResult `json:"children,omitempty"`
+}
+
+// ChildResult 按成员顺序记录结果、错误和等待事实，不以非空文本判断成功。
+type ChildResult struct {
+	AgentID   string `json:"agent_id"`
+	AgentName string `json:"agent_name"`
+	Status    string `json:"status"`
+	Output    Output `json:"output"`
+	Error     string `json:"error,omitempty"`
 }
 
 // ToolCallRecord 记录工具调用

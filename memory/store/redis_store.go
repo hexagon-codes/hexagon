@@ -123,7 +123,12 @@ func (s *RedisStore) Put(ctx context.Context, namespace []string, key string, va
 	existing, err := s.getItem(ctx, redisKey)
 	if err == nil && existing != nil {
 		item.CreatedAt = existing.CreatedAt
+		item.Revision = existing.Revision
 	}
+	if item.Revision == ^uint64(0) {
+		return fmt.Errorf("memory store: revision overflow")
+	}
+	item.Revision++
 
 	data, err := json.Marshal(item)
 	if err != nil {
@@ -344,6 +349,7 @@ func (s *RedisStore) Close() error {
 
 // redisItem Redis 存储的记忆条目
 type redisItem struct {
+	Revision  uint64         `json:"revision"`
 	Namespace []string       `json:"namespace"`
 	Key       string         `json:"key"`
 	Value     map[string]any `json:"value"`
@@ -354,6 +360,7 @@ type redisItem struct {
 
 func (ri *redisItem) toItem() *Item {
 	item := &Item{
+		Revision:  ri.Revision,
 		Key:       ri.Key,
 		CreatedAt: ri.CreatedAt,
 		UpdatedAt: ri.UpdatedAt,

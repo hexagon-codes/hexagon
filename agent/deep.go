@@ -23,6 +23,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/hexagon-codes/ai-core/tool"
 	"github.com/hexagon-codes/hexagon/core"
 	"github.com/hexagon-codes/hexagon/internal/util"
+	agentruntime "github.com/hexagon-codes/hexagon/runtime"
 )
 
 // DeepAgent 深度 Agent
@@ -110,130 +112,74 @@ func (d *DeepAgent) Run(ctx context.Context, input Input) (Output, error) {
 
 // runAtDepth 在指定深度执行
 func (d *DeepAgent) runAtDepth(ctx context.Context, input Input, depth int) (Output, error) {
-	if ctx.Err() != nil {
-		return Output{}, ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return Output{}, err
 	}
-
-	agentLLM := d.agent.LLM()
-	if agentLLM == nil {
+	provider := d.agent.LLM()
+	if provider == nil {
 		return Output{}, fmt.Errorf("DeepAgent %q: LLM not configured", d.config.Name)
 	}
-
-	// 构建工具定义
-	toolDefs := d.buildToolDefinitions(depth)
-	agentTools := d.buildToolMap()
-
-	// 构建消息
-	messages := d.buildMessages(input, depth)
-
-	// 迭代执行（类似 ReAct 循环）
-	maxIterations := 10
-	var allToolCalls []ToolCallRecord
-
-	for i := 0; i < maxIterations; i++ {
-		if ctx.Err() != nil {
-			return Output{}, ctx.Err()
-		}
-
-		resp, err := agentLLM.Complete(ctx, llm.CompletionRequest{
-			Messages: messages,
-			Tools:    toolDefs,
-		})
-		if err != nil {
-			return Output{}, fmt.Errorf("DeepAgent %q depth %d: LLM failed: %w",
-				d.config.Name, depth, err)
-		}
-
-		// 没有 tool call，返回最终回答
-		if len(resp.ToolCalls) == 0 {
-			return Output{
-				Content:   resp.Content,
-				ToolCalls: allToolCalls,
-				Usage:     resp.Usage,
-				Metadata: map[string]any{
-					"agent_type": "deep",
-					"depth":      depth,
-					"iterations": i + 1,
-				},
-			}, nil
-		}
-
-		// 添加 assistant 消息
-		messages = append(messages, llm.Message{
-			Role:    llm.RoleAssistant,
-			Content: resp.Content,
-		})
-
-		// 处理每个 tool call
-		for _, tc := range resp.ToolCalls {
-			var result string
-
-			if tc.Name == "create_subtask" {
-				// 解析子任务参数
-				args, parseErr := tool.ParseArgs(tc.Arguments)
-				if parseErr != nil {
-					result = fmt.Sprintf("subtask parse error: %v", parseErr)
-				} else {
-					subtaskResult, subtaskErr := d.handleSubtask(ctx, args, depth)
-					if subtaskErr != nil {
-						result = fmt.Sprintf("subtask error: %v", subtaskErr)
-					} else {
-						result = subtaskResult
-					}
-					allToolCalls = append(allToolCalls, ToolCallRecord{
-						Name:      "create_subtask",
-						Arguments: args,
-						Result: tool.Result{
-							Success: subtaskErr == nil,
-							Output:  result,
-						},
-					})
-				}
-			} else if t, ok := agentTools[tc.Name]; ok {
-				// 解析并执行普通工具
-				args, parseErr := tool.ParseArgs(tc.Arguments)
-				if parseErr != nil {
-					result = fmt.Sprintf("argument parse error: %v", parseErr)
-				} else {
-					toolResult, execErr := t.Execute(ctx, args)
-					if execErr != nil {
-						result = fmt.Sprintf("tool error: %v", execErr)
-					} else {
-						result = fmt.Sprintf("%v", toolResult.Output)
-					}
-					allToolCalls = append(allToolCalls, ToolCallRecord{
-						Name:      tc.Name,
-						Arguments: args,
-						Result:    toolResult,
-					})
-				}
-			} else {
-				result = fmt.Sprintf("unknown tool: %s", tc.Name)
-			}
-
-			messages = append(messages, llm.Message{
-				Role:    llm.RoleTool,
-				Content: result,
-			})
-		}
+	runID := childRunID(ctx)
+	tools := append([]tool.Tool(nil), d.agent.Tools()...)
+	if depth < d.maxDepth-1 {
+		tools = append(tools, &deepSubtaskTool{agent: d, depth: depth})
 	}
+	runner := agentruntime.NewRunner(agentruntime.Config{
+		ProviderSelector: agentruntime.StaticProviderSelector{Provider: provider, Name: provider.Name()},
+		ToolExecutor:     &agentToolExecutor{tools: tools, runID: runID},
+		DefaultMaxTurns:  10,
+	})
+	iterations := 0
+	result, err := runner.RunWithSink(ctx, agentruntime.Request{
+		ID: runID, Messages: d.buildMessages(input, depth), Tools: d.buildToolDefinitions(depth), Limits: agentruntime.Limits{MaxTurns: 10},
+	}, agentruntime.EventSinkFunc(func(_ context.Context, event agentruntime.Event) error {
+		if event.Type == agentruntime.EventLLMStarted {
+			iterations++
+		}
+		return nil
+	}))
+	out := outputFromRuntime(result)
+	if out.Metadata == nil {
+		out.Metadata = map[string]any{}
+	}
+	out.Metadata["agent_type"], out.Metadata["depth"], out.Metadata["run_id"], out.Metadata["iterations"] = "deep", depth, runID, iterations
+	if out.StopReason == agentruntime.StopReasonMaxTurns {
+		out.Metadata["exhausted"] = true
+	}
+	var providerErr *agentruntime.ProviderCallError
+	if errors.As(err, &providerErr) {
+		err = fmt.Errorf("DeepAgent %q depth %d: LLM failed: %w", d.config.Name, depth, err)
+	}
+	return out, err
+}
 
-	return Output{
-		Content:   "max iterations reached",
-		ToolCalls: allToolCalls,
-		Metadata: map[string]any{
-			"agent_type": "deep",
-			"depth":      depth,
-			"exhausted":  true,
-		},
-	}, nil
+// deepSubtaskTool 只表达递归分解，模型轮次、工具调度、恢复和流控制交给统一运行核。
+type deepSubtaskTool struct {
+	agent *DeepAgent
+	depth int
+}
+
+func (*deepSubtaskTool) Name() string { return "create_subtask" }
+func (*deepSubtaskTool) Description() string {
+	return "Create an independent subtask for a sub-agent to handle."
+}
+func (*deepSubtaskTool) Schema() *llm.Schema { return llm.SchemaOf[SubtaskInput]() }
+func (*deepSubtaskTool) Validate(args map[string]any) error {
+	if task, _ := args["task"].(string); task == "" {
+		return fmt.Errorf("task description is required")
+	}
+	return nil
+}
+func (t *deepSubtaskTool) Execute(ctx context.Context, args map[string]any) (tool.Result, error) {
+	child, err := t.agent.handleSubtask(ctx, args, t.depth)
+	return childToolResult(child, err)
 }
 
 // handleSubtask 处理子任务
-func (d *DeepAgent) handleSubtask(ctx context.Context, args map[string]any, currentDepth int) (string, error) {
+func (d *DeepAgent) handleSubtask(ctx context.Context, args map[string]any, currentDepth int) (ChildRunResult, error) {
 	taskDesc, _ := args["task"].(string)
 	if taskDesc == "" {
-		return "", fmt.Errorf("task description is required")
+		return ChildRunResult{}, fmt.Errorf("task description is required")
 	}
 
 	// 创建子 Agent
@@ -242,6 +188,9 @@ func (d *DeepAgent) handleSubtask(ctx context.Context, args map[string]any, curr
 		subAgent = d.subAgentFn(taskDesc)
 	} else {
 		subAgent = d.agent
+	}
+	if subAgent == nil {
+		return ChildRunResult{}, fmt.Errorf("sub-agent factory returned nil")
 	}
 
 	// 递归执行子任务
@@ -261,19 +210,13 @@ func (d *DeepAgent) handleSubtask(ctx context.Context, args map[string]any, curr
 			subAgentFn: d.subAgentFn,
 			maxDepth:   d.maxDepth,
 		}
-		output, err := subDeep.runAtDepth(ctx, subInput, currentDepth+1)
-		if err != nil {
-			return "", err
-		}
-		return output.Content, nil
+		return runChildTask(ctx, subAgent, subInput, "subtask", func(ctx context.Context, input Input) (Output, error) {
+			return subDeep.runAtDepth(ctx, input, currentDepth+1)
+		})
 	}
 
 	// 到达最大深度，直接执行
-	output, err := subAgent.Run(ctx, subInput)
-	if err != nil {
-		return "", err
-	}
-	return output.Content, nil
+	return runChildTask(ctx, subAgent, subInput, "subtask", subAgent.Run)
 }
 
 // buildToolDefinitions 构建工具定义
