@@ -2,16 +2,49 @@
 
 本文件记录 hexagon（AI Agent 框架）的用户可见变更，遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与 [SemVer](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## v0.6.0（2026-11-02）
+
+本节对应本地代码交付目标；没有据此创建或推送 tag，也没有把本地候选 module proxy 验证写成 GitHub 或公共代理已可解析。应用可继续固定原版本，HexClaw 不要求升级；采用本版本的消费者自行完成下列迁移。
+
+### BREAKING
+
+- **图状态复制**：`graph.State.Clone()` 改为 `(State, error)`；自定义状态和调用方必须处理复制错误，不能回退为共享可变引用。完整 `State` 返回值与声明写集分开，并行完整状态汇合需配置明确的 `StateMerger`，不能依赖最后完成者覆盖。
+- **图模式**：默认构建模式为 DAG；循环图在 `Build` 前调用 `WithExecutionMode(GraphModePregel)`，需要时同时指定 `WithTriggerMode`。`RunPregelMode` 不再用于事后改变已编译模式；Run、Stream 与恢复消费同一计划。普通出边全部参与分发，一条路径到达 END 不代表全部分支结束。
+- **压缩回调**：`middleware.Compactor` 改为 `func(context.Context, []llm.Message) ([]llm.Message, error)`。回调显式返回错误；`BeforeLLM` 保持中间件入口合同，向 Runner 透传错误，失败消息不被采用，原消息及实际摘要用量保留。
+- **A2A 协议**：JSON-RPC 与 SSE 投影按 A2A 1.0 映射，不能继续发送旧 wire 载荷。消息/产物使用稳定身份，`DataPart.Data` 由 `map[string]any` 改为 `any`；直接索引的调用方应先按实际数据类型检查。内存对象与协议 wire 表示分开，旧持久 A2A JSON 需按源版本显式转换，不能仅更换协议版本常量。
+- **构建基线**：最低 Go 为 `1.26.10`，依赖目标为 ai-core `v0.3.0`、Toolkit `v0.3.7`；根模块和独立 examples 模块分别维护依赖。只固定 Hexagon 版本不冻结其他直接依赖经 MVS 选出的版本。
+
+### 持久数据与接入迁移
+
+- Runtime 使用 `runtime.runspec.v1` 与 `runtime.snapshot.v1`，图执行持久封装使用 `graph.snapshot.v1`，同时保存实际 State codec、编译计划身份、pending result 与 adopted 状态。`Snapshot.Phase` 明确区分 `PhaseBeforeModel`、`PhasePendingTools`、`PhaseAfterTurn`、`PhaseFinal`，恢复按实际边界接续，不能仅凭 Step 统一加一导致跳轮。组件中断状态保存具体 type/version；宿主注册对应 codec 后恢复，不把 JSON map 当作原 Go 类型。
+- `Snapshot.Codec` 标识当前快照载荷的编码，`RunSpec.Codec` 保留原始执行规格声明；已迁移载荷以自身 codec 读取，不能因原规格仍记录旧版本而重复迁移。`SnapshotCodecs.Register` 提供显式、无业务副作用的源格式迁移入口；迁移针对副本，失败保留原记录。旧轻量快照不自动获得任务、回执、原子提交和跨进程恢复保证；缺失原规格、资源版本或有效迁移时，应保留任务并报告原因，不从头重做付费动作。需要继续的旧任务可固定旧版本完成，fork 重执行须使用新运行身份并遵循原操作核对规则。
+- `DurableRunner.Submit` 在接收前冻结实际选择的 Provider/Model 到 `RunSpec.SelectedProvider`；恢复使用原路由及资源合同，不能将请求别名当作实际路由，也不能静默切到当前 primary。合同允许的 fallback 仍按已固定策略处理。
+- `ToolResult.Structured` 使用带 `Kind`、`Version`、`Data` 的 `StructuredPayload` DTO；消费者按明确版本解码，不依赖 `Raw` 在持久往返后仍实现原 Go 接口。`NeedsReconciliation` 表示原动作结果仍需核对，执行器可实现 `ToolResultReconciler` 查询原结果或幂等补登记，不得重新调用原业务动作；原失败 Task 保留，新核对 Task 独立保存其结果。
+- 轻量 `Runner.Run/Stream` 可使用内存装配，不强制数据库。强持久装配由宿主注入 `*sql.DB`，显式调用 MySQL 适配层迁移，并提供 worker、执行权与接收/恢复入口；构造器不自动建表，也不新增独立持久化微服务。单实例内存/文件存储不等同多 worker 的数据库事务或机器掉电耐久。
+- 必要事件与状态提交关联，已提交事件保留稳定 `Event.ID`/序号；`SSEEventSink.EmitStored` 输出已提交信封，`Follow` 按 EventStore 的序号追赶，消费者保留对应游标并去重。即时 token delta 没有持久恢复游标，仍按声明的 best-effort 合同处理。外部 Receipt、产物字节与运行状态分别核对，不承诺外部 exactly-once。
+- 新增 `memory/store.ConditionalStore` 是可选能力，不扩大原 `MemoryStore` 方法集；需要条件更新的消费者显式使用该能力，并按实际后端声明原子范围。
 
 ### Added
 
+- **编排**：统一图执行计划、字段映射、可失败复制、确定性合并、逐任务结果保存/采用、子图与定向中断恢复；失败和未知结果不会因空队列或部分文本被当作成功。
+- **runtime**：增加统一模型 attempt、受控请求变换、结构化结果验证、fallback 输出隔离、任务接收/提交/恢复与持久事件。`Request.Generation` 接受 ai-core 的 `GenerationOptions`；`Request.StructuredOutput` 固定最终结果约束，经对应模式验证采用后通过 `Result.Structured` 返回 JSON，不以 Content 看似 JSON 冒充已验证对象。
+- **runtime/ModelSession**：`DefaultRunner.NewModelSession` 为摘要等内部模型任务独立取得资源 pin，持有自己的 State、事件和用量；宿主负责取消、等待与 `Close`。异步摘要使用独立会话，不能借用携带父运行活跃 State 的调用上下文；`Report` 的子调用事实不自动重复计入父账。
+- **runtime/DynamicTools**：`NewDynamicTools` 创建 Run 局部绑定视图，由 `BindRun` 固定归属；`SnapshotTools`/`RestoreTools` 保存与还原定义及版本绑定。搜索任务的缓存结果也保留 `ToolSnapshot`，恢复不能只展示 schema 而缺少相同执行绑定，也不重新搜索最新实现来替代旧绑定。
+- **runtime/middleware**：`CostControl.RecordAttempt` 优先于简便 `Record`，支持账本按实际 HTTP attempt ID 幂等入账；不能同时走两条累计路径。部分实报保留原始 usage 和缺失维度，不补造 TotalTokens；预算使用单独的已知用量下界，不把下界当作供应商实报总量。
+- **agent**：公开 `NewToolExecutor(tools ...tool.Tool) runtime.ToolExecutor`，供标准 Runtime/DurableRunner 装配使用，保留子结果 DTO、卸载、可选核对及副作用分类能力；不公开或依赖 ReAct 的内部执行对象。工具句柄只读借用，连接与 Lease 的关闭责任仍归宿主。
+- **agent / memory / artifact**：补充完整子任务结果、版本固定的文档 Skill、冻结记忆视图、历史窗口检索，以及工具结果/产物的完整回读和补登记能力。
+- **plugin**：路由解析与 generation 使用权原子取得；候选装配成功后切换，旧运行持有资源至排空，准备失败归还资源，不用配置指针代替生命周期管理。
+- **mcp**：新增共享 Tools、Resources、Prompts 与关闭生命周期的官方 SDK Session API，保留原 V2 连接签名；主动关闭本次已回收 stdio 进程时，预期 SIGTERM/SIGKILL 不再被误报为未关闭，其他退出与清理错误保持可见。
+
 - **runtime**：新增 `DefaultRunner.Continue` 与 `ProviderCallError`，允许模型调用失败后使用重新装配的输入续接同次运行，并保留已完成工具结果、轮次和用量；新增 `ToolMediaMessageName` 标记运行时投影的工具媒体消息。
+- **mcp**：Tools、Resources 与 Prompts 共用 Text／Image／Audio／Binary 投影，保留实际媒体字节并提供不含媒体编码的文本及描述信息；资源链接不主动下载。
+- **runtime**：完整输出消息组保留 ProviderContinuation、工具身份及 typed 媒体；快照与压缩维护关联组，保留真实用量来源，流终态错误以权威 `Stream.Err()` 为准。
 
 ### Changed
 
-- 根模块 ai-core 升级至 **v0.2.12**，恢复 OpenAI 流式响应的 Token 用量解析与汇总，使同次运行续接保留跨调用累计用量。
-- 根模块与独立 `examples/` 模块均升级 toolkit 至 **v0.3.5**；最低 Go 版本同步提升至 **1.25.13**。`examples/` 同步更新 toolkit 带来的 `golang.org/x/crypto`、`x/sync` 与 `x/sys` 最低版本。
+- 当前根模块最低 Go 工具链为 `1.26.10`；运行时协议扩展按明确的候选依赖组合验证，正式发布依赖仍须单独确认可解析。
+
+- 根模块与独立 `examples/` 模块的交付依赖目标为 ai-core **v0.3.0**、Toolkit **v0.3.7**。examples 使用 Hexagon **v0.6.0** 和 Go **1.26.10**，在无 `go.work`、无 `replace` 的独立模块中另行验证；不借旧 tag 编译当前新 API。
 
 ## [0.5.15] - 2026-10-21
 

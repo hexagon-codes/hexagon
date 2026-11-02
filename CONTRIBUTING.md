@@ -29,7 +29,7 @@
 
 #### 准备工作
 
-1. 安装 `go.mod` 声明的 Go 版本或更高版本（当前最低版本为 Go 1.25.13）
+1. 安装 `go.mod` 声明的 Go 版本或更高版本（当前最低版本为 Go 1.26.10）
 2. Fork 仓库
 3. 克隆到本地：
    ```bash
@@ -172,7 +172,9 @@ hexagon/
 - MINOR: 向后兼容的功能新增
 - PATCH: 向后兼容的 Bug 修复
 
-本次文档与发布元数据对应 **v0.5.15**。`hexagon.Version` 按构建注入的 `injectedVersion`、Go module build info 顺序解析；无法取得真实版本的开发构建保留 `unknown`，不把发布版本写死到 fallback。workspace 构建应从 Hexagon 源码目录的 `git describe --tags --dirty` 取得注入值。
+本次本地交付目标为 **v0.6.0**，配套 ai-core v0.3.0、Toolkit v0.3.7 与 Go 1.26.10；目标记录不代表 tag 已创建、推送或公共代理已可解析。`hexagon.Version` 按构建注入的 `injectedVersion`、Go module build info 顺序解析；无法取得真实版本的开发构建保留 `unknown`，不把发布版本写死到 fallback。workspace 构建应从 Hexagon 源码目录的 `git describe --tags --dirty` 取得注入值。
+
+提交前可在独立目录以版本化本地 module proxy 验证候选组合和 examples；必须设置 `GOWORK=off`，不使用 `replace`，记录候选版本、源码摘要及最终 build list。该结果只证明对应本地候选，不能替代下面的远端 CI、不可变 tag 与公共模块核验。破坏性 API、持久 codec 和轻量/强持久装配边界按 CHANGELOG 迁移。
 
 本仓没有自动发布工作流。发布步骤为：
 

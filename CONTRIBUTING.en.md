@@ -29,7 +29,7 @@ Please be kind and respectful. We are committed to creating an open, inclusive c
 
 #### Preparation
 
-1. Install the Go version declared in `go.mod` or newer (the current minimum is Go 1.25.13)
+1. Install the Go version declared in `go.mod` or newer (the current minimum is Go 1.26.10)
 2. Fork the repository
 3. Clone it locally:
    ```bash
@@ -172,7 +172,9 @@ Version numbers follow [Semantic Versioning](https://semver.org/):
 - MINOR: backward-compatible new features
 - PATCH: backward-compatible bug fixes
 
-The documentation and release metadata in this revision target **v0.5.15**. `hexagon.Version` is resolved from build-time `injectedVersion`, then Go module build info; an unknown development version remains `unknown`. Keep the fallback independent of release numbers. For workspace builds, derive the injected version from the Hexagon checkout's `git describe --tags --dirty` output.
+The local delivery target is **v0.6.0**, with ai-core v0.3.0, Toolkit v0.3.7, and Go 1.26.10. This does not mean a tag has been created or pushed, or that the public module is available. `hexagon.Version` is resolved from build-time `injectedVersion`, then Go module build info; an unknown development version remains `unknown`. Keep the fallback independent of release numbers. For workspace builds, derive the injected version from the Hexagon checkout's `git describe --tags --dirty` output.
+
+Before committing, an isolated, versioned local module proxy may validate the candidate combination and the standalone examples module with `GOWORK=off` and no `replace` directives. Record candidate versions, source digests, and the final build list. This proves only the local candidate; it does not replace remote CI, immutable tags, or public module verification. Follow CHANGELOG for breaking APIs, persistent codecs, and lightweight versus durable assembly boundaries.
 
 This repository has no automated release workflow. To publish:
 

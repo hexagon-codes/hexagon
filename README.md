@@ -6,7 +6,7 @@
 
 **Go AI Agent 框架**
 
-[![Go Reference](https://img.shields.io/badge/Go-1.25.13+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
+[![Go Reference](https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/hexagon-codes/hexagon/actions/workflows/ci.yml/badge.svg)](https://github.com/hexagon-codes/hexagon/actions/workflows/ci.yml)
 
@@ -42,7 +42,9 @@ Hexagon 与以下 AI Agent 开发相关仓库协同使用：
 | **toolkit** | Go 通用工具库 (lang/crypto/net/cache/util) | [github.com/hexagon-codes/toolkit](https://github.com/hexagon-codes/toolkit) |
 | **hexagon-ui** | Dev UI 前端 (Vue 3 + TypeScript) | [github.com/hexagon-codes/hexagon-ui](https://github.com/hexagon-codes/hexagon-ui) |
 
-> 文档对应版本：**v0.5.15**（[变更记录](CHANGELOG.md)）。当前根模块构建基线：Go 1.25.13、ai-core v0.2.12、toolkit v0.3.5。`examples/` 是独立 Go module，其依赖版本以 `examples/go.mod` 为准，不随根模块自动同步。
+> 本地交付目标：**v0.6.0**（[变更记录](CHANGELOG.md)）；配套依赖目标为 Go 1.26.10、ai-core v0.3.0、Toolkit v0.3.7。当前没有创建或推送该 tag，也未证明公共代理可解析；本地候选模块验证与正式发布分开。`examples/` 独立维护同一目标组合并单独验证，不由 workspace 或旧 tag 代替。
+
+新应用可用 `agent.NewToolExecutor` 装配 `runtime.Config.ToolExecutor`，再按需接入 `DurableRunner`；普通 `Run/Stream` 不要求 SQL。结构化结果、快照恢复边界、工具结果核对、独立模型会话和持久 SSE 的消费方式见[公共接入与恢复合同](COMPATIBILITY.md)，不能把轻量内存装配当作强持久恢复。
 
 ### 🧠 ai-core — AI 基础能力库
 
@@ -110,8 +112,10 @@ npm run dev
 ### 📦 安装
 
 ```bash
-go get github.com/hexagon-codes/hexagon
+go get github.com/hexagon-codes/hexagon@v0.6.0
 ```
+
+上述命令对应目标交付版本，正式 tag 与公共代理可解析性核验完成后再使用。本地候选验证使用隔离、版本化的 module proxy，不能将其结果解释为当前已能从公共代理取得该版本。
 
 ### ⚙️ 环境配置
 

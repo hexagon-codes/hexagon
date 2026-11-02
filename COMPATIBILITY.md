@@ -10,11 +10,31 @@ hexagon 是 Hexagon 生态的 **AI Agent 框架（L2）**，向下依赖 toolkit
 
 ## 当前发布判定
 
-- 本次文档与发布元数据对应 **v0.5.15**，覆盖 MCP 完整结果与图片投影、工具媒体上下文、运行时压缩与本轮输出保留。MCP 混合结果的 `tool.Result.Output` 表示变化作为本次 patch 的版本策略例外，迁移要求见 [CHANGELOG](CHANGELOG.md#0515---2026-10-21) 的 `BREAKING`；后续 patch 仍遵守公开合同兼容承诺。
-- 当前工作树依赖基线为 Go **1.25.13**、ai-core **v0.2.12** 与 toolkit **v0.3.5**。本次 toolkit 更新将最低 Go 版本提升至 1.25.13；执行快照新增可选 `output_messages` 字段，旧快照无需迁移即可读取；缺少该字段时沿用旧的输出恢复路径，不提供新快照的本轮输出隔离保证。
+- 当前本地交付目标为 **v0.6.0**，按 breaking minor 处理 Clone、Compactor、图默认模式和 A2A wire/数据合同变化，迁移清单见 [CHANGELOG](CHANGELOG.md)。本次没有创建或推送 tag，也没有公共代理可解析性证据；本地候选模块验证与正式发布分别记录。
+- 交付依赖目标为 Go **1.26.10**、ai-core **v0.3.0** 与 Toolkit **v0.3.7**。三个库独立版本化，最终消费者需记录实际 MVS build list；工作区编译成功不能代替版本化模块组合证据。
+- 轻量 Run/Stream 不强制数据库；强持久装配需要宿主的连接、显式迁移、worker 与恢复入口。Runtime/图/中断状态保存各自 codec 和计划身份，旧快照不会自动获得新保证。缺少原资源版本或迁移时保留记录并明确失败；`SnapshotCodecs` 的迁移失败不得改写原记录。应用可继续固定旧 tag 完成原任务，HexClaw 不要求升级。
 - 发布版本来自目标提交的不可变 tag；开发构建使用构建注入或 module build info，未知时保留 `unknown`。文档或 Helm `appVersion` 的更新不代表 tag、镜像或 GitHub Release 已发布。
 
+## v0.6.0 公共接入与恢复合同
+
+下表对应本地交付目标的公共合同；新增入口不要求普通轻量 Run/Stream 使用 SQL，也不自动授予强持久恢复保证。现有应用可以继续固定原 tag，HexClaw 不要求升级或由框架提供应用兼容分支。
+
+| 公共入口 / 数据 | 消费方必须遵守的合同 |
+|---|---|
+| `Request.Generation`、`Request.StructuredOutput`、`Result.Structured` | Generation 使用 ai-core `GenerationOptions`，准备时冻结后传到实际请求；结构化最终结果按 `StructuredOutputSpec` 验证后采用，读取独立的 Structured JSON，不把文本形态当成验证通过 |
+| `Snapshot.Phase` | 保留 BeforeModel、PendingTools、AfterTurn、Final 的实际边界，连同 Step、等待和已完成工具记录恢复；不能统一 Step+1 或重做已完成工具 |
+| `Snapshot.Codec` / `RunSpec.Codec` | 前者表示当前载荷编码，后者保留原始规格声明；显式纯迁移不得调用 Provider/工具或修改原记录，已迁移载荷按新 codec 读取，不能重复迁移 |
+| `DurableRunner.Submit` / `RunSpec.SelectedProvider` | 接受前冻结实际 Provider/Model；恢复核对原路由及资源，不能静默使用当前 primary；合法 fallback 按固定策略执行 |
+| `ToolResult.Structured` / `StructuredPayload` | Kind、Version、Data 是持久 DTO 合同；升级时按明确版本解码，不能依靠 Raw 对象的运行期方法恢复子结果或产物 |
+| `NeedsReconciliation` / `ToolResultReconciler` | 核对只查询原结果或幂等补登记，不重做原业务动作；保留原失败 Task，以独立核对 Task 保存后续事实，未处理或查询失败仍保留核对需求 |
+| `DynamicTools` | 每个 Run 使用独立绑定视图；`BindRun` 固定归属，`SnapshotTools`/`RestoreTools` 恢复原定义及资源引用。缓存搜索结果也必须带 ToolSnapshot，不能仅恢复名字/schema 或偷偷改用最新执行器 |
+| `DefaultRunner.NewModelSession` | 独立 pin、State 和用量，不借用父运行活跃 State 的调用上下文；宿主负责工作 goroutine、取消、等待及 Close，子 Report 通过稳定尝试身份关联，不能重复计入父账 |
+| `CostControl.RecordAttempt` | 设置后优先于 Record；持久账本按实际 HTTP attempt ID 幂等入账。部分 usage 的缺失维度保持未知，预算下界与供应商实报 TotalTokens 分开 |
+| `SSEEventSink.EmitStored` / `Follow` | 仅已提交事件信封携带持久 ID/序号；Follow 使用 EventStore 序号追赶，消费者记录游标并去重。即时 delta 不提供持久恢复游标 |
+| `agent.NewToolExecutor` | 将现有 ai-core tools 装配给 `runtime.Config.ToolExecutor`，再按需接 DurableRunner；无需公开 ReAct 内部对象。宿主仍负责工具连接、Lease 及强持久依赖的生命周期 |
+
 ## 历史版本策略例外
+
 - v0.5.10 与 v0.5.11 已包含相对 v0.5.9 的公开 API、最低 Go 版本和 Qdrant 持久数据合同变更，但以 patch 版本发布，且两者的提交拓扑与版本顺序倒置。
 - 维护者确认当前框架尚无外部使用者，批准 **v0.5.12** 作为一次性版本策略例外：保留上述合同变化，撤回 v0.5.10 与 v0.5.11，并以 v0.5.12 建立唯一可消费基线。迁移项见 CHANGELOG 的 v0.5.12 `BREAKING` 段。
 - 该例外不改变后续兼容性承诺；除明确记录的版本策略例外外，v0.5.x patch 不得包含破坏式合同变化。
@@ -22,13 +42,13 @@ hexagon 是 Hexagon 生态的 **AI Agent 框架（L2）**，向下依赖 toolkit
 ## 仓库门禁
 - 根 CI 固定设置 `GOWORK=off`、`GOTOOLCHAIN=local` 与 `GOFLAGS=-mod=readonly`，避免本地 workspace 或其他模块掩盖发布依赖问题。最低 Go 版本从根 `go.mod` 读取，检查格式并以 `go test -count=1 -vet=all ./...` 执行完整 vet 和普通测试；最新稳定 Go 版本执行 race 和 `govulncheck`。实际缺失或不一致的依赖仍失败，冗余历史 `go.sum` 条目不作为门禁。
 - 本仓没有自动发布工作流。维护者只在目标提交的根 CI 成功后创建不可变 SemVer tag；Go 模块以该 tag 发布，GitHub Release 为可选的人工元数据。
-- `examples/` 是独立 Go module，不属于根模块发布表面，也不进入根 CI；其依赖本次保持不变。以后若修改 `examples/`，应在该模块目录按其自身 `go.mod` 单独 build/test。
+- `examples/` 是独立 Go module，不属于根模块发布表面，也不进入根 CI；本次目标为 Go 1.26.10、Hexagon v0.6.0、ai-core v0.3.0 与 Toolkit v0.3.7。按自身模块单独验证，不通过旧版本依赖或 workspace 冒充当前 API 接入成功。
 - 本仓不运行绑定 `main`、`latest` 等浮动外部分支的下游门禁，也不以临时 `go.work` 覆盖作为发布验收证据。
 - 公共 API、最低 Go 版本或持久数据合同发生变化时，必须在评审中判定 SemVer 级别，并同步 CHANGELOG；精简 CI 不自动执行 `gorelease` 或具名消费者测试。
 
 ## 弃用流程
-- 弃用先标 `// Deprecated: 用 X 替代。将在 vN 移除。`，保留 ≥1 个 minor 周期，CHANGELOG 记录，到期才删。
-- 重构期的再导出 shim（`deprecated.go`）属过渡技术债，到期统一清理。
+- v1 及以后，弃用先标 `// Deprecated: 用 X 替代。将在 vN 移除。`，保留 ≥1 个 minor 周期并记录，到期才可按 major 规则删除。
+- v0.x 已明确采用一次性迁移的 breaking minor，可直接调整对应入口，不为旧应用保留并行实现或 shim；实际删除必须逐项列入 CHANGELOG。既有 `deprecated.go` 中未在本次清单列明删除的导出仍存在，不能仅凭政策说明推定已经清除。
 - 移除导出 API = major（v0.x 为 minor + BREAKING 标注）。
 
 ## v1.0 API 冻结
