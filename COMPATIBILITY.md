@@ -15,6 +15,13 @@ hexagon 是 Hexagon 生态的 **AI Agent 框架（L2）**，向下依赖 toolkit
 - 轻量 Run/Stream 不强制数据库；强持久装配需要宿主的连接、显式迁移、worker 与恢复入口。Runtime/图/中断状态保存各自 codec 和计划身份，旧快照不会自动获得新保证。缺少原资源版本或迁移时保留记录并明确失败；`SnapshotCodecs` 的迁移失败不得改写原记录。应用可继续固定旧 tag 完成原任务，HexClaw 不要求升级。
 - 发布版本来自目标提交的不可变 tag；开发构建使用构建注入或 module build info，未知时保留 `unknown`。文档或 Helm `appVersion` 的更新不代表 tag、镜像或 GitHub Release 已发布。
 
+## 流终态、服务停机与Schema补充合同
+
+- `StreamChannel.Emit`与Close互斥，普通事件仍可在满缓冲时丢弃。`Graph.StreamRun`额外保留一个终态槽，结束或错误始终独立于普通事件过滤/丢弃策略；Done后仍可读完缓冲内事件。ComposeStream转发Merge时不把SourceEOF当成整体结束。
+- A2A Start与Stop按服务器代次协调。停止期间Start明确失败；Stop先停止当前监听，宽限期限到达时取消在途HTTP上下文并返回错误，资源回收继续完成；回收完成后可重启。注入Store仍归宿主所有，默认Store及已保存任务保留原所有权合同。
+- 官方MCP标准Streamable HTTP在正文处保留工具Schema原文，不包装SDK的会话协商连接；标准stdio、IO、in-memory及SSE连接在JSON-RPC解码前保留原文。工具代理采用精确Schema，Enum/Default/上下界的大整数和空数组存在性保持。自定义Transport保留其连接扩展行为，数值保真需由其提供相应原文能力，不对SDK已经舍入的数据补造精度。
+- Browser Runtime同一次Exchange返回的全部Calls采用该Exchange输入截图的宽高；每次Observe的最新截图供下一次Exchange使用，不能用模型尚未看过的截图改写旧坐标系。
+
 ## v0.6.0 公共接入与恢复合同
 
 下表对应本地交付目标的公共合同；新增入口不要求普通轻量 Run/Stream 使用 SQL，也不自动授予强持久恢复保证。现有应用可以继续固定原 tag，HexClaw 不要求升级或由框架提供应用兼容分支。

@@ -4,6 +4,11 @@
 
 ## v0.6.0（2026-11-02）
 
+- **graph / core**：消除StreamChannel发送与关闭竞态，为StreamRun终态独立预留槽位，组合流继续消费SourceEOF之后的数据。
+- **a2a**：固定Stop所属服务器代次，拒绝停启交叠；停机期限不再被业务存储锁阻塞，宽限期限后取消在途HTTP上下文。
+- **mcp**：在官方SDK把动态数字转为float64前保留工具Schema，标准HTTP和stdio往返保持精确数值及空约束。
+- **browserruntime**：同轮Computer Use调用冻结模型输入截图尺寸，避免后续观察改变旧动作的坐标缩放。
+
 - **agent**：补齐 Deep、ReAct、Sequential、Parallel、Loop、Reflection、Supervisor、SelfDiscovery、PlanExecute 的 Transform 关闭、取消及上游错误传播，保留各自 Run 算法。
 - **graph**：流事件缓冲预留终止错误槽位；取消不再随机丢失 Error，消费者停止读取后取消仍可退出。
 - **a2a**：Stop 关闭自行创建的默认 Store 清理协程；重启保留任务并恢复清理，注入 Store 继续由宿主管理。
