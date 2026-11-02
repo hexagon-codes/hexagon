@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -450,7 +451,7 @@ func (t *Team) runCollaborative(ctx context.Context, input Input) (Output, error
 			r := result{index: index, agent: a}
 			defer func() {
 				if value := recover(); value != nil {
-					r.err = fmt.Errorf("agent %q panicked: %v", a.ID(), value)
+					r.err = &AgentPanicError{AgentID: a.ID(), Value: value, Stack: debug.Stack()}
 				}
 				results <- r
 			}()

@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
+	"runtime/debug"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/schema"
@@ -17,6 +17,7 @@ import (
 	"github.com/hexagon-codes/hexagon/internal/util"
 	"github.com/hexagon-codes/hexagon/interrupt"
 	agentruntime "github.com/hexagon-codes/hexagon/runtime"
+	"github.com/hexagon-codes/toolkit/util/reflectx"
 )
 
 // AgentTool 把一个 Agent 适配为 tool.Tool，使任意 agent loop（ReAct / PlanExecute /
@@ -190,8 +191,38 @@ func childControlError(err error) bool {
 	return llm.IsUnsafeToReplay(err)
 }
 
+// AgentPanicError 保留子运行身份和原 panic；动作结果未知时禁止自动重放。
+type AgentPanicError struct {
+	AgentID string
+	Value   any
+	Stack   []byte
+}
+
+func (e *AgentPanicError) Error() string {
+	return fmt.Sprintf("agent %q panicked: %v", e.AgentID, e.Value)
+}
+func (e *AgentPanicError) Unwrap() error {
+	err, _ := e.Value.(error)
+	return err
+}
+func (*AgentPanicError) UnsafeToReplay() bool { return true }
+
+// ChildOutputCopyError 表示子任务已经返回，但其可变结果无法隔离。
+// 原结果及已知用量仍随 ChildRunResult 返回；不能通过重跑子任务修复复制失败。
+type ChildOutputCopyError struct {
+	AgentID string
+	Cause   error
+}
+
+func (e *ChildOutputCopyError) Error() string {
+	return fmt.Sprintf("agent %q output cannot be isolated: %v", e.AgentID, e.Cause)
+}
+func (e *ChildOutputCopyError) Unwrap() error      { return e.Cause }
+func (*ChildOutputCopyError) UnsafeToReplay() bool { return true }
+
 // runChildTask 复用父运行的任务提交器；没有持久宿主时直接执行，不强制 JSON 限制。
 // 只有显式选中的中断获得新激活，已完成兄弟任务继续使用原激活。
+// 子输入与完整返回结果按值隔离，父输入、兄弟任务和下游交接不共享可变载荷。
 func runChildTask(ctx context.Context, a Agent, input Input, position string, execute func(context.Context, Input) (Output, error)) (ChildRunResult, error) {
 	invocation, hasInvocation := agentruntime.ToolInvocationFromContext(ctx)
 	parentID, taskID, activation := invocation.RunID, invocation.TaskID+"/"+position, "initial"
@@ -214,7 +245,6 @@ func runChildTask(ctx context.Context, a Agent, input Input, position string, ex
 	childCtx = context.WithValue(childCtx, childRunKey{}, child)
 	// 子运行不能把父工具的调用位置再当作自己的父位置。
 	childCtx = agentruntime.ContextWithToolInvocation(childCtx, agentruntime.ToolInvocation{})
-	input.Context = maps.Clone(input.Context)
 	codecs, _ := ctx.Value(childCodecsKey{}).(*interrupt.StateCodecs)
 	run := func(runCtx context.Context) (out ChildRunResult, runErr error) {
 		out = child
@@ -222,7 +252,13 @@ func runChildTask(ctx context.Context, a Agent, input Input, position string, ex
 		runCtx = context.WithValue(runCtx, childRunKey{}, out)
 		defer func() {
 			if value := recover(); value != nil {
-				runErr = fmt.Errorf("agent %q panicked: %v", a.ID(), value)
+				runErr = &AgentPanicError{AgentID: child.Child.AgentID, Value: value, Stack: debug.Stack()}
+			}
+			frozen, copyErr := reflectx.DeepCopyChecked(out.Child.Output)
+			if copyErr != nil {
+				runErr = errors.Join(runErr, &ChildOutputCopyError{AgentID: child.Child.AgentID, Cause: copyErr})
+			} else {
+				out.Child.Output = frozen
 			}
 			control := childControlError(runErr)
 			out.ControlError = &control
@@ -238,8 +274,13 @@ func runChildTask(ctx context.Context, a Agent, input Input, position string, ex
 			}
 			if out.Child.Output.Metadata == nil {
 				out.Child.Output.Metadata = map[string]any{}
-			} else {
-				out.Child.Output.Metadata = maps.Clone(out.Child.Output.Metadata)
+			} else if copyErr != nil {
+				// 失败结果仍需补充身份，不能为此修改子执行者持有的原元数据容器。
+				metadata := make(map[string]any, len(out.Child.Output.Metadata))
+				for key, value := range out.Child.Output.Metadata {
+					metadata[key] = value
+				}
+				out.Child.Output.Metadata = metadata
 			}
 			out.Child.Output.Metadata["run_id"] = out.RunID
 			out.Child.Output.Metadata["parent_run_id"] = out.ParentRunID
@@ -248,7 +289,11 @@ func runChildTask(ctx context.Context, a Agent, input Input, position string, ex
 				out.Parts = append(out.Parts, toolResultParts(call.Result)...)
 			}
 		}()
-		out.Child.Output, runErr = execute(runCtx, input)
+		candidate, copyErr := reflectx.DeepCopyChecked(input)
+		if copyErr != nil {
+			return out, fmt.Errorf("agent %q input cannot be isolated: %w", child.Child.AgentID, copyErr)
+		}
+		out.Child.Output, runErr = execute(runCtx, candidate)
 		return out, runErr
 	}
 	if _, durable := agentruntime.TaskExecutorFromContext(ctx); !durable {
