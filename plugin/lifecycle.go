@@ -49,7 +49,10 @@ func NewLifecycle(registry *Registry, opts ...LifecycleOption) *Lifecycle {
 
 // Init 初始化插件
 func (l *Lifecycle) Init(ctx context.Context, name string, config map[string]any) error {
-	unlock := l.lockOperation(name)
+	unlock, waitErr := l.lockOperation(ctx, name)
+	if waitErr != nil {
+		return waitErr
+	}
 	defer unlock()
 	instance, err := l.registry.getInstance(name)
 	if err != nil {
@@ -131,7 +134,10 @@ func (l *Lifecycle) Init(ctx context.Context, name string, config map[string]any
 // Start 启动插件。停止后重启时，若实际依赖代次已变化，先用原冻结配置重新初始化绑定；
 // 依赖未变化时仍只调用 Start，不重复初始化。
 func (l *Lifecycle) Start(ctx context.Context, name string) error {
-	unlock := l.lockOperation(name)
+	unlock, waitErr := l.lockOperation(ctx, name)
+	if waitErr != nil {
+		return waitErr
+	}
 	defer unlock()
 	instance, err := l.registry.getInstance(name)
 	if err != nil {
@@ -260,7 +266,10 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 
 // Stop 停止插件
 func (l *Lifecycle) Stop(ctx context.Context, name string) error {
-	unlock := l.lockOperation(name)
+	unlock, waitErr := l.lockOperation(ctx, name)
+	if waitErr != nil {
+		return waitErr
+	}
 	defer unlock()
 	instance, err := l.registry.getInstance(name)
 	if err != nil {
@@ -335,11 +344,18 @@ type lifecycleOperation struct {
 }
 
 // 同名生命周期操作仍串行，但用户回调期间不持有操作锁或注册表锁。
-func (l *Lifecycle) lockOperation(name string) func() {
+func (l *Lifecycle) lockOperation(ctx context.Context, name string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	value, _ := l.operations.LoadOrStore(name, &lifecycleOperation{})
 	operation := value.(*lifecycleOperation)
 	for {
 		operation.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			operation.mu.Unlock()
+			return nil, err
+		}
 		if operation.done == nil {
 			done := make(chan struct{})
 			operation.done = done
@@ -351,11 +367,15 @@ func (l *Lifecycle) lockOperation(name string) func() {
 					close(done)
 				}
 				operation.mu.Unlock()
-			}
+			}, nil
 		}
 		done := operation.done
 		operation.mu.Unlock()
-		<-done
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 }
 
