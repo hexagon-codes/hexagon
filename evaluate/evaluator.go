@@ -233,10 +233,10 @@ type EvalReport struct {
 	// TotalSamples 样本总数
 	TotalSamples int `json:"total_samples"`
 
-	// SuccessSamples 成功样本数
+	// SuccessSamples 系统及评估器均无执行错误的样本数，不表示达到质量阈值。
 	SuccessSamples int `json:"success_samples"`
 
-	// FailedSamples 失败样本数
+	// FailedSamples 系统或评估器存在执行错误的样本数。
 	FailedSamples int `json:"failed_samples"`
 
 	// Summary 汇总统计
