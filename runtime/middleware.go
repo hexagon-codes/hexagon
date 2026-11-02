@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 )
@@ -159,11 +160,16 @@ func stageMiddleware(ctx context.Context, state *State, phase string, fn func(*S
 			}
 		}
 		if err == nil {
+			budgetStarted, hasBudgetStarted := state.Attributes[BudgetStartedAtMetadataKey].(time.Time)
 			reported, missing := usageCount(state.Attributes, UsageReportedCallsMetadataKey), usageCount(state.Attributes, UsageMissingCallsMetadataKey)
 			partial, lowerBound := usageCount(state.Attributes, UsagePartialCallsMetadataKey), usageCount(state.Attributes, UsageKnownTokenLowerBoundMetadataKey)
 			state.Attributes = cloneRuntimeMetadata(candidate.Attributes)
 			if state.Attributes == nil {
 				state.Attributes = make(map[string]any)
+			}
+			// 内部模型调用可能在候选处理期间建立起点，旧候选不能覆盖已发生的预算事实。
+			if hasBudgetStarted {
+				state.Attributes[BudgetStartedAtMetadataKey] = budgetStarted
 			}
 			state.setUsageEvidence(reported, missing)
 			state.Attributes[UsagePartialCallsMetadataKey], state.Attributes[UsageKnownTokenLowerBoundMetadataKey] = partial, lowerBound

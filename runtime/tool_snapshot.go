@@ -74,8 +74,6 @@ func (r *DefaultRunner) refreshToolSnapshot(ctx context.Context, state *State) e
 }
 
 func (r *DefaultRunner) buildRunModelRequest(ctx context.Context, state *State, selection ProviderSelection) (request llm.CompletionRequest, err error) {
-	if err := r.refreshToolSnapshot(ctx, state); err != nil {
-		return request, err
-	}
+	// 每轮在中间件前刷新绑定，此处不覆盖已计量和采用的本轮工具定义。
 	return buildModelRequest(state, selection)
 }

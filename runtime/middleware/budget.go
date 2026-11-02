@@ -83,6 +83,12 @@ func (b Budget) ensureStart(state *hruntime.State, now time.Time) time.Time {
 	return now
 }
 
+// InitializeModelAttempt 为直接模型会话和内部摘要建立同一预算起点，不触发压缩或其他 hook。
+func (b Budget) InitializeModelAttempt(_ context.Context, state *hruntime.State) error {
+	b.ensureStart(state, b.clock())
+	return nil
+}
+
 // BeforeLLM 在每次 LLM 调用前检查三维预算：先发 BudgetChecked 事件，
 // 若任一维度超限则发 BudgetExceeded 事件并返回 fail-closed 错误。
 func (b Budget) BeforeLLM(ctx context.Context, state *hruntime.State) error {

@@ -61,6 +61,10 @@ func (b BudgetControl) BeforeModelAttempt(ctx context.Context, state *hruntime.S
 	return b.budget.BeforeModelAttempt(ctx, state, attempt)
 }
 
+func (b BudgetControl) InitializeModelAttempt(ctx context.Context, state *hruntime.State) error {
+	return b.budget.InitializeModelAttempt(ctx, state)
+}
+
 func (b BudgetControl) AfterModelAttempt(ctx context.Context, state *hruntime.State, attempt hruntime.ModelAttempt) error {
 	return b.cost.AfterModelAttempt(ctx, state, attempt)
 }

@@ -2,13 +2,57 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/tokenizer"
 	hr "github.com/hexagon-codes/hexagon/runtime"
 )
+
+func TestCompactionSeesDiscoveredToolsWithoutDurable(t *testing.T) {
+	provider := &testProvider{responses: []*llm.CompletionResponse{
+		{ToolCalls: []llm.ToolCall{{ID: "search", Name: "search_tools", Arguments: `{"query":"large"}`}}, FinishReason: "tool_calls"},
+		{Content: "done", FinishReason: "stop"},
+	}}
+	view, err := hr.NewDynamicTools(hr.DynamicToolConfig{Discover: func(context.Context, string) (hr.ToolBindingBatch, error) {
+		return hr.ToolBindingBatch{Bindings: []hr.ToolBinding{{Definition: llm.NewToolDefinition("large", strings.Repeat("large schema ", 300), &llm.Schema{Type: "object"}), Executor: &unusedToolExecutor{}}}}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer view.Release()
+	compactions := 0
+	compact := Compaction{MaxTokens: 200, Compact: func(_ context.Context, messages []llm.Message) ([]llm.Message, error) {
+		compactions++
+		return messages, nil
+	}}
+	runner := hr.NewRunner(hr.Config{ProviderSelector: hr.StaticProviderSelector{Provider: provider}, ToolExecutor: view, Middleware: []hr.Middleware{compact}})
+	result, err := runner.Run(t.Context(), hr.Request{ID: "discovery-meter", Messages: []llm.Message{llm.UserMessage("find tools")}})
+	if err != nil || result.Content != "done" || compactions != 1 || provider.calls != 2 {
+		t.Fatalf("discovered schema was not metered: compactions=%d calls=%d error=%v", compactions, provider.calls, err)
+	}
+}
+
+func TestCompactionCandidatePreservesInternalBudgetOrigin(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	main := &compactionContractProvider{name: "main"}
+	summary := &compactionContractProvider{name: "summary", usage: 7}
+	compact := Compaction{ShouldCompact: func([]llm.Message) bool { return true }, Compact: func(ctx context.Context, messages []llm.Message) ([]llm.Message, error) {
+		_, err := llm.InvokeComplete(ctx, summary, llm.CompletionRequest{Messages: messages}, CompactionPurpose)
+		now = now.Add(2 * time.Hour)
+		return messages, err
+	}}
+	runner := hr.NewRunner(hr.Config{ProviderSelector: hr.StaticProviderSelector{Provider: main}, Middleware: []hr.Middleware{
+		compact, Budget{Limits: BudgetLimits{MaxDuration: time.Hour}, Now: func() time.Time { return now }},
+	}})
+	result, err := runner.Run(t.Context(), hr.Request{ID: "summary-clock", Messages: []llm.Message{llm.UserMessage("history")}})
+	if !errors.Is(err, hr.ErrBudgetExceeded) || summary.calls != 1 || main.calls != 0 || result == nil || result.Usage.TotalTokens != 7 {
+		t.Fatalf("candidate reset budget or lost usage: result=%+v summary=%d main=%d error=%v", result, summary.calls, main.calls, err)
+	}
+}
 
 func TestSummaryCompactorDoesNotAdoptIncompleteTermination(t *testing.T) {
 	for _, reason := range []string{"length", "MAX_TOKENS", "refusal", "pause_turn", "cancelled", "unknown"} {

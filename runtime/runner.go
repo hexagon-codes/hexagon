@@ -363,6 +363,10 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 		if err := r.applyContextUpdate(ctx, state, emitter); err != nil {
 			return canceledStateResult(state), err
 		}
+		// 计量和变换看到本 Run 已固定的最新工具集；派发沿用本轮采用的定义。
+		if err := r.refreshToolSnapshot(ctx, state); err != nil {
+			return canceledStateResult(state), err
+		}
 		if err := runBeforeLLM(ctx, r.middleware, state); err != nil {
 			_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("middleware_before_llm", err)})
 			return canceledStateResult(state), err

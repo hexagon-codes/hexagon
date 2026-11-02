@@ -44,6 +44,36 @@ type BeforeModelAttempt interface {
 	BeforeModelAttempt(context.Context, *State, ModelAttempt) error
 }
 
+// ModelAttemptInitializer 初始化首次预算起点，不执行模型或再次运行 BeforeLLM 链。
+// 执行核只接纳尚未建立的 BudgetStartedAtMetadataKey；其他候选修改不采用。
+type ModelAttemptInitializer interface {
+	InitializeModelAttempt(context.Context, *State) error
+}
+
+func (r *DefaultRunner) initializeModelAttempt(ctx context.Context, state *State) error {
+	if _, initialized := state.Attributes[BudgetStartedAtMetadataKey].(time.Time); initialized {
+		return nil
+	}
+	for _, middleware := range r.middleware {
+		initializer, ok := middleware.(ModelAttemptInitializer)
+		if !ok {
+			continue
+		}
+		candidate := state.Snapshot()
+		if err := invokeExtension("initialize_model_attempt", func() error { return initializer.InitializeModelAttempt(ctx, candidate) }); err != nil {
+			return err
+		}
+		if started, ok := candidate.Attributes[BudgetStartedAtMetadataKey].(time.Time); ok {
+			if state.Attributes == nil {
+				state.Attributes = make(map[string]any)
+			}
+			state.Attributes[BudgetStartedAtMetadataKey] = started
+			return nil
+		}
+	}
+	return nil
+}
+
 // AfterModelAttempt 接收所有尝试的结果，包括前置处理失败和取消。
 // 只有 ProviderCalled 为真才调用过 Provider；未知用量不得当零计账。
 type AfterModelAttempt interface {
@@ -187,6 +217,12 @@ type ModelCallWrapper interface {
 const EventModelDraftReplaced EventType = "model_draft_replaced"
 
 func (r *DefaultRunner) invokeProvider(ctx context.Context, req Request, selection ProviderSelection, callReq llm.CompletionRequest, state *State, emitter *runEmitter) (*llm.CompletionResponse, error) {
+	if err := r.initializeModelAttempt(ctx, state); err != nil {
+		return nil, &AttemptHookError{Phase: "initialize", Err: err}
+	}
+	if err := r.persistBudgetOrigin(ctx, state, req.ID, emitter); err != nil {
+		return nil, &AttemptHookError{Phase: "persist_budget_origin", Err: err}
+	}
 	// 入口以前的部分回答属于显式 Continue；这里只撤回本包装调用产生的新草稿。
 	basePartial, baseReasoning := state.partialText, state.Reasoning
 	baseMessages, baseOutput := len(state.Messages), len(state.outputMessages)

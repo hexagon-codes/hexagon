@@ -11,7 +11,35 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon/plugin"
 	rt "github.com/hexagon-codes/hexagon/runtime"
+	"github.com/hexagon-codes/hexagon/runtime/middleware"
 )
+
+func TestModelSessionBudgetKeepsOriginalClock(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	provider := &modelSessionTestProvider{name: "budget", complete: func(context.Context, llm.CompletionRequest) (*llm.CompletionResponse, error) {
+		return &llm.CompletionResponse{Content: "done"}, nil
+	}}
+	beforeLLMCalls := 0
+	runner := rt.NewRunner(rt.Config{Middleware: []rt.Middleware{
+		middleware.Budget{Limits: middleware.BudgetLimits{MaxDuration: time.Hour}, Now: func() time.Time { return now }},
+		rt.MiddlewareFuncSet{BeforeLLMFunc: func(context.Context, *rt.State) error { beforeLLMCalls++; return nil }},
+	}})
+	session, err := runner.NewModelSession(t.Context(), rt.Request{ID: "session-budget-clock"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if _, err := session.InvokeComplete(t.Context(), provider, llm.CompletionRequest{}, "first"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Hour)
+	if _, err := session.InvokeComplete(t.Context(), provider, llm.CompletionRequest{}, "second"); !errors.Is(err, rt.ErrBudgetExceeded) {
+		t.Fatalf("elapsed budget was reset: %v", err)
+	}
+	if provider.calls.Load() != 1 || beforeLLMCalls != 0 {
+		t.Fatalf("unexpected dispatch or recursive middleware: calls=%d before=%d", provider.calls.Load(), beforeLLMCalls)
+	}
+}
 
 type modelSessionTestProvider struct {
 	name     string

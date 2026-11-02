@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -169,7 +170,15 @@ func (d *DurableRunner) ExecuteWithInputs(ctx context.Context, record RunRecord,
 	if err != nil {
 		return nil, err
 	}
-	session := &runSession{store: d.Store, record: current, authority: execution.Authority, sink: sink, pendingAdopt: make(map[string]bool), modelOrdinals: make(map[string]int), interruptCodecs: d.Runner.interruptCodecs}
+	var snapshotCache []byte
+	if restoredSnapshot != nil {
+		// 后续预算等读取复用已核验的迁移结果，不再把原旧版本字节交给默认解码器。
+		snapshotCache, err = EncodeSnapshot(*restoredSnapshot)
+		if err != nil {
+			return nil, err
+		}
+	}
+	session := &runSession{store: d.Store, record: current, authority: execution.Authority, sink: sink, pendingAdopt: make(map[string]bool), modelOrdinals: make(map[string]int), interruptCodecs: d.Runner.interruptCodecs, snapshotSource: append([]byte(nil), current.Snapshot...), snapshotCache: snapshotCache}
 	active := *d.Runner
 	active.durable, active.session = session, session
 	ctx = ContextWithTaskExecutor(context.WithValue(ctx, frozenRunSpecKey{}, current.Spec), session)
@@ -298,6 +307,9 @@ type runSession struct {
 	interruptCodecs *interrupt.StateCodecs
 	consumeInputs   []string
 	resumeInputs    map[string]string
+	// 缓存只匹配同一份持久字节；新快照提交后不能复用旧迁移结果。
+	snapshotSource []byte
+	snapshotCache  []byte
 }
 
 // commitLocked 不包含模型/工具/事件消费者回调；仅调用同一 Store 的提交及查回。
@@ -435,7 +447,12 @@ func (s *runSession) Load(_ context.Context, runID string) (Snapshot, bool, erro
 	if len(s.record.Snapshot) == 0 {
 		return Snapshot{}, false, nil
 	}
-	snapshot, err := DecodeSnapshot(s.record.Snapshot)
+	data := s.record.Snapshot
+	if s.snapshotCache != nil && bytes.Equal(data, s.snapshotSource) {
+		data = s.snapshotCache
+	}
+	// 每次解码产生独立值，调用者修改返回快照不会污染迁移缓存。
+	snapshot, err := DecodeSnapshot(data)
 	return snapshot, err == nil, err
 }
 
