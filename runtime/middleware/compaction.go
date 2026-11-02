@@ -81,7 +81,21 @@ func (c Compaction) BeforeLLM(ctx context.Context, state *hruntime.State) error 
 	if err != nil {
 		return fmt.Errorf("prepare compaction request: %w", err)
 	}
-	work, err := c.Prepare(request, 0)
+	// 压缩只覆盖原历史；计量使用与实际派发相同的请求派生，注入提示不写回历史。
+	frozenRequest := state.Request
+	model := frozenRequest.ModelName
+	if selected, ok := state.Attributes["model"].(string); ok {
+		model = selected
+	}
+	metered := c
+	metered.CountRequest = func(history llm.CompletionRequest) (int, error) {
+		prepared, err := hruntime.PrepareModelRequest(frozenRequest, history.Messages, model)
+		if err != nil {
+			return 0, err
+		}
+		return c.countRequest(prepared)
+	}
+	work, err := metered.Prepare(request, state.MessageRevision)
 	if err != nil {
 		return err
 	}
@@ -92,7 +106,7 @@ func (c Compaction) BeforeLLM(ctx context.Context, state *hruntime.State) error 
 	if err != nil {
 		return err
 	}
-	compacted, err := AdoptCompaction(candidate, 0, state.Messages)
+	compacted, err := AdoptCompaction(candidate, state.MessageRevision, state.Messages)
 	if err != nil {
 		return err
 	}

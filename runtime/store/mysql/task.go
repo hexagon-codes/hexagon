@@ -55,7 +55,7 @@ func (s *Store) Submit(ctx context.Context, request runtime.SubmitRequest) (runt
 	if request.Spec.RunID != request.RunID {
 		return runtime.RunRecord{}, runtime.ErrUnrecoverableSpec
 	}
-	requestDigest, err := digest(request)
+	requestDigest, err := runtime.SubmissionDigest(request)
 	if err != nil {
 		return runtime.RunRecord{}, err
 	}
@@ -152,6 +152,9 @@ func (s *Store) Signal(ctx context.Context, scope, runID string, input runtime.I
 	}
 	if record.Status.Terminal() {
 		return runtime.InboundInput{}, runtime.ErrRunTerminal
+	}
+	if input.Target != "" && record.WaitingTargets != nil && !record.IsWaitingTarget(input.Target) {
+		return runtime.InboundInput{}, runtime.ErrResumeTargetUnavailable
 	}
 	if record.Inputs == nil {
 		record.Inputs = make(map[string]runtime.InboundInput)

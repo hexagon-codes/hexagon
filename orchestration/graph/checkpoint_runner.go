@@ -177,15 +177,15 @@ func (r *CheckpointRunner[S]) Fork(ctx context.Context, checkpointID string, bra
 	}
 
 	// 反序列化状态
-	var state S
-	if err := json.Unmarshal(newCheckpoint.State, &state); err != nil {
+	state, err := r.graph.codec().Decode(newCheckpoint.State)
+	if err != nil {
 		return zero, fmt.Errorf("unmarshal state: %w", err)
 	}
 
 	// 修改状态（如果提供了修改函数）
 	if modifyState != nil {
 		state = modifyState(state)
-		stateBytes, err := json.Marshal(state)
+		stateBytes, err := r.graph.codec().Encode(state)
 		if err != nil {
 			return zero, fmt.Errorf("marshal modified state: %w", err)
 		}

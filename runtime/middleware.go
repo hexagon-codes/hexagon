@@ -119,8 +119,7 @@ func runBeforeTool(ctx context.Context, mw []Middleware, state *State, call llm.
 
 func runAfterTool(ctx context.Context, mw []Middleware, state *State, call llm.ToolCall, result ToolResult) error {
 	for _, m := range mw {
-		candidateResult := result
-		candidateResult.Raw = cloneRuntimeValue(result.Raw)
+		candidateResult := cloneToolResult(result)
 		if err := stageMiddleware(ctx, state, "after_tool", func(candidate *State) error { return m.AfterTool(ctx, candidate, call, candidateResult) }); err != nil {
 			return err
 		}

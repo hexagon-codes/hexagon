@@ -40,6 +40,11 @@ func ModelSummaryCompactor(provider llm.CallProvider, request llm.CompletionRequ
 		if response == nil || strings.TrimSpace(response.Content) == "" || len(response.ToolCalls) > 0 {
 			return nil, fmt.Errorf("summary response did not contain a complete text summary")
 		}
+		switch strings.ToLower(strings.TrimSpace(response.FinishReason)) {
+		case "", "stop", "end_turn", "stop_sequence", "completed":
+		default:
+			return nil, fmt.Errorf("summary response ended without completion: %s", response.FinishReason)
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

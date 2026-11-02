@@ -21,6 +21,14 @@ func cloneStructuredPayload(payload *StructuredPayload) *StructuredPayload {
 	return &copy
 }
 
+func cloneToolResult(result ToolResult) ToolResult {
+	result.Raw = cloneRuntimeValue(result.Raw)
+	result.ContentParts = cloneContentParts(result.ContentParts)
+	result.ToolSnapshot = cloneRuntimeToolSnapshot(result.ToolSnapshot)
+	result.Structured = cloneStructuredPayload(result.Structured)
+	return result
+}
+
 // snapshotEventPayload 隔离观察者可见的数据；协议续传字节仍按私有字段保留。
 func snapshotEventPayload(event Event) Event {
 	if event.Response != nil {
@@ -58,11 +66,7 @@ func snapshotEventPayload(event Event) Event {
 		event.ToolCall = &call
 	}
 	if event.ToolResult != nil {
-		result := *event.ToolResult
-		result.Raw = cloneRuntimeValue(result.Raw)
-		result.ContentParts = cloneContentParts(result.ContentParts)
-		result.ToolSnapshot = cloneRuntimeToolSnapshot(result.ToolSnapshot)
-		result.Structured = cloneStructuredPayload(result.Structured)
+		result := cloneToolResult(*event.ToolResult)
 		event.ToolResult = &result
 	}
 	event.Metadata = cloneRuntimeMetadata(event.Metadata)
@@ -72,10 +76,7 @@ func snapshotEventPayload(event Event) Event {
 		copy.Metadata = cloneRuntimeMetadata(result.Metadata)
 		copy.ToolCalls = append([]ToolCallRecord(nil), result.ToolCalls...)
 		for i := range copy.ToolCalls {
-			copy.ToolCalls[i].Result.Raw = cloneRuntimeValue(copy.ToolCalls[i].Result.Raw)
-			copy.ToolCalls[i].Result.ContentParts = cloneContentParts(copy.ToolCalls[i].Result.ContentParts)
-			copy.ToolCalls[i].Result.ToolSnapshot = cloneRuntimeToolSnapshot(copy.ToolCalls[i].Result.ToolSnapshot)
-			copy.ToolCalls[i].Result.Structured = cloneStructuredPayload(copy.ToolCalls[i].Result.Structured)
+			copy.ToolCalls[i].Result = cloneToolResult(copy.ToolCalls[i].Result)
 		}
 		copy.OutputMessages = CloneOutputMessages(result.OutputMessages)
 		copy.Structured = append([]byte(nil), result.Structured...)

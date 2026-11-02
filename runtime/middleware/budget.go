@@ -14,7 +14,7 @@ import (
 // 之所以把起始时间存进 State.Attributes（而非 Budget 结构体字段），是因为同一个
 // Budget 中间件实例可能被多次 run 复用；而 State 由 runner 每次 run 新建，
 // 在其中惰性记录起始时间可保证墙钟维度按"单次 run"计量，且对中间件复用安全。
-const attrBudgetStartedAt = "runtime.budget.started_at"
+const attrBudgetStartedAt = hruntime.BudgetStartedAtMetadataKey
 
 // BudgetLimits 定义运行时预算的三个维度上限。任一维度取 0 表示该维度不限。
 //

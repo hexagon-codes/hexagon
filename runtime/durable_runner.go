@@ -43,6 +43,31 @@ func (d *DurableRunner) Submit(ctx context.Context, scope, inputID string, reque
 	if request.ID == "" {
 		return RunRecord{}, fmt.Errorf("runtime: durable submit requires an explicit run identity")
 	}
+	ingressDigest, err := originalIngressDigest(request)
+	if err != nil {
+		return RunRecord{}, err
+	}
+	// 已接受的入站先查原记录；当前路由或资源版本变化不改变原接收事实。
+	legacyAcceptance := false
+	if previous, found, err := d.Store.GetRun(ctx, scope, request.ID); err != nil {
+		return RunRecord{}, err
+	} else if found {
+		accepted, ok := previous.Inputs[inputID]
+		expected, digestErr := SubmissionDigest(SubmitRequest{Scope: scope, InputID: inputID, RunID: request.ID, Spec: previous.Spec, Input: previous.Spec.Request})
+		if digestErr != nil {
+			return RunRecord{}, digestErr
+		}
+		if !ok || accepted.Target != "" || accepted.Digest != expected {
+			return RunRecord{}, ErrCommitConflict
+		}
+		if previous.Spec.IngressDigest != "" {
+			if previous.Spec.IngressDigest != ingressDigest {
+				return RunRecord{}, ErrCommitConflict
+			}
+			return previous, nil
+		}
+		legacyAcceptance = true
+	}
 	active, prepared, references, release, err := d.Runner.prepareExecution(ctx, request)
 	if release != nil {
 		defer func() {
@@ -68,7 +93,32 @@ func (d *DurableRunner) Submit(ctx context.Context, scope, inputID string, reque
 		return RunRecord{}, err
 	}
 	spec.SelectedProvider = &ProviderRoute{Name: selected.Name, Model: selected.Model}
+	if !legacyAcceptance {
+		spec.IngressDigest = ingressDigest
+	}
 	return d.Store.Submit(ctx, SubmitRequest{Scope: scope, InputID: inputID, RunID: request.ID, Spec: spec, Input: spec.Request})
+}
+
+// originalIngressDigest 排除 Go 资源句柄，只保留调用方输入及策略名称。
+func originalIngressDigest(request Request) (string, error) {
+	request, err := CloneRequest(request)
+	if err != nil {
+		return "", err
+	}
+	strategy := strategyOrDefault(request.Strategy)
+	name := ""
+	if err := invokeExtension("strategy.name", func() error { name = strategy.Name(); return nil }); err != nil {
+		return "", err
+	}
+	request.Strategy = nil
+	data, err := json.Marshal(struct {
+		Input    frozenRequest `json:"input"`
+		Strategy string        `json:"strategy"`
+	}{frozenRequest{Request: request, Continuations: snapshotContinuations(request.Messages)}, name})
+	if err != nil {
+		return "", err
+	}
+	return ContentDigest(data)
 }
 
 // Execute 只消费 Worker 已取得的执行权；未找到/坏快照不会退回首次执行。
@@ -351,7 +401,24 @@ func (s *runSession) Save(ctx context.Context, snapshot Snapshot) error {
 		}
 		events = append(events, StoredEvent{Type: EventRunFinished, Payload: payload})
 	}
-	_, err = s.commitLocked(ctx, CommitRequest{Snapshot: data, Status: status, AdoptTaskIDs: adopt, ConsumeInputIDs: consume, Events: events})
+	targetSet := make(map[string]bool)
+	var visit func(*interrupt.PersistedSignal)
+	visit = func(signal *interrupt.PersistedSignal) {
+		if signal == nil {
+			return
+		}
+		targetSet[signal.ID] = true
+		for _, sub := range signal.Subs {
+			visit(sub)
+		}
+	}
+	visit(snapshot.Waiting)
+	targets := make([]string, 0, len(targetSet))
+	for id := range targetSet {
+		targets = append(targets, id)
+	}
+	sort.Strings(targets)
+	_, err = s.commitLocked(ctx, CommitRequest{Snapshot: data, Status: status, AdoptTaskIDs: adopt, ConsumeInputIDs: consume, Events: events, WaitingTargets: &targets})
 	if err == nil {
 		clear(s.pendingAdopt)
 		s.consumeInputs = nil

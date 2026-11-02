@@ -185,7 +185,7 @@ func (s *BaseStep) Execute(ctx context.Context, input StepInput) (*StepOutput, e
 	}
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		output, err := s.executeFn(ctx, input)
+		output, err := invokeStep(s.id, func() (*StepOutput, error) { return s.executeFn(ctx, input) })
 		if err == nil {
 			return output, nil
 		}
@@ -342,7 +342,7 @@ func (s *ParallelStep) Execute(ctx context.Context, input StepInput) (*StepOutpu
 				return
 			}
 
-			output, err := step.Execute(ctx, input)
+			output, err := invokeStep(step.ID(), func() (*StepOutput, error) { return step.Execute(ctx, input) })
 			results <- result{stepID: step.ID(), output: output, err: err}
 
 			if err != nil && s.failFast {

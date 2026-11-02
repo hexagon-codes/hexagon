@@ -314,7 +314,7 @@ func (e *Executor) executeWorkflow(ctx context.Context, state *executionState, i
 			Timestamp:   time.Now(),
 		})
 
-		output, err := step.Execute(ctx, stepInput)
+		output, err := invokeStep(step.ID(), func() (*StepOutput, error) { return step.Execute(ctx, stepInput) })
 
 		state.mu.Lock()
 		completedAt := time.Now()

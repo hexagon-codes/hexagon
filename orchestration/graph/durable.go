@@ -300,6 +300,22 @@ func (r *DurableGraphRunner[S]) run(ctx context.Context, scope, runID string, au
 		request.RunID = runID
 		request.Authority = authority
 		request.ExpectedRevision = record.Revision
+		if request.Snapshot != nil {
+			// 等待身份与同一次前沿快照提交；无等待时显式清空旧目标。
+			ids := make(map[string]bool)
+			for _, signal := range x.frontier.Waiting {
+				addresses, _ := interrupt.SignalToPersistenceMaps(signal)
+				for id := range addresses {
+					ids[id] = true
+				}
+			}
+			targets := make([]string, 0, len(ids))
+			for id := range ids {
+				targets = append(targets, id)
+			}
+			sort.Strings(targets)
+			request.WaitingTargets = &targets
+		}
 		encoded, err := json.Marshal(request)
 		if err != nil {
 			return err

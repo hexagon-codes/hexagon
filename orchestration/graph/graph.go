@@ -490,7 +490,7 @@ func (g *Graph[S]) Stream(ctx context.Context, initialState S, opts ...RunOption
 		if err != nil {
 			select {
 			case events <- StreamEvent[S]{Type: EventTypeError, State: state, Error: err}:
-			default:
+			case <-ctx.Done():
 			}
 		} else {
 			_ = x.emit(ctx, EventTypeEnd, "", state, nil)

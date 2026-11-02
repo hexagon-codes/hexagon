@@ -62,6 +62,8 @@ type Limits struct {
 }
 
 const (
+	// BudgetStartedAtMetadataKey 保存本 Run 首次预算检查的墙钟起点。
+	BudgetStartedAtMetadataKey = "runtime.budget.started_at"
 	// UsageSourceMetadataKey 标识实报完整性：reported、mixed 或 unknown。
 	UsageSourceMetadataKey = "usage_source"
 	// UsageReportedCallsMetadataKey 记录取得实际用量的模型调用数，明确零用量也计入。

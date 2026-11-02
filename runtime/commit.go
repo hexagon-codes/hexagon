@@ -59,6 +59,8 @@ type RunRecord struct {
 	Events          []StoredEvent                `json:"events,omitempty"`
 	NextSequence    int64                        `json:"next_sequence"`
 	CancelReason    string                       `json:"cancel_reason,omitempty"`
+	// WaitingTargets 固定当前可接续的目标；nil 为未声明，空切片为当前无等待。
+	WaitingTargets *[]string `json:"waiting_targets,omitempty"`
 }
 
 // CommitRequest 在第一次提交前冻结，结果未知时必须复用同一 ID 与全部内容。
@@ -80,6 +82,8 @@ type CommitRequest struct {
 	Operations       []Operation         `json:"operations,omitempty"`
 	Artifacts        []ArtifactReference `json:"artifacts,omitempty"`
 	Events           []StoredEvent       `json:"events,omitempty"`
+	// WaitingTargets 非 nil 时与快照一起替换当前等待目标，避免旧目标反复唤醒。
+	WaitingTargets *[]string `json:"waiting_targets,omitempty"`
 }
 
 // SealCommit 计算包含执行条件和全部事实的摘要，并通过序列化隔离可变引用。
@@ -260,6 +264,20 @@ func ApplyCommit(current RunRecord, request CommitRequest, now time.Time) (RunRe
 		}
 		next.Status = request.Status
 	}
+	if request.WaitingTargets != nil {
+		targets := append([]string{}, (*request.WaitingTargets)...)
+		next.WaitingTargets = &targets
+	}
+	// 只有仍属于当前等待集的输入需要调度；过期目标保留原事实，不盲消费或反复唤醒。
+	// 在同一权威行锁中的最新 Inputs 与等待集上判断，覆盖 Signal 与 finish 的交错窗口。
+	if next.Status == RunWaiting {
+		for _, input := range next.Inputs {
+			if input.Target != "" && input.ConsumedRevision == 0 && next.IsWaitingTarget(input.Target) {
+				next.Status = RunQueued
+				break
+			}
+		}
+	}
 	if request.WakeAt != nil {
 		next.WakeAt = *request.WakeAt
 	}
@@ -283,6 +301,19 @@ func ApplyCommit(current RunRecord, request CommitRequest, now time.Time) (RunRe
 	}
 	next.Revision = revision
 	return next, receipt, nil
+}
+
+// IsWaitingTarget 只查询已声明的目标，不根据任意输入猜测新的等待项。
+func (r RunRecord) IsWaitingTarget(target string) bool {
+	if r.WaitingTargets == nil {
+		return false
+	}
+	for _, id := range *r.WaitingTargets {
+		if id == target {
+			return true
+		}
+	}
+	return false
 }
 
 func sameJSON(a, b any) bool {

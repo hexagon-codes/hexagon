@@ -234,6 +234,7 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 		// RunSpec 的原始编码声明不可变；当前 Snapshot 编码由持久宿主先行验证/迁移。
 		actual.Codec = frozen.Codec
 		actual.SelectedProvider = frozen.SelectedProvider
+		actual.IngressDigest = frozen.IngressDigest
 		if !sameJSON(actual, frozen) {
 			return nil, fmt.Errorf("%w: prepared resources or request differ from frozen run", ErrUnrecoverableSpec)
 		}
@@ -366,6 +367,9 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 			_ = emitter.emit(ctx, Event{Type: EventRunFailed, State: state, Error: err, RuntimeError: runtimeError("middleware_before_llm", err)})
 			return canceledStateResult(state), err
 		}
+		if err := r.persistBudgetOrigin(ctx, state, runID, emitter); err != nil {
+			return canceledStateResult(state), err
+		}
 
 		// 每轮调 LLM 前 root-level sanitize：剥离孤立 tool message（找不到对应
 		// assistant.ToolCalls 的 tool result）。这是 host-agnostic 防御 —— 即使
@@ -373,9 +377,6 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 		// 导致 ToolCalls 字段丢失，本层也能产出契约级合规序列发给所有 provider
 		// （Anthropic 直连尤其依赖此层，它自己 buildRequestBody 不做 sanitize）。
 		// 参考 ai-core/llm/openai 内 BUG-20260523_* 测试套件还原的具体故障模式。
-		// cron_context 守卫：cron 相关上下文（解析/创建/编辑 cron）一律禁 tools，
-		// 从协议层根除 LLM tool_call 失败导致的 tool_use_id 链路 400 bug。
-		// 上游 host（hexclaw cron handlers）在 Metadata 里打 cron_context: true 即生效。
 		callReq, prepareErr := r.buildRunModelRequest(ctx, state, selection)
 		if prepareErr != nil {
 			return nil, prepareErr
@@ -448,8 +449,8 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 		if err := emitter.emit(ctx, Event{Type: EventLLMCompleted, State: state, Response: resp}); err != nil {
 			return canceledStateResult(state), err
 		}
-		if len(resp.ToolCalls) == 0 {
-			stop, finishErr := modelStopReason(resp.FinishReason)
+		stop, stopped, finishErr := modelResponseStop(resp)
+		if stopped {
 			if finishErr != nil {
 				return canceledStateResult(state), finishErr
 			}
@@ -568,6 +569,20 @@ func (r *DefaultRunner) execute(ctx context.Context, req Request, sink EventSink
 		return result, err
 	}
 	return result, nil
+}
+
+// modelResponseStop 先决议模型终态，再决定是否允许派发本轮工具。
+// 空原因保留现有 Provider 合同；Gemini 正常 STOP 与原生工具结束原因允许携带完整调用。
+func modelResponseStop(response *llm.CompletionResponse) (StopReason, bool, error) {
+	reason := strings.ToLower(strings.TrimSpace(response.FinishReason))
+	if len(response.ToolCalls) > 0 {
+		switch reason {
+		case "", "stop", "end_turn", "stop_sequence", "completed", "tool_calls", "tool_use", "function_call":
+			return "", false, nil
+		}
+	}
+	stop, err := modelStopReason(reason)
+	return stop, true, err
 }
 
 func (r *DefaultRunner) performProviderCall(ctx context.Context, req Request, selection ProviderSelection, callReq llm.CompletionRequest, state *State, emitter *runEmitter) (*llm.CompletionResponse, error) {

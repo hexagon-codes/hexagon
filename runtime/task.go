@@ -2,7 +2,10 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -56,6 +59,22 @@ type SubmitRequest struct {
 	Spec    RunSpec
 	Input   json.RawMessage
 }
+
+// SubmissionDigest 为接收身份计算摘要；新入口排除服务端解析后的路由，旧记录沿用原方案。
+func SubmissionDigest(request SubmitRequest) (string, error) {
+	var value any = request
+	if request.Spec.IngressDigest != "" {
+		value = struct{ Scope, InputID, RunID, IngressDigest string }{request.Scope, request.InputID, request.RunID, request.Spec.IngressDigest}
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+var ErrResumeTargetUnavailable = errors.New("runtime: resume target is no longer waiting")
 
 // TaskStore 由宿主消费；构造函数不启动 worker，连接与 worker ctx 均归宿主所有。
 type TaskStore interface {

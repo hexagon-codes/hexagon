@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	hr "github.com/hexagon-codes/hexagon/runtime"
 	"time"
+
+	"github.com/hexagon-codes/ai-core/llm"
+	hr "github.com/hexagon-codes/hexagon/runtime"
 )
 
 const workflowInputFormat = "workflow.input.v1"
@@ -204,6 +206,5 @@ func workflowRetryStopped(ctx context.Context, err error) bool {
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, hr.ErrOperationUnresolved) || errors.Is(err, hr.ErrCommitUnknown) {
 		return true
 	}
-	var unsafe interface{ UnsafeToReplay() bool }
-	return errors.As(err, &unsafe) && unsafe.UnsafeToReplay()
+	return llm.IsUnsafeToReplay(err)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
@@ -182,8 +183,37 @@ type ModelCallWrapper interface {
 	WrapModelCall(context.Context, *State, llm.CompletionRequest, ModelCall) (*llm.CompletionResponse, error)
 }
 
+// EventModelDraftReplaced 表示同一次模型包装调用放弃上一尝试的显示草稿。
+const EventModelDraftReplaced EventType = "model_draft_replaced"
+
 func (r *DefaultRunner) invokeProvider(ctx context.Context, req Request, selection ProviderSelection, callReq llm.CompletionRequest, state *State, emitter *runEmitter) (*llm.CompletionResponse, error) {
+	// 入口以前的部分回答属于显式 Continue；这里只撤回本包装调用产生的新草稿。
+	basePartial, baseReasoning := state.partialText, state.Reasoning
+	baseMessages, baseOutput := len(state.Messages), len(state.outputMessages)
+	baseDraft, baseDraftMessage, baseDraftOutput := state.hasPartialDraft, state.draftMessageStart, state.draftOutputStart
+	calls := 0
+	previousText := ""
+	var previousErr error
+	replaceDraft := func(ctx context.Context) error {
+		discarded := strings.TrimPrefix(state.partialText, basePartial)
+		if discarded == "" {
+			discarded = previousText
+		}
+		state.partialText, state.Reasoning = basePartial, baseReasoning
+		state.Messages, state.outputMessages = state.Messages[:baseMessages], state.outputMessages[:baseOutput]
+		state.hasPartialDraft, state.draftMessageStart, state.draftOutputStart = baseDraft, baseDraftMessage, baseDraftOutput
+		if req.StreamMode != StreamModeTokens {
+			return nil
+		}
+		return emitter.emit(ctx, Event{Type: EventModelDraftReplaced, State: state, Metadata: map[string]any{"output_action": "replace_draft", "replacement_text": basePartial, "discarded_text": discarded}})
+	}
 	var next ModelCall = func(ctx context.Context, prepared llm.CompletionRequest) (*llm.CompletionResponse, error) {
+		if calls > 0 {
+			if err := replaceDraft(ctx); err != nil {
+				return nil, err
+			}
+		}
+		calls++
 		frozen, err := CloneModelRequest(prepared)
 		if err != nil {
 			return nil, err
@@ -195,10 +225,17 @@ func (r *DefaultRunner) invokeProvider(ctx context.Context, req Request, selecti
 		state.Attributes["provider"] = active.Name
 		invocation := req
 		invocation.Purpose = modelPurpose(ctx, req.Purpose)
+		var response *llm.CompletionResponse
 		if r.session != nil {
-			return r.session.callModel(ctx, r, invocation, active, prepared, state, emitter)
+			response, err = r.session.callModel(ctx, r, invocation, active, prepared, state, emitter)
+		} else {
+			response, err = r.callProvider(ctx, invocation, active, prepared, state, emitter)
 		}
-		return r.callProvider(ctx, invocation, active, prepared, state, emitter)
+		previousErr, previousText = err, ""
+		if response != nil {
+			previousText = response.Content
+		}
+		return response, err
 	}
 	for i := len(r.middleware) - 1; i >= 0; i-- {
 		if wrapper, ok := r.middleware[i].(ModelCallWrapper); ok {
@@ -214,10 +251,20 @@ func (r *DefaultRunner) invokeProvider(ctx context.Context, req Request, selecti
 			}
 		}
 	}
+	var response *llm.CompletionResponse
+	var err error
 	if req.StructuredOutput != nil {
-		return r.invokeStructured(ctx, req, callReq, state, emitter, next)
+		response, err = r.invokeStructured(ctx, req, callReq, state, emitter, next)
+	} else {
+		response, err = next(ctx, callReq)
 	}
-	return next(ctx, callReq)
+	if err == nil && previousErr != nil {
+		// 包装器也可能直接提供替代结果，而不再次调用 next。
+		if err := replaceDraft(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return response, err
 }
 
 func usageDifference(after, before llm.Usage) llm.Usage {
@@ -225,14 +272,23 @@ func usageDifference(after, before llm.Usage) llm.Usage {
 }
 
 func buildModelRequest(state *State, selection ProviderSelection) (llm.CompletionRequest, error) {
-	req := state.Request
+	return PrepareModelRequest(state.Request, state.Messages, selection.Model)
+}
+
+// PrepareModelRequest 从当前历史和冻结的请求合同构造实际模型输入。
+// 返回值包含结构化输出的提示、结果工具和 Schema，不修改输入；调用方负责资源绑定和派发。
+func PrepareModelRequest(req Request, messages []llm.Message, model string) (llm.CompletionRequest, error) {
 	tools, err := llm.CloneToolDefinitions(req.Tools)
 	if err != nil {
 		return llm.CompletionRequest{}, fmt.Errorf("prepare tools: %w", err)
 	}
-	prepared, err := req.Generation.ApplyTo(llm.CompletionRequest{Model: selection.Model, Messages: sanitizeToolCallSequence(CloneOutputMessages(state.Messages)), Tools: tools, Metadata: cloneRuntimeMetadata(req.Metadata)})
+	prepared, err := req.Generation.ApplyTo(llm.CompletionRequest{Model: model, Messages: sanitizeToolCallSequence(CloneOutputMessages(messages)), Tools: tools, Metadata: cloneRuntimeMetadata(req.Metadata)})
 	if err != nil {
 		return llm.CompletionRequest{}, err
 	}
-	return prepareStructuredModelRequest(prepared, req.StructuredOutput)
+	spec, err := cloneStructuredOutputSpec(req.StructuredOutput)
+	if err != nil {
+		return llm.CompletionRequest{}, err
+	}
+	return prepareStructuredModelRequest(prepared, spec)
 }

@@ -35,8 +35,10 @@ type ContentReference struct {
 // RunSpec 保存可读配置及资源版本，Request 不包含 Strategy/Provider 等 Go 资源句柄。
 // 宿主按 Strategy 名称和资源引用重建依赖，无法取得原版本时显式失败。
 type RunSpec struct {
-	Version           string             `json:"version"`
-	RunID             string             `json:"run_id"`
+	Version string `json:"version"`
+	RunID   string `json:"run_id"`
+	// IngressDigest 固定准备资源之前的调用输入，重复提交不重新绑定 latest。
+	IngressDigest     string             `json:"ingress_digest,omitempty"`
 	ParentRunID       string             `json:"parent_run_id,omitempty"`
 	Request           json.RawMessage    `json:"request"`
 	Strategy          string             `json:"strategy"`

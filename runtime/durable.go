@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/hexagon/checkpoint"
@@ -14,8 +15,8 @@ import (
 // Snapshot 是一次执行在某个步边界上的持久化状态。
 //
 // 它只包含恢复一次 Agent 执行所必需的最小状态：步号、消息历史、已完成工具调用记录、
-// 累计用量与终止信息。Reasoning、Attributes 等运行期派生/易变数据不入快照，以免把
-// 易变细节固化进持久化格式、并降低与具体执行实现的耦合。
+// 累计用量与终止信息。Reasoning、Attributes 等运行期派生值不直接入快照；
+// 预算起点和用量来源等恢复事实通过明确字段保存。
 type Snapshot struct {
 	Phase ExecutionPhase `json:"phase,omitempty"`
 	// Spec 与 Codec 固定在途配置及状态编码；nil/零值保留旧检查点读取路径。
@@ -39,6 +40,8 @@ type Snapshot struct {
 	UsageMissingCalls         int `json:"usage_missing_calls,omitempty"`
 	UsagePartialCalls         int `json:"usage_partial_calls,omitempty"`
 	UsageKnownTokenLowerBound int `json:"usage_known_token_lower_bound,omitempty"`
+	// BudgetStartedAt 是恢复所需的预算事实，不随临时 Attributes 清空。
+	BudgetStartedAt *time.Time `json:"budget_started_at,omitempty"`
 	// Final 标记执行是否已得出最终答案。
 	Final bool `json:"final,omitempty"`
 	// FinalText 最终答案文本（Final 为真时有效）。
@@ -186,6 +189,10 @@ func SnapshotState(state *State, runID string) Snapshot {
 	snapshot.UsageMissingCalls = usageCount(state.Attributes, UsageMissingCallsMetadataKey)
 	snapshot.UsagePartialCalls = usageCount(state.Attributes, UsagePartialCallsMetadataKey)
 	snapshot.UsageKnownTokenLowerBound = usageCount(state.Attributes, UsageKnownTokenLowerBoundMetadataKey)
+	if started, ok := state.Attributes[BudgetStartedAtMetadataKey].(time.Time); ok {
+		started = started.Round(0)
+		snapshot.BudgetStartedAt = &started
+	}
 	if state.outputMessages != nil {
 		messages := cloneOutputMessages(state.outputMessages)
 		snapshot.OutputMessages = &messages
@@ -226,10 +233,32 @@ func (s Snapshot) RestoreState() *State {
 	}
 	state.Attributes[UsagePartialCallsMetadataKey] = s.UsagePartialCalls
 	state.Attributes[UsageKnownTokenLowerBoundMetadataKey] = s.UsageKnownTokenLowerBound
+	if s.BudgetStartedAt != nil {
+		state.Attributes[BudgetStartedAtMetadataKey] = *s.BudgetStartedAt
+	}
 	if s.UsagePartialCalls > 0 && s.UsageMissingCalls == 0 {
 		state.Attributes[UsageSourceMetadataKey] = "partial"
 	}
 	return state
+}
+
+// persistBudgetOrigin 在首次可能产生付费派发前保存预算起点；重建不能因尚无结果快照而重置。
+func (r *DefaultRunner) persistBudgetOrigin(ctx context.Context, state *State, runID string, emitter *runEmitter) error {
+	if r.durable == nil || runID == "" {
+		return nil
+	}
+	started, ok := state.Attributes[BudgetStartedAtMetadataKey].(time.Time)
+	if !ok {
+		return nil
+	}
+	previous, found, err := r.durable.Load(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if found && previous.BudgetStartedAt != nil && previous.BudgetStartedAt.Equal(started) {
+		return nil
+	}
+	return r.saveSnapshot(ctx, state, runID, emitter)
 }
 
 // DurableExecution 把"让一次长时 Agent 执行可持久化、可恢复"收敛为一个最小接口：
