@@ -169,3 +169,19 @@ func TestCriticalEvaluatorNamesAreNotInferred(t *testing.T) {
 		t.Fatalf("explicit critical configuration was ignored: %+v", critical)
 	}
 }
+
+func TestCanceledBaselineCannotPassWithoutSamples(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	metric := evaluate.NewCustomEvaluator("mandatory", "", func(context.Context, evaluate.EvalInput) (*evaluate.EvalResult, error) {
+		t.Fatal("canceled evaluation dispatched")
+		return nil, nil
+	})
+	result, err := QualityBaselineWithCriteria(ctx, baselineSuccessAgent(), baselineErrorDataset(), BaselineCriteria{MinScore: 0, CriticalEvaluators: []string{"mandatory"}}, metric)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Passed || len(result.Failures) == 0 || len(result.Report.Results) != 0 {
+		t.Fatalf("empty evaluation passed: %+v", result)
+	}
+}

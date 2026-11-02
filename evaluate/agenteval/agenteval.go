@@ -118,6 +118,12 @@ func QualityBaselineWithCriteria(ctx context.Context, a Runnable, dataset *evalu
 	}
 
 	res := &BaselineResult{Report: report, Passed: true}
+	if err := ctx.Err(); err != nil {
+		res.Failures = append(res.Failures, "evaluation canceled: "+err.Error())
+	}
+	if len(report.Results) != len(dataset.Samples) {
+		res.Failures = append(res.Failures, "evaluation results are incomplete")
+	}
 	for _, sample := range report.Results {
 		if sample.Error != "" {
 			res.Failures = append(res.Failures, fmt.Sprintf("sample %q: %s", sample.SampleID, sample.Error))
