@@ -271,12 +271,13 @@ func (s *Server) handleSendMessage(ctx context.Context, params json.RawMessage) 
 		return nil, ToA2AError(err)
 	}
 
-	runCtx, release, beginErr := s.beginExecution(ctx, task.ID)
+	runCtx, currentTask, release, beginErr := s.beginExecution(ctx, task.ID)
 	if beginErr != nil {
 		return nil, beginErr
 	}
 	defer release()
 	ctx = runCtx
+	task = currentTask
 	req.Message.TaskID, req.Message.ContextID = task.ID, task.SessionID
 	// 添加消息到历史
 	task.History = append(task.History, req.Message)
@@ -289,7 +290,7 @@ func (s *Server) handleSendMessage(ctx context.Context, params json.RawMessage) 
 	if err := s.commitTask(ctx, task); err != nil {
 		return nil, ToA2AError(err)
 	}
-	if task.Status.State == TaskStateCanceled {
+	if task.Status.State.IsTerminal() {
 		return task, nil
 	}
 
@@ -330,13 +331,14 @@ func (s *Server) handleSendMessageStream(ctx context.Context, w http.ResponseWri
 		s.writeSSEError(w, ToA2AError(err))
 		return
 	}
-	runCtx, release, beginErr := s.beginExecution(ctx, task.ID)
+	runCtx, currentTask, release, beginErr := s.beginExecution(ctx, task.ID)
 	if beginErr != nil {
 		s.writeSSEError(w, beginErr)
 		return
 	}
 	defer release()
 	ctx = runCtx
+	task = currentTask
 	normalizeMessage(&req.Message, task)
 	task.History = append(task.History, req.Message)
 	task.Status = TaskStatus{State: TaskStateWorking, Timestamp: time.Now()}
@@ -349,6 +351,9 @@ func (s *Server) handleSendMessageStream(ctx context.Context, w http.ResponseWri
 	flusher := w.(http.Flusher)
 	s.writeSSEEvent(w, "task", &TaskEvent{Task: projectHistory(task, req.HistoryLimit)})
 	flusher.Flush()
+	if task.Status.State.IsTerminal() {
+		return
+	}
 	emit := func(update *TaskUpdate, runErr error) bool {
 		if update == nil && runErr == nil {
 			return false

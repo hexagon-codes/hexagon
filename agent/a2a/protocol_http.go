@@ -266,15 +266,23 @@ func normalizeMessage(message *Message, task *Task) {
 	message.TaskID, message.ContextID = task.ID, task.SessionID
 }
 
-func (s *Server) beginExecution(ctx context.Context, id string) (context.Context, func(), *Error) {
+func (s *Server) beginExecution(ctx context.Context, id string) (context.Context, *Task, func(), *Error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.executions[id]; ok {
-		return nil, nil, NewUnsupportedOperationError("task already executing")
+		return nil, nil, nil, NewUnsupportedOperationError("task already executing")
+	}
+	// 任务读取与执行准入共享临界区；锁外读取的旧快照不能重开已完成任务。
+	task, err := s.store.Get(ctx, id)
+	if err != nil {
+		return nil, nil, nil, ToA2AError(err)
+	}
+	if task.Status.State.IsTerminal() {
+		return nil, nil, nil, NewUnsupportedOperationError("terminal tasks are immutable")
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	s.executions[id] = cancel
-	return runCtx, func() { cancel(); s.mu.Lock(); delete(s.executions, id); s.mu.Unlock() }, nil
+	return runCtx, task, func() { cancel(); s.mu.Lock(); delete(s.executions, id); s.mu.Unlock() }, nil
 }
 
 func (s *Server) commitTask(ctx context.Context, task *Task) error {
@@ -284,7 +292,7 @@ func (s *Server) commitTask(ctx context.Context, task *Task) error {
 	if err != nil {
 		return err
 	}
-	if current.Status.State == TaskStateCanceled {
+	if current.Status.State.IsTerminal() {
 		*task = *current
 		return nil
 	}
