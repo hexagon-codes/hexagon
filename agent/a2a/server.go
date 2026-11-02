@@ -321,7 +321,11 @@ func (s *Server) handleSendMessage(ctx context.Context, params json.RawMessage) 
 	if invalidResponse != nil && task.Status.State == TaskStateFailed {
 		return nil, invalidResponse
 	}
-	return projectHistory(task, req.HistoryLimit), nil
+	projected, err := projectHistory(task, req.HistoryLimit)
+	if err != nil {
+		return nil, ToA2AError(err)
+	}
+	return projected, nil
 }
 
 // handleSendMessageStream 处理流式发送消息
@@ -358,7 +362,13 @@ func (s *Server) handleSendMessageStream(ctx context.Context, w http.ResponseWri
 	w.Header().Set("Content-Type", ContentTypeSSE)
 	w.Header().Set("Cache-Control", "no-cache")
 	flusher := w.(http.Flusher)
-	s.writeSSEEvent(w, "task", &TaskEvent{Task: projectHistory(task, req.HistoryLimit)})
+	projected, err := projectHistory(task, req.HistoryLimit)
+	if err != nil {
+		s.writeSSEError(w, ToA2AError(err))
+		flusher.Flush()
+		return
+	}
+	s.writeSSEEvent(w, "task", &TaskEvent{Task: projected})
 	flusher.Flush()
 	if task.Status.State.IsTerminal() {
 		return
@@ -448,7 +458,10 @@ func (s *Server) handleGetTask(ctx context.Context, params json.RawMessage) (*Ta
 	if limit != nil && *limit < 0 {
 		return nil, NewInvalidParamsError("historyLength must be non-negative")
 	}
-	task = projectHistory(task, limit)
+	task, err = projectHistory(task, limit)
+	if err != nil {
+		return nil, ToA2AError(err)
+	}
 
 	return task, nil
 }

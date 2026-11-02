@@ -1,9 +1,52 @@
 package a2a
 
 import (
+	"encoding/json"
+	"errors"
 	"math/big"
 	"testing"
 )
+
+type privateProtocolValue struct {
+	value map[string]any
+}
+
+func (v privateProtocolValue) MarshalJSON() ([]byte, error) { return json.Marshal(v.value) }
+
+func TestMemoryTaskStoreRejectsUnisolatableValueWithoutMutation(t *testing.T) {
+	store := NewMemoryTaskStore(WithTaskTTL(0), WithMaxTasks(1))
+	defer store.Close()
+	original := NewTask("original")
+	original.Status.State = TaskStateCompleted
+	original.Metadata = map[string]any{"value": "original"}
+	if err := store.Create(t.Context(), original); err != nil {
+		t.Fatal(err)
+	}
+	invalid := NewTask("unisolatable")
+	invalid.Metadata = map[string]any{"private": privateProtocolValue{value: map[string]any{"value": "unshared"}}}
+	if _, err := json.Marshal(invalid); err != nil {
+		t.Fatalf("fixture must remain valid protocol JSON: %v", err)
+	}
+	if err := store.Create(t.Context(), invalid); err == nil {
+		t.Fatal("unisolatable value was accepted")
+	}
+	if _, err := store.Get(t.Context(), invalid.ID); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("failed create left a task: %v", err)
+	}
+	updated := *invalid
+	updated.ID = original.ID
+	if err := store.Update(t.Context(), &updated); err == nil {
+		t.Fatal("unisolatable update was accepted")
+	}
+	stored, err := store.Get(t.Context(), original.ID)
+	if err != nil || stored.Metadata["value"] != "original" {
+		t.Fatalf("failed write changed or evicted original task: %+v %v", stored, err)
+	}
+	listed, err := store.List(t.Context(), &ListTasksRequest{})
+	if err != nil || len(listed.Tasks) != 1 || listed.Tasks[0].ID != original.ID {
+		t.Fatalf("failed write changed stored task list: %+v %v", listed, err)
+	}
+}
 
 func TestMemoryTaskStoreIsolatesNestedProtocolData(t *testing.T) {
 	fixture := func() *Task {

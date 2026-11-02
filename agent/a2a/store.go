@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -109,6 +110,10 @@ func (s *MemoryTaskStore) GenerateID() string {
 
 // Create 创建任务
 func (s *MemoryTaskStore) Create(_ context.Context, task *Task) error {
+	stored, err := cloneTask(task)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -129,9 +134,10 @@ func (s *MemoryTaskStore) Create(_ context.Context, task *Task) error {
 		task.CreatedAt = now
 	}
 	task.UpdatedAt = now
+	stored.CreatedAt, stored.UpdatedAt = task.CreatedAt, task.UpdatedAt
 
 	// 保存任务
-	s.tasks[task.ID] = cloneTask(task)
+	s.tasks[task.ID] = stored
 
 	// 更新会话索引
 	if task.SessionID != "" {
@@ -152,7 +158,7 @@ func (s *MemoryTaskStore) Get(_ context.Context, id string) (*Task, error) {
 	}
 
 	// 回归: B13 — copy-on-read 返回深拷贝, 避免调用方就地修改污染存储内部状态。
-	return cloneTask(task), nil
+	return cloneTask(task)
 }
 
 // Update 更新任务
@@ -165,7 +171,10 @@ func (s *MemoryTaskStore) Update(_ context.Context, task *Task) error {
 	}
 
 	// 回归: B13 — 存入前深拷贝隔离, 防止调用方后续修改传入指针影响存储内部状态。
-	stored := cloneTask(task)
+	stored, err := cloneTask(task)
+	if err != nil {
+		return err
+	}
 	stored.UpdatedAt = time.Now()
 	s.tasks[task.ID] = stored
 
@@ -243,7 +252,11 @@ func (s *MemoryTaskStore) List(_ context.Context, opts *ListTasksRequest) (*List
 		tasks = tasks[:opts.Limit]
 	}
 	for i, task := range tasks {
-		tasks[i] = cloneTask(task)
+		cloned, err := cloneTask(task)
+		if err != nil {
+			return nil, err
+		}
+		tasks[i] = cloned
 	}
 
 	return &ListTasksResponse{
@@ -391,8 +404,13 @@ func sortTasksByCreatedAt(tasks []*Task) {
 
 // cloneTask 递归复制协议消息、产物和元数据，隔离读写双方持有的嵌套引用。
 // 保留 Go 数值类型、媒体字节与时间值，不经 JSON 往返改变数据表示。
-func cloneTask(task *Task) *Task {
-	return reflectx.DeepCopy(task)
+// 无法隔离的扩展值返回错误，不保存或返回仍共享内部引用的对象。
+func cloneTask(task *Task) (*Task, error) {
+	cloned, err := reflectx.DeepCopyChecked(task)
+	if err != nil {
+		return nil, fmt.Errorf("a2a: task cannot be isolated: %w", err)
+	}
+	return cloned, nil
 }
 
 // ============== PushConfigStore 接口 ==============

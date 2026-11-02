@@ -40,6 +40,7 @@ hexagon 是 Hexagon 生态的 **AI Agent 框架（L2）**，向下依赖 toolkit
 | `ChildRunResult.ControlError` | 可选 `control_error` 保存首次执行的控制错误分类；旧 nil 记录保守处理。恢复已知普通失败不重派原任务，同时允许读取组合内后续已保存结果；不改变 Runtime 通用 TaskExecutionError 的不可重放语义 |
 | 并行组合 / Workflow 回调 | 并行错误保留有序分支状态和完整错误树；已有成功、unknown 或取消未确认的组合不整组盲重放，全部普通失败仍可按原策略重试。完成前业务 hook 失败可转失败；已提交完成后的观察通知失败只显式报错，不回退已确认终态 |
 | MCP / A2A | MCP 双向传递 ai-core 已支持的递归 Schema。A2A 同步阻塞处理器返回非终态且非等待状态时，任务保存为 failed、保留消息产物并返回 InvalidAgentResponse 与 taskId；Final 不是自动 completed 的依据。未支持的立即返回模式仍明确报告 |
+| A2A 任务复制 | Create/Get/Update/List 与历史投影使用可失败的保类型复制并传播错误；不能隔离的数据不作为成功结果返回。支持普通 JSON 数据、typed 数字/容器/媒体字节、time.Time 和 big.Int；自定义私有可变对象须满足所属复制合同。公开 Store 方法签名不变，失败创建不清理已有容量数据 |
 | Artifact / 评估身份 | Artifact 读写隔离完整可变 Metadata，合法 time.Time 保持值与时区；确实无法隔离的值显式返回错误。Dataset/Single/Batch 执行前固定评估器 Name，重复名称在执行系统或评估器前报错，不覆盖已有结果 |
 | 迁移快照读取 | 持久会话缓存经校验的迁移载荷，缓存只对原持久字节有效；新快照使旧缓存失效。每次读取仍产生独立值，不反复迁移或让调用方改写缓存 |
 | `ParallelStepResult` / `ParallelStepError` | Workflow 并行步骤保留有序完整 Output 与错误；Graph 的 MapReduce/Pregel 复用 ParallelExecutionError。只有纯中断错误树进入等待，混合普通失败/unknown 不被单个中断遮蔽；已成功或未知分支不整组盲重放 |

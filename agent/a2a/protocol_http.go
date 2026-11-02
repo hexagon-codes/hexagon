@@ -196,12 +196,15 @@ func decodeProtocolEvent(data string) StreamEvent {
 	}
 }
 
-func projectHistory(task *Task, limit *int) *Task {
-	result := cloneTask(task)
+func projectHistory(task *Task, limit *int) (*Task, error) {
+	result, err := cloneTask(task)
+	if err != nil {
+		return nil, err
+	}
 	if limit != nil && *limit >= 0 && len(result.History) > *limit {
 		result.History = result.History[len(result.History)-*limit:]
 	}
-	return result
+	return result, nil
 }
 
 func (s *Server) protocolList(ctx context.Context, req *ListTasksRequest) (*ListTasksResponse, *Error) {
@@ -240,7 +243,10 @@ func (s *Server) protocolList(ctx context.Context, req *ListTasksRequest) (*List
 		end = len(tasks)
 	}
 	for _, task := range tasks[start:end] {
-		value := projectHistory(task, req.HistoryLimit)
+		value, err := projectHistory(task, req.HistoryLimit)
+		if err != nil {
+			return nil, ToA2AError(err)
+		}
 		if !req.IncludeArtifacts {
 			value.Artifacts = nil
 		}
