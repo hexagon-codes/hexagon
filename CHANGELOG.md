@@ -22,6 +22,13 @@
 
 ### Fixed
 
+- Graph的状态复制入口统一捕获panic并保留栈与不可重放标记；流适配的三处异步panic保留`AsyncPanicError`，不再被Retry重复执行。
+- 流组合同时传达正常执行之后的源/输入清理错误，不让关闭回调失败在延迟清理中逃逸为进程panic，或使调用方盲目重放已读取的数据。
+- A2A TimeoutMiddleware登记后台worker的实际生命周期，隔离任务/消息输入，在真正清理前保持执行归属；worker内部panic成为失败任务。Stop先结束自有只读SSE重订阅，Background停止不再被在线订阅阻塞。
+- MCP按精确整数/字符串身份关联Schema响应，清理失败或无RPC响应的pending记录，同时保留202延迟响应及可恢复SSE的关联；Read/Close可并发访问续传标记。
+- Runtime失败出口保留已发生用量及工具结果；费用累计保留亚微美元余量并在退款时共同结算。质量基线在取消或样本缺失时不通过；插件Init/Start/Stop的同名操作等待支持取消。
+- Browser Runtime以连续页面ID区间压缩关闭历史，保留旧页面关闭确认及旧Set迁移，存储随仍活跃的ID间隙变化。
+
 - core Retry/Fallback和Workflow步骤统一遵守中断、取消及未知结果的不可重放分类；Future并行组合保留完整错误树和结果，框架异步回调panic转为含栈失败。图的并行纯等待保存全部目标，StateMachine在取消边界停止新派发。
 - Agent/Team流转换复用逐元素适配器的关闭与错误传播；同一Input的文本增量可按序Collect，Context冲突明确返回。结构化修正先核对模型非正常终态，保留原原因和已知用量。
 - Artifact自动身份基于完整元组生成，避免会话/名称斜杠碰撞；A2A重复创建先查重，任务移动同步索引，配置存取隔离且只构造实际需要的默认存储；阻塞Handler不以Working静默结束SSE。

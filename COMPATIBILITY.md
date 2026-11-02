@@ -17,6 +17,13 @@ hexagon 是 Hexagon 生态的 **AI Agent 框架（L2）**，向下依赖 toolkit
 
 ## 流终态、服务停机与Schema补充合同
 
+- Graph的节点、结果采用、事件快照及Inspect复制使用同一panic失败边界，保留`NodePanicError`与栈；StreamRun错误事件携带可用的panic栈。流组合的异步源/收集/逐元素适配使用`AsyncPanicError`，副作用未知时不自动重放。
+- A2A TimeoutMiddleware对异步调用隔离Task/Message，正常完成才采用其修改；超时不采用迟到更新。超时worker及其嵌套工作真实结束前仍占用执行归属，Stop可以按ctx期限返回但不能提前宣告排空。自有只读Resubscribe在Shutdown前结束；普通任务和stream producer仍遵守原宽限及合作式结束合同，不宣称强杀。
+- MCP关联ID时区分字符串和数字，并精确归一化等值整数表示，不截断分数。普通失败响应结束即释放pending；202或携带续传事件ID的SSE仍可能返回后续结果，保留其关联直至真正响应或所属会话结束。
+- Runtime在fallback观察失败、后续请求准备失败或空模型响应时返回已有部分结果及错误；已有费用、工具事实不因诊断失败丢失。UsageAccumulator内部保留亚微美元余量，Snapshot仍按整数微美元舍入；退款共享余量并限定余额不小于零，不代表供应商账务。
+- QualityBaseline取消、缺少样本或关键维度未明确通过时不得通过。插件同名生命周期操作仍串行，等待者的ctx只结束自身等待，不撤销正在进行的另一操作。
+- 浏览器关闭历史以递增页面ID的前缀/区间表示，迁移已有Set并保留所有已知关闭ID；已关闭数量可持续增长，但不再为每个已关闭页长期保留独立键。存储区间与活跃ID间隙相关，Context关闭后释放。
+
 - 流过滤器 panic 属于本轮执行失败，返回含栈错误终态并取消图执行。正常事件过滤与缓冲丢弃不能删除终态。
 - Stop 的完成信号表示 HTTP 请求、已准入任务及流生产者均已实际结束；首次 Stop 超时不代表排空，后续 Stop 继续等待，期间 Start 拒绝启动。`StreamingTaskHandler` 返回的通道必须在生产者完成清理后关闭，即使已经发出 Final 或收到取消；不合作的生产者不会被伪称已停止。
 - MCP 原文捕获按 tools/list 请求身份关联，只处理 SDK 接受的响应事件；MIME 参数不改变媒体类型，SSE EOF 的末行也参与解析。已经由自定义 Transport 或调用者舍入的 float64 无法重建原始精度，该边界不变。
