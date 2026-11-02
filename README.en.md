@@ -6,7 +6,7 @@
 
 **An AI Agent Framework for Go**
 
-[![Go Reference](https://img.shields.io/badge/Go-1.25.13+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
+[![Go Reference](https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white)](https://pkg.go.dev/github.com/hexagon-codes/hexagon)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/hexagon-codes/hexagon/actions/workflows/ci.yml/badge.svg)](https://github.com/hexagon-codes/hexagon/actions/workflows/ci.yml)
 
@@ -42,7 +42,9 @@ Hexagon works with the following repositories for AI Agent development:
 | **toolkit** | Go general-purpose toolkit (lang/crypto/net/cache/util) | [github.com/hexagon-codes/toolkit](https://github.com/hexagon-codes/toolkit) |
 | **hexagon-ui** | Dev UI frontend (Vue 3 + TypeScript) | [github.com/hexagon-codes/hexagon-ui](https://github.com/hexagon-codes/hexagon-ui) |
 
-> Documentation version: **v0.5.15** ([changes](CHANGELOG.md)). Current root-module baseline: Go 1.25.13, ai-core v0.2.12, and toolkit v0.3.5. `examples/` is a standalone Go module; its dependency versions are defined by `examples/go.mod` and are not automatically synchronized with the root module.
+> Local delivery target: **v0.6.0** ([changes](CHANGELOG.md)), with Go 1.26.10, ai-core v0.3.0, and Toolkit v0.3.7. No target tag has been created or pushed, and public module resolution has not been established. Local candidate validation is separate from publication. The standalone `examples/` module targets the same combination and is validated independently, without a workspace or older tags masking current APIs.
+
+Applications can use `agent.NewToolExecutor` for `runtime.Config.ToolExecutor`, then opt into `DurableRunner`. Ordinary `Run/Stream` does not require SQL. See the [public integration and recovery contracts](COMPATIBILITY.md) for structured results, snapshot boundaries, tool-result reconciliation, independent model sessions, and durable SSE. An in-memory assembly does not provide the durable assembly's recovery guarantees.
 
 ### 🧠 ai-core — AI Capability Library
 
@@ -110,8 +112,10 @@ npm run dev
 ### 📦 Installation
 
 ```bash
-go get github.com/hexagon-codes/hexagon
+go get github.com/hexagon-codes/hexagon@v0.6.0
 ```
+
+This command targets the delivery version and requires a published tag and verified public module availability. Validation through an isolated, versioned local module proxy does not establish that the public proxy already serves this version.
 
 ### ⚙️ Environment Setup
 
