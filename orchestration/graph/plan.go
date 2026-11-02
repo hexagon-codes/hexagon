@@ -251,6 +251,8 @@ type predecessorArrival struct {
 	SourceTaskID     string `json:"source_task_id"`
 	SourceGeneration uint64 `json:"source_generation"`
 	TargetGeneration uint64 `json:"target_generation"`
+	// Skipped 为未选分支；旧记录没有该字段时仍表示实际完成到达。
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 type savedNodeResult struct {

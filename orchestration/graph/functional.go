@@ -174,6 +174,7 @@ func (wf *Workflow[S]) Tasks() map[string]*TaskDef[S] {
 
 // RunParallel 并行执行多个任务
 // 所有任务共享同一初始状态的克隆，结果通过 merger 合并
+// 错误时收敛已派发任务并返回 ParallelExecutionError；各成功/失败结果可独立核对。
 func RunParallel[S State](ctx context.Context, state S, merger func(original S, results []S) S, tasks ...*TaskDef[S]) (S, error) {
 	if len(tasks) == 0 {
 		return state, nil
@@ -194,12 +195,14 @@ func RunParallel[S State](ctx context.Context, state S, merger func(original S, 
 	}
 
 	results := make([]S, len(tasks))
+	outcomes := make([]ParallelResult[S], len(tasks))
 	for range tasks {
 		r := <-resultCh
-		if r.err != nil {
-			return state, fmt.Errorf("并行任务 %q 失败: %w", tasks[r.index].Name, r.err)
-		}
+		outcomes[r.index] = ParallelResult[S]{Name: tasks[r.index].Name, State: r.state, Error: r.err}
 		results[r.index] = r.state
+	}
+	if err := parallelFailure("tasks", outcomes); err != nil {
+		return state, err
 	}
 
 	if merger == nil {

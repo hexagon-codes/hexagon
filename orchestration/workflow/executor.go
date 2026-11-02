@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -62,6 +63,7 @@ type executionState struct {
 	mu             sync.Mutex
 	ctx            context.Context
 	persistenceErr error
+	executionErr   error
 }
 
 // ExecutorOption 执行器选项
@@ -102,6 +104,7 @@ func NewExecutor(opts ...ExecutorOption) *Executor {
 }
 
 // OnEvent 注册事件处理器
+// 每个观察者取得独立载荷；通知失败会返回错误，不撤销已经提交的终态。
 func (e *Executor) OnEvent(handler WorkflowEventHandler) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -109,15 +112,23 @@ func (e *Executor) OnEvent(handler WorkflowEventHandler) {
 }
 
 // emitEvent 发送事件
-func (e *Executor) emitEvent(event *WorkflowEvent) {
+func (e *Executor) emitEvent(event *WorkflowEvent) error {
 	e.mu.RLock()
 	handlers := make([]WorkflowEventHandler, len(e.eventHandlers))
 	copy(handlers, e.eventHandlers)
 	e.mu.RUnlock()
 
 	for _, handler := range handlers {
-		handler(event)
+		if err := observeWorkflowValue("event."+string(event.Type), event.Data, func(data any) error {
+			copy := *event
+			copy.Data = data
+			handler(&copy)
+			return nil
+		}); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // Run 同步运行工作流
@@ -184,7 +195,7 @@ func (e *Executor) RunAsync(ctx context.Context, wf *Workflow, input WorkflowInp
 
 	// 触发开始钩子
 	if e.hooks != nil && e.hooks.OnStart != nil {
-		if err := e.hooks.OnStart(ctx, wf, input); err != nil {
+		if err := observeWorkflowValue("on_start", input, func(copy WorkflowInput) error { return e.hooks.OnStart(ctx, wf, copy) }); err != nil {
 			return "", fmt.Errorf("start hook failed: %w", err)
 		}
 	}
@@ -220,12 +231,17 @@ func (e *Executor) startExecution(ctx context.Context, wf *Workflow, execution *
 	if recovered {
 		eventType = EventWorkflowResumed
 	}
-	e.emitEvent(&WorkflowEvent{
+	if err := e.emitEvent(&WorkflowEvent{
 		Type:        eventType,
 		ExecutionID: execution.ID,
 		Status:      StatusRunning,
 		Timestamp:   time.Now(),
-	})
+	}); err != nil {
+		e.failExecution(state, err)
+		cancel()
+		close(state.doneCh)
+		return "", err
+	}
 
 	// 异步执行
 	go e.executeWorkflow(execCtx, state, input)
@@ -303,16 +319,22 @@ func (e *Executor) executeWorkflow(ctx context.Context, state *executionState, i
 
 		// 触发步骤开始钩子
 		if e.hooks != nil && e.hooks.OnStepStart != nil {
-			e.hooks.OnStepStart(ctx, step, stepInput.Data)
+			if err := observeWorkflowValue(step.ID()+".on_step_start", stepInput.Data, func(copy any) error { return e.hooks.OnStepStart(ctx, step, copy) }); err != nil {
+				e.failExecution(state, err)
+				return
+			}
 		}
 
-		e.emitEvent(&WorkflowEvent{
+		if err := e.emitEvent(&WorkflowEvent{
 			Type:        EventStepStarted,
 			ExecutionID: execution.ID,
 			StepID:      step.ID(),
 			Status:      StatusRunning,
 			Timestamp:   time.Now(),
-		})
+		}); err != nil {
+			e.failExecution(state, err)
+			return
+		}
 
 		output, err := invokeStep(step.ID(), func() (*StepOutput, error) { return step.Execute(ctx, stepInput) })
 
@@ -330,24 +352,30 @@ func (e *Executor) executeWorkflow(ctx context.Context, state *executionState, i
 			state.mu.Unlock()
 
 			// 触发步骤错误钩子
+			var callbackErr error
 			if e.hooks != nil && e.hooks.OnStepError != nil {
-				e.hooks.OnStepError(ctx, step, err)
+				callbackErr = invokeWorkflowCallback(step.ID()+".on_step_error", func() error { return e.hooks.OnStepError(ctx, step, err) })
 			}
 
-			e.emitEvent(&WorkflowEvent{
+			callbackErr = errors.Join(callbackErr, e.emitEvent(&WorkflowEvent{
 				Type:        EventStepFailed,
 				ExecutionID: execution.ID,
 				StepID:      step.ID(),
 				Status:      StatusFailed,
 				Error:       err.Error(),
 				Timestamp:   time.Now(),
-			})
+			}))
 
+			if callbackErr != nil {
+				e.failExecution(state, errors.Join(err, callbackErr))
+				return
+			}
 			status := StatusFailed
 			if ctx.Err() != nil {
 				status = StatusCancelled
 			}
-			e.setExecutionStatus(state, status, fmt.Sprintf("step %s failed: %s", step.ID(), err.Error()))
+			// 普通步骤失败保留原等待合同：返回终态记录，由 Run 转成业务执行错误。
+			_ = e.setExecutionStatus(state, status, fmt.Sprintf("step %s failed: %s", step.ID(), err))
 			return
 		}
 
@@ -377,17 +405,23 @@ func (e *Executor) executeWorkflow(ctx context.Context, state *executionState, i
 
 		// 触发步骤完成钩子
 		if e.hooks != nil && e.hooks.OnStepComplete != nil {
-			e.hooks.OnStepComplete(ctx, step, output)
+			if err := observeWorkflowValue(step.ID()+".on_step_complete", output, func(copy *StepOutput) error { return e.hooks.OnStepComplete(ctx, step, copy) }); err != nil {
+				e.failExecution(state, err)
+				return
+			}
 		}
 
-		e.emitEvent(&WorkflowEvent{
+		if err := e.emitEvent(&WorkflowEvent{
 			Type:        EventStepCompleted,
 			ExecutionID: execution.ID,
 			StepID:      step.ID(),
 			Status:      StatusCompleted,
 			Data:        output,
 			Timestamp:   time.Now(),
-		})
+		}); err != nil {
+			e.failExecution(state, err)
+			return
+		}
 
 	}
 
@@ -404,17 +438,18 @@ func (e *Executor) executeWorkflow(ctx context.Context, state *executionState, i
 	state.mu.Lock()
 	execution.Output = outputData
 	state.mu.Unlock()
-	if err := e.setExecutionStatus(state, StatusCompleted, ""); err != nil {
-		return
-	}
-
 	// 触发完成钩子
 	if e.hooks != nil && e.hooks.OnComplete != nil {
-		e.hooks.OnComplete(ctx, wf, &WorkflowOutput{
+		output := &WorkflowOutput{
 			Data:      stepInput.Data,
 			Variables: stepInput.Variables,
-		})
+		}
+		if err := observeWorkflowValue("on_complete", output, func(copy *WorkflowOutput) error { return e.hooks.OnComplete(ctx, wf, copy) }); err != nil {
+			e.failExecution(state, err)
+			return
+		}
 	}
+	_ = e.setExecutionStatus(state, StatusCompleted, "")
 }
 
 // setExecutionStatus 设置执行状态
@@ -460,13 +495,25 @@ func (e *Executor) setExecutionStatus(state *executionState, status WorkflowStat
 	}
 
 	if eventType != "" {
-		e.emitEvent(&WorkflowEvent{
+		err := e.emitEvent(&WorkflowEvent{
 			Type:        eventType,
 			ExecutionID: execution.ID,
 			Status:      status,
 			Error:       errMsg,
 			Timestamp:   now,
 		})
+		if err != nil {
+			switch status {
+			case StatusPaused, StatusRunning:
+				e.failExecution(state, err)
+			case StatusCompleted, StatusCancelled:
+				// 终态通知失败只报告调用错误，不撤销已经提交的业务事实。
+				state.mu.Lock()
+				state.executionErr = errors.Join(state.executionErr, err)
+				state.mu.Unlock()
+			}
+		}
+		return err
 	}
 	return nil
 }
@@ -560,7 +607,7 @@ func (e *Executor) WaitForCompletion(ctx context.Context, executionID string, ti
 
 		select {
 		case <-state.doneCh:
-			return state.execution, state.persistenceErr
+			return completedExecution(state)
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -568,7 +615,7 @@ func (e *Executor) WaitForCompletion(ctx context.Context, executionID string, ti
 
 	select {
 	case <-state.doneCh:
-		return state.execution, state.persistenceErr
+		return completedExecution(state)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

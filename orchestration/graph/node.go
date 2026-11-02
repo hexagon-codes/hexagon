@@ -198,6 +198,8 @@ func ParallelNode[S State](name string, handlers ...NodeHandler[S]) *Node[S] {
 //   - handlers: 要并行执行的处理函数列表
 //
 // StateMerger 定义在 subgraph.go 中：func(original S, outputs []S) S
+// 错误返回前收敛全部已派发分支；ParallelExecutionError 保留各结果和完整错误树。
+// 已成功或结果未知的分支阻止整组重试；全部普通失败仍服从节点重试策略。
 func ParallelNodeWithMerger[S State](name string, merger StateMerger[S], handlers ...NodeHandler[S]) *Node[S] {
 	return &Node[S]{
 		Name: name,
@@ -225,18 +227,20 @@ func ParallelNodeWithMerger[S State](name string, merger StateMerger[S], handler
 
 			// 收集所有结果，保持顺序
 			states := make([]S, len(handlers))
+			outcomes := make([]ParallelResult[S], len(handlers))
 			for range handlers {
 				r := <-results
-				if r.err != nil {
-					return state, fmt.Errorf("parallel execution failed at handler %d: %w", r.index, r.err)
-				}
+				outcomes[r.index] = ParallelResult[S]{Name: fmt.Sprint(r.index), State: r.state, Error: r.err}
 				states[r.index] = r.state
+			}
+			if err := parallelFailure(name, outcomes); err != nil {
+				return state, err
 			}
 
 			// 使用合并器合并所有状态
 			if merger == nil {
 				if len(states) > 1 {
-					return state, fmt.Errorf("parallel node %q requires an explicit state merger", name)
+					return state, &ParallelExecutionError[S]{Name: name, Results: outcomes, Cause: fmt.Errorf("parallel node %q requires an explicit state merger", name)}
 				}
 				return states[len(states)-1], nil
 			}

@@ -329,6 +329,8 @@ const (
 type WorkflowEventHandler func(event *WorkflowEvent)
 
 // WorkflowHooks 工作流钩子
+// 输入/输出载荷以独立副本传给钩子，修改副本不会改变已采用事实。
+// 完成前的钩子错误或 panic 导致工作流失败；调用方仍需核对已执行步骤的外部动作。
 type WorkflowHooks struct {
 	// OnStart 工作流开始时触发
 	OnStart func(ctx context.Context, wf *Workflow, input WorkflowInput) error

@@ -465,6 +465,7 @@ func (c *GraphComposer[S]) Compose() (*Graph[S], error) {
 //   - name: 节点名称
 //   - subgraphs: 要并行执行的子图列表
 //   - merger: 状态合并函数
+// 错误时等待所有已派发子图结束，通过 ParallelExecutionError 保留完整结果，不盲重放成功子图。
 func ParallelSubgraphs[S State](name string, subgraphs []*Graph[S], merger StateMerger[S]) *Node[S] {
 	return &Node[S]{
 		Name: name,
@@ -494,18 +495,20 @@ func ParallelSubgraphs[S State](name string, subgraphs []*Graph[S], merger State
 
 			// 收集结果
 			outputs := make([]S, len(subgraphs))
+			outcomes := make([]ParallelResult[S], len(subgraphs))
 			for range subgraphs {
 				r := <-results
-				if r.err != nil {
-					return state, fmt.Errorf("parallel subgraph %d failed: %w", r.idx, r.err)
-				}
+				outcomes[r.idx] = ParallelResult[S]{Name: subgraphs[r.idx].Name, State: r.state, Error: r.err}
 				outputs[r.idx] = r.state
+			}
+			if err := parallelFailure(name, outcomes); err != nil {
+				return state, err
 			}
 
 			// 合并结果
 			if merger == nil {
 				if len(outputs) > 1 {
-					return state, fmt.Errorf("parallel subgraphs %q require an explicit state merger", name)
+					return state, &ParallelExecutionError[S]{Name: name, Results: outcomes, Cause: fmt.Errorf("parallel subgraphs %q require an explicit state merger", name)}
 				}
 				return outputs[len(outputs)-1], nil
 			}

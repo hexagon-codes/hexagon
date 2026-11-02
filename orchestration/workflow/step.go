@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -167,7 +168,7 @@ func (s *BaseStep) Type() StepType {
 	return StepTypeNormal
 }
 
-// Execute 执行步骤
+// Execute 执行步骤；调用前后均核对有效期限，过期输出保留在错误结果中但不能作为成功采用。
 func (s *BaseStep) Execute(ctx context.Context, input StepInput) (*StepOutput, error) {
 	// 应用超时
 	if s.timeout > 0 {
@@ -185,7 +186,13 @@ func (s *BaseStep) Execute(ctx context.Context, input StepInput) (*StepOutput, e
 	}
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return lastOutput, err
+		}
 		output, err := invokeStep(s.id, func() (*StepOutput, error) { return s.executeFn(ctx, input) })
+		if cause := ctx.Err(); cause != nil {
+			err = errors.Join(err, cause)
+		}
 		if err == nil {
 			return output, nil
 		}

@@ -161,12 +161,14 @@ func (x *planExecutor[S]) runPregel(ctx context.Context) (S, error) {
 			}
 		}
 		routes := map[string][]string{}
+		skippedRoutes := map[string][]string{}
 		for _, name := range names {
-			selected, _, err := x.graph.selectSuccessorsWithTarget(name, nextState, x.frontier.Results[taskIDs[name]].CommandTarget)
+			selected, skipped, err := x.graph.selectSuccessorsWithTarget(name, nextState, x.frontier.Results[taskIDs[name]].CommandTarget)
 			if err != nil {
 				return x.state, err
 			}
 			routes[name] = selected
+			skippedRoutes[name] = skipped
 		}
 		x.state = nextState
 		x.frontier.Ready = nil
@@ -194,6 +196,13 @@ func (x *planExecutor[S]) runPregel(ctx context.Context) (S, error) {
 					return x.state, err
 				}
 			}
+			if x.graph.plan.TriggerMode == TriggerAllPredecessors {
+				for _, to := range skippedRoutes[name] {
+					if err := x.arrivePregelAllOutcome(name, to, generations[name], taskIDs[name], false); err != nil {
+						return x.state, err
+					}
+				}
+			}
 		}
 		x.frontier.Activation++
 		if err := x.save(ctx); err != nil {
@@ -211,6 +220,9 @@ func (x *planExecutor[S]) runPregel(ctx context.Context) (S, error) {
 		}
 	}
 	for id, preds := range x.frontier.ActivationArrivals {
+		if x.frontier.Skipped[id] {
+			continue
+		}
 		if result := x.frontier.Results[id]; (result == nil || !result.Adopted) && len(preds) > 0 {
 			return x.state, fmt.Errorf("Pregel scheduling stalled at activation %q: unresolved predecessors", id)
 		}
