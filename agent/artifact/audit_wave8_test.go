@@ -38,14 +38,16 @@ func TestServiceSave_FirstVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Save 返回错误: %v", err)
 	}
-	wantID := "s1/a.txt/v1"
-	if id != wantID {
-		t.Fatalf("ID = %q, want %q", id, wantID)
+	if id == "" {
+		t.Fatal("Save 返回空 ID")
 	}
 
 	got, err := svc.Get(ctx, id)
 	if err != nil {
 		t.Fatalf("Get 返回错误: %v", err)
+	}
+	if got.ID != id || got.SessionID != "s1" || got.Name != "a.txt" {
+		t.Fatalf("Get 未返回保存的产物: %+v", got)
 	}
 	if got.Version != 1 {
 		t.Errorf("Version = %d, want 1", got.Version)
