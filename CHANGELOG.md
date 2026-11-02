@@ -67,6 +67,7 @@
 - **mcp**：新增共享 Tools、Resources、Prompts 与关闭生命周期的官方 SDK Session API，保留原 V2 连接签名；主动关闭本次已回收 stdio 进程时，预期 SIGTERM/SIGKILL 不再被误报为未关闭，其他退出与清理错误保持可见。
 
 - **runtime**：新增 `DefaultRunner.Continue` 与 `ProviderCallError`，允许模型调用失败后使用重新装配的输入续接同次运行，并保留已完成工具结果、轮次和用量；新增 `ToolMediaMessageName` 标记运行时投影的工具媒体消息。
+- **browserruntime**：提供通用浏览器会话、目标绑定、执行租约和官方 MCP 驱动；文件选择模态按会话及主体保留，支持跨手工调用接续与自有页面终态清理，权限与业务交付由调用方装配。
 - **mcp**：Tools、Resources 与 Prompts 共用 Text／Image／Audio／Binary 投影，保留实际媒体字节并提供不含媒体编码的文本及描述信息；资源链接不主动下载。
 - **runtime**：完整输出消息组保留 ProviderContinuation、工具身份及 typed 媒体；快照与压缩维护关联组，保留真实用量来源，流终态错误以权威 `Stream.Err()` 为准。
 
