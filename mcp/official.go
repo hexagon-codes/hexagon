@@ -727,7 +727,8 @@ func parseSchemaMap(m map[string]any) *llm.Schema {
 		s.AdditionalProperties = parseSchemaMap(additional)
 	}
 	for name, value := range m {
-		if !schemaKeywordNames[name] {
+		_, tupleItems := value.([]any)
+		if !schemaKeywordNames[name] || (name == "items" && s.Items == nil && tupleItems) {
 			if s.AdditionalKeywords == nil {
 				s.AdditionalKeywords = make(map[string]any)
 			}
@@ -819,7 +820,8 @@ func aicoreSchemaToSDKMap(s *llm.Schema, root bool) map[string]any {
 
 	result := map[string]any{}
 	for name, value := range s.AdditionalKeywords {
-		if !schemaKeywordNames[name] {
+		_, tupleItems := value.([]any)
+		if !schemaKeywordNames[name] || (name == "items" && s.Items == nil && tupleItems) {
 			result[name] = value
 		}
 	}
