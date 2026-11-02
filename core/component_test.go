@@ -58,13 +58,9 @@ func TestSliceStreamCollect(t *testing.T) {
 
 	// Collect remaining
 	remaining, err := stream.Concat(ctx, sr)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, stream.ErrNoConcatFunc) {
+		t.Fatalf("expected explicit concat error for unregistered int type, got result=%v error=%v", remaining, err)
 	}
-
-	// 由于 Concat 是对基本类型的，对于 int 数组可能不会正常工作
-	// 但至少验证没有 panic
-	_ = remaining
 }
 
 func TestSliceStreamClose(t *testing.T) {

@@ -331,13 +331,13 @@ func TestAgentAsToolExecution(t *testing.T) {
 		t.Errorf("期望执行成功，但失败: %v", result.Output)
 	}
 
-	// 输出应该是 Agent 的回复内容
-	output, ok := result.Output.(string)
+	// 完整子结果保留身份与用量，模型文本从结构化信封读取。
+	output, ok := result.Output.(agent.ChildRunResult)
 	if !ok {
-		t.Fatalf("期望输出为字符串，实际为 %T", result.Output)
+		t.Fatalf("expected structured child result, got %T", result.Output)
 	}
-	if output != "工具 Agent 回复" {
-		t.Errorf("期望输出为 '工具 Agent 回复'，实际为 '%s'", output)
+	if output.Child.Output.Content != "工具 Agent 回复" || output.RunID == "" || output.Version != 1 {
+		t.Errorf("unexpected child result: %+v", output)
 	}
 }
 

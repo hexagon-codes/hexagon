@@ -29,6 +29,8 @@ func TestRunCompletionWithRuntimeEmitsVersionedEvents(t *testing.T) {
 		agentruntime.EventRunStarted,
 		agentruntime.EventProviderSelected,
 		agentruntime.EventLLMStarted,
+		agentruntime.EventModelAttemptStarted,
+		agentruntime.EventModelAttemptFinished,
 		agentruntime.EventLLMCompleted,
 		agentruntime.EventRunFinished,
 	}

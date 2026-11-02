@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -82,7 +83,7 @@ func TestFileStore_PutUpdate(t *testing.T) {
 	}
 
 	item2, _ := s.Get(ctx, ns, "k1")
-	if item2.Value["v"] != float64(2) {
+	if item2.Value["v"] != json.Number("2") {
 		t.Errorf("更新后 Value[v] = %v, 期望 2", item2.Value["v"])
 	}
 	if !item2.CreatedAt.Equal(createdAt) {
