@@ -42,6 +42,12 @@ hexagon 是 Hexagon 生态的 **AI Agent 框架（L2）**，向下依赖 toolkit
 | MCP / A2A | MCP 双向传递 ai-core 已支持的递归 Schema。A2A 同步阻塞处理器返回非终态且非等待状态时，任务保存为 failed、保留消息产物并返回 InvalidAgentResponse 与 taskId；Final 不是自动 completed 的依据。未支持的立即返回模式仍明确报告 |
 | Artifact / 评估身份 | Artifact 读写隔离完整可变 Metadata，合法 time.Time 保持值与时区；确实无法隔离的值显式返回错误。Dataset/Single/Batch 执行前固定评估器 Name，重复名称在执行系统或评估器前报错，不覆盖已有结果 |
 | 迁移快照读取 | 持久会话缓存经校验的迁移载荷，缓存只对原持久字节有效；新快照使旧缓存失效。每次读取仍产生独立值，不反复迁移或让调用方改写缓存 |
+| `ParallelStepResult` / `ParallelStepError` | Workflow 并行步骤保留有序完整 Output 与错误；Graph 的 MapReduce/Pregel 复用 ParallelExecutionError。只有纯中断错误树进入等待，混合普通失败/unknown 不被单个中断遮蔽；已成功或未知分支不整组盲重放 |
+| `AgentPanicError` / `ChildOutputCopyError` | panic 保留 Agent 身份、栈及不可重放分类。子输入与已完成输出不共享嵌套可变值；无法复制已执行结果时保留实际返回值和费用、显式返回不可重放错误，不能改成空成功或重做任务 |
+| MCP Schema / 结构化终态 | type 数组与布尔 Schema 使用等价 anyOf/allOf/not 表示，不能覆盖原组合约束。结果工具仅将合法工具完成原因转换为最终结构化结果；暂停等其他原因沿原终态合同返回 |
+| ArtifactStore JSON 数字 | MySQL Get/GetLatest/GetByVersion/List/ListVersions 的动态 Metadata 数字返回 json.Number，固定 Artifact 字段仍按声明类型解码。Go 消费者升级时调整 float64 断言；JSON 线上数值保持原字面。GetLatest 无记录为 nil,nil，真实读故障必须传播 |
+| 评估结果采用 | 除唯一名称外，还隔离 Passed、Details、SubScores 等本次评分事实；评估器后续复用返回对象不能改变已采用结果。复制错误保留评分和原错误并显式记录，不能平均为成功 |
+| `RunSpec.Fork` 入站身份 | 新冻结请求成为 fork 的新入站基准并重新计算摘要；直接 Store 接受后，标准 Submit 使用相同新请求可幂等查回。推荐从 fork.RestoreRequest 获取重复提交请求；不能把父运行准备前的不同输入当作新冻结输入 |
 
 ## 插件依赖代次与恢复
 
