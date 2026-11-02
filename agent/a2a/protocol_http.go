@@ -273,6 +273,34 @@ func normalizeMessage(message *Message, task *Task) {
 	message.TaskID, message.ContextID = task.ID, task.SessionID
 }
 
+type executionWorkersKey struct{}
+
+// executionWorkers 保留当前执行及其超时子工作，结束后不能再登记迟到工作。
+type executionWorkers struct {
+	mu        sync.Mutex
+	remaining int
+	done      chan struct{}
+}
+
+func (w *executionWorkers) add() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.remaining == 0 {
+		return false
+	}
+	w.remaining++
+	return true
+}
+
+func (w *executionWorkers) complete() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.remaining--
+	if w.remaining == 0 {
+		close(w.done)
+	}
+}
+
 func (s *Server) beginExecution(ctx context.Context, id string) (context.Context, *Task, func(), *Error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -299,15 +327,26 @@ func (s *Server) beginExecution(ctx context.Context, id string) (context.Context
 	s.wg.Add(1)
 	s.lifecycleMu.Unlock()
 	runCtx, cancel := context.WithCancel(ctx)
+	workers := &executionWorkers{remaining: 1, done: make(chan struct{})}
+	runCtx = context.WithValue(runCtx, executionWorkersKey{}, workers)
 	s.executions[id] = cancel
 	var released sync.Once
 	return runCtx, task, func() {
 		released.Do(func() {
 			cancel()
-			s.mu.Lock()
-			delete(s.executions, id)
-			s.mu.Unlock()
-			s.wg.Done()
+			complete := func() {
+				s.mu.Lock()
+				delete(s.executions, id)
+				s.mu.Unlock()
+				s.wg.Done()
+			}
+			workers.complete()
+			select {
+			case <-workers.done:
+				complete()
+			default:
+				go func() { <-workers.done; complete() }()
+			}
 		})
 	}, nil
 }

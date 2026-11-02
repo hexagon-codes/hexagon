@@ -68,10 +68,13 @@ type Server struct {
 	mu sync.RWMutex
 
 	// lifecycleMu只保护服务器代次，不与业务存储I/O共享。
-	lifecycleMu  sync.Mutex
-	stopping     chan struct{}
-	serverCancel context.CancelFunc
+	lifecycleMu        sync.Mutex
+	stopping           chan struct{}
+	serverCancel       context.CancelFunc
+	subscriptionCancel context.CancelFunc
 }
+
+type subscriptionStopKey struct{}
 
 // ServerOption 服务器选项
 type ServerOption func(*Server)
@@ -153,6 +156,8 @@ func (s *Server) Start(addr string) error {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 	serverCtx, cancel := context.WithCancel(context.Background())
+	subscriptionCtx, subscriptionCancel := context.WithCancel(serverCtx)
+	serverCtx = context.WithValue(serverCtx, subscriptionStopKey{}, subscriptionCtx.Done())
 	server := &http.Server{Addr: addr, ReadTimeout: 30 * time.Second, WriteTimeout: 0, IdleTimeout: 120 * time.Second, BaseContext: func(net.Listener) context.Context { return serverCtx }}
 	handler := s.corsMiddleware(mux)
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -169,6 +174,7 @@ func (s *Server) Start(addr string) error {
 	})
 	s.httpServer = server
 	s.serverCancel = cancel
+	s.subscriptionCancel = subscriptionCancel
 	s.running.Store(true)
 	s.lifecycleMu.Unlock()
 	err = server.Serve(listener)
@@ -211,7 +217,12 @@ func (s *Server) Stop(ctx context.Context) error {
 	}
 	done := make(chan struct{})
 	s.stopping = done
+	stopSubscriptions := s.subscriptionCancel
 	s.lifecycleMu.Unlock()
+	// 只读重订阅先结束，避免Shutdown等待本应由停机清理的长连接。
+	if stopSubscriptions != nil {
+		stopSubscriptions()
+	}
 	// 先关闭监听，不能在此之前等待可能持有业务锁的存储调用。
 	err := server.Shutdown(ctx)
 	if err != nil && cancel != nil {
@@ -680,9 +691,12 @@ func (s *Server) handleResubscribe(ctx context.Context, w http.ResponseWriter, p
 	flusher := w.(http.Flusher)
 	s.writeSSEEvent(w, "task", &TaskEvent{Task: task})
 	flusher.Flush()
+	stop, _ := ctx.Value(subscriptionStopKey{}).(<-chan struct{})
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-stop:
 			return
 		case event, ok := <-events:
 			if !ok {

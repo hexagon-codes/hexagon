@@ -3,6 +3,8 @@ package a2a
 import (
 	"context"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/reflectx"
 )
 
 // ============== TaskHandler 接口 ==============
@@ -406,18 +408,50 @@ func TimeoutMiddleware(timeout time.Duration) Middleware {
 		return NewFuncHandler(func(ctx context.Context, task *Task, msg *Message) (*TaskUpdate, error) {
 			ctx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
+			if ctx.Err() != nil {
+				return NewFailedUpdate("handler timeout"), nil
+			}
+			workTask, err := cloneTask(task)
+			if err != nil {
+				return nil, err
+			}
+			workMessage, err := reflectx.DeepCopyChecked(msg)
+			if err != nil {
+				return nil, err
+			}
 
 			done := make(chan struct{})
 			var update *TaskUpdate
-			var err error
+			err = nil
+			workers, _ := ctx.Value(executionWorkersKey{}).(*executionWorkers)
+			if workers != nil && !workers.add() {
+				return NewFailedUpdate("handler timeout"), nil
+			}
 
 			go func() {
-				update, err = next.HandleTask(ctx, task, msg)
-				close(done)
+				defer close(done)
+				if workers != nil {
+					defer workers.complete()
+				}
+				defer func() {
+					if recover() != nil {
+						update, err = NewFailedUpdate("internal error: handler panicked"), nil
+					}
+				}()
+				update, err = next.HandleTask(ctx, workTask, workMessage)
 			}()
 
 			select {
 			case <-done:
+				if ctx.Err() != nil {
+					return NewFailedUpdate("handler timeout"), nil
+				}
+				if task != nil && workTask != nil {
+					*task = *workTask
+				}
+				if msg != nil && workMessage != nil {
+					*msg = *workMessage
+				}
 				return update, err
 			case <-ctx.Done():
 				return NewFailedUpdate("handler timeout"), nil
