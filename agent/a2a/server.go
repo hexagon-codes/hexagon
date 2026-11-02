@@ -6,6 +6,7 @@ import (
 	"fmt"
 	wire "github.com/a2aproject/a2a-go/v2/a2a"
 	"maps"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -65,6 +66,11 @@ type Server struct {
 	corsOrigins []string
 
 	mu sync.RWMutex
+
+	// lifecycleMu只保护服务器代次，不与业务存储I/O共享。
+	lifecycleMu  sync.Mutex
+	stopping     chan struct{}
+	serverCancel context.CancelFunc
 }
 
 // ServerOption 服务器选项
@@ -128,66 +134,114 @@ func WithCORS(enabled bool, origins ...string) ServerOption {
 
 // Start 启动服务器
 func (s *Server) Start(addr string) error {
-	if s.running.Load() {
-		return fmt.Errorf("server already running")
+	s.lifecycleMu.Lock()
+	if s.httpServer != nil || s.stopping != nil {
+		s.lifecycleMu.Unlock()
+		return fmt.Errorf("server already running or stopping")
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		if s.ownedStore != nil {
+			s.ownedStore.Close()
+		}
+		s.lifecycleMu.Unlock()
+		return err
 	}
 	if s.ownedStore != nil {
 		s.ownedStore.startCleanup()
 	}
-
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
-
-	s.httpServer = &http.Server{
-		Addr:         addr,
-		Handler:      s.corsMiddleware(mux),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 0, // 无超时，支持 SSE
-		IdleTimeout:  120 * time.Second,
-	}
-
+	serverCtx, cancel := context.WithCancel(context.Background())
+	server := &http.Server{Addr: addr, Handler: s.corsMiddleware(mux), ReadTimeout: 30 * time.Second, WriteTimeout: 0, IdleTimeout: 120 * time.Second, BaseContext: func(net.Listener) context.Context { return serverCtx }}
+	s.httpServer = server
+	s.serverCancel = cancel
 	s.running.Store(true)
-
-	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	s.lifecycleMu.Unlock()
+	err = server.Serve(listener)
+	s.lifecycleMu.Lock()
+	if s.httpServer == server && s.stopping == nil {
+		cancel()
+		s.httpServer = nil
 		s.running.Store(false)
 		if s.ownedStore != nil {
 			s.ownedStore.Close()
 		}
-		return err
 	}
-
-	return nil
-}
-
-// Stop 停止服务器
-func (s *Server) Stop(ctx context.Context) error {
-	if s.ownedStore != nil {
-		defer s.ownedStore.Close()
-	}
-	if !s.running.Load() {
+	s.lifecycleMu.Unlock()
+	if err == http.ErrServerClosed {
 		return nil
 	}
+	return err
+}
 
-	s.running.Store(false)
-
-	// 关闭所有订阅
-	s.mu.Lock()
-	for taskID, subs := range s.subscribers {
-		for _, ch := range subs {
-			close(ch)
+// Stop 停止当前代服务器；期限到达后仍继续回收资源，回收完成前拒绝重启。
+func (s *Server) Stop(ctx context.Context) error {
+	s.lifecycleMu.Lock()
+	if done := s.stopping; done != nil {
+		s.lifecycleMu.Unlock()
+		select {
+		case <-done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-		delete(s.subscribers, taskID)
 	}
-	s.mu.Unlock()
-
-	// 等待所有处理完成
-	s.wg.Wait()
-
-	if s.httpServer != nil {
-		return s.httpServer.Shutdown(ctx)
+	server := s.httpServer
+	cancel := s.serverCancel
+	if server == nil {
+		if s.ownedStore != nil {
+			s.ownedStore.Close()
+		}
+		s.lifecycleMu.Unlock()
+		return nil
 	}
-
-	return nil
+	done := make(chan struct{})
+	s.stopping = done
+	s.lifecycleMu.Unlock()
+	// 先关闭监听，不能在此之前等待可能持有业务锁的存储调用。
+	err := server.Shutdown(ctx)
+	if err != nil && cancel != nil {
+		// 宽限期限已耗尽，取消在途请求以释放合作式存储调用。
+		cancel()
+	}
+	go func() {
+		s.mu.Lock()
+		for taskID, subs := range s.subscribers {
+			for _, ch := range subs {
+				close(ch)
+			}
+			delete(s.subscribers, taskID)
+		}
+		for _, cancel := range s.executions {
+			cancel()
+		}
+		s.mu.Unlock()
+		s.wg.Wait()
+		if s.ownedStore != nil {
+			s.ownedStore.Close()
+		}
+		if cancel != nil {
+			cancel()
+		}
+		s.lifecycleMu.Lock()
+		if s.httpServer == server {
+			s.httpServer = nil
+		}
+		s.running.Store(false)
+		s.stopping = nil
+		close(done)
+		s.lifecycleMu.Unlock()
+	}()
+	if err != nil {
+		return err
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // ServeHTTP 实现 http.Handler 接口
