@@ -111,6 +111,23 @@ const observePageCode = `async (page) => {
   if (!context[key]) Object.defineProperty(context, key, { value: { id: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2), next: 0, pages: new WeakMap(), closed: new Set() } });
   const registry = context[key];
   if (!registry.closed) registry.closed = new Set();
+  if (!Array.isArray(registry.closed.ranges)) {
+    const previous = registry.closed;
+    const index = id => { const prefix=registry.id+':'; if(typeof id!=='string'||!id.startsWith(prefix))return 0; const suffix=id.slice(prefix.length); const n=Number(suffix); return Number.isSafeInteger(n)&&n>0&&String(n)===suffix?n:0; };
+    registry.closed = {
+      prefix:0, ranges:[],
+      add(id) {
+        const n=index(id); if(!n||n<=this.prefix)return this;
+        const sorted=[...this.ranges,[n,n]].sort((a,b)=>a[0]-b[0]); const merged=[];
+        for(const range of sorted) { const last=merged.at(-1); if(last&&range[0]<=last[1]+1)last[1]=Math.max(last[1],range[1]); else merged.push([...range]); }
+        while(merged.length&&merged[0][0]<=this.prefix+1)this.prefix=Math.max(this.prefix,merged.shift()[1]);
+        this.ranges=merged; return this;
+      },
+      has(id) { const n=index(id); return n>0&&(n<=this.prefix||this.ranges.some(([a,b])=>n>=a&&n<=b)); },
+      get size() { return this.prefix+this.ranges.reduce((sum,[a,b])=>sum+b-a+1,0); }
+    };
+    if(previous[Symbol.iterator])for(const id of previous)registry.closed.add(id);
+  }
   if (!registry.aliases) registry.aliases = new WeakMap();
   if (!registry.trackedClosures) registry.trackedClosures = new WeakSet();
   const identity = p => { if (!registry.pages.has(p)) registry.pages.set(p,registry.id + ':' + (++registry.next)); const id=registry.pages.get(p); if(!registry.aliases.has(p)) registry.aliases.set(p,new Set()); const aliases=registry.aliases.get(p); aliases.add(id); if(!registry.trackedClosures.has(p)) { registry.trackedClosures.add(p); p.once('close',()=>{for(const known of aliases) registry.closed.add(known);}); } return id; };
