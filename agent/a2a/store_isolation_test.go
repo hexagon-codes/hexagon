@@ -1,6 +1,9 @@
 package a2a
 
-import "testing"
+import (
+	"math/big"
+	"testing"
+)
 
 func TestMemoryTaskStoreIsolatesNestedProtocolData(t *testing.T) {
 	fixture := func() *Task {
@@ -69,4 +72,42 @@ func TestMemoryTaskStoreIsolatesNestedProtocolData(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertOriginal(last)
+}
+
+func TestMemoryTaskStoreIsolatesStandardBigInteger(t *testing.T) {
+	store := NewMemoryTaskStore(WithTaskTTL(0))
+	defer store.Close()
+	task := NewTask("integer-task")
+	task.Metadata = map[string]any{"amount": big.NewInt(1000)}
+	if err := store.Create(t.Context(), task); err != nil {
+		t.Fatal(err)
+	}
+	task.Metadata["amount"].(*big.Int).SetInt64(1)
+	read := func() *Task {
+		t.Helper()
+		got, err := store.Get(t.Context(), task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Metadata["amount"].(*big.Int).Cmp(big.NewInt(1000)) != 0 {
+			t.Fatalf("stored number changed: %+v", got.Metadata)
+		}
+		return got
+	}
+	got := read()
+	got.Metadata["amount"].(*big.Int).SetInt64(2)
+	updated := read()
+	if err := store.Update(t.Context(), updated); err != nil {
+		t.Fatal(err)
+	}
+	updated.Metadata["amount"].(*big.Int).SetInt64(3)
+	list, err := store.List(t.Context(), &ListTasksRequest{})
+	if err != nil || len(list.Tasks) != 1 {
+		t.Fatalf("list: %+v %v", list, err)
+	}
+	if list.Tasks[0].Metadata["amount"].(*big.Int).Cmp(big.NewInt(1000)) != 0 {
+		t.Fatal("update source changed stored number")
+	}
+	list.Tasks[0].Metadata["amount"].(*big.Int).SetInt64(4)
+	read()
 }

@@ -630,14 +630,19 @@ func parseSchemaMap(m map[string]any) *llm.Schema {
 	if defs, ok := m["$defs"].(map[string]any); ok {
 		s.Defs = make(map[string]*llm.Schema, len(defs))
 		for name, definition := range defs {
-			if definition, ok := definition.(map[string]any); ok {
-				s.Defs[name] = parseSchemaMap(definition)
+			if parsed := parseSchemaValue(definition); parsed != nil {
+				s.Defs[name] = parsed
 			}
 		}
 	}
 
+	var typeUnion []*llm.Schema
 	if v, ok := m["type"].(string); ok {
 		s.Type = v
+	} else {
+		for _, name := range schemaStringSlice(m["type"]) {
+			typeUnion = append(typeUnion, &llm.Schema{Type: name})
+		}
 	}
 	if v, ok := m["title"].(string); ok {
 		s.Title = v
@@ -671,8 +676,8 @@ func parseSchemaMap(m map[string]any) *llm.Schema {
 	if props, ok := m["properties"].(map[string]any); ok {
 		s.Properties = make(map[string]*llm.Schema, len(props))
 		for name, propValue := range props {
-			if propMap, ok := propValue.(map[string]any); ok {
-				s.Properties[name] = parseSchemaMap(propMap)
+			if parsed := parseSchemaValue(propValue); parsed != nil {
+				s.Properties[name] = parsed
 			}
 		}
 	}
@@ -681,9 +686,7 @@ func parseSchemaMap(m map[string]any) *llm.Schema {
 	s.Required = schemaStringSlice(m["required"])
 
 	// 解析 items
-	if items, ok := m["items"].(map[string]any); ok {
-		s.Items = parseSchemaMap(items)
-	}
+	s.Items = parseSchemaValue(m["items"])
 
 	// 解析 enum
 	if enum, ok := m["enum"].([]any); ok {
@@ -694,8 +697,14 @@ func parseSchemaMap(m map[string]any) *llm.Schema {
 	s.AnyOf = parseSchemaList(m["anyOf"])
 	s.OneOf = parseSchemaList(m["oneOf"])
 	s.AllOf = parseSchemaList(m["allOf"])
-	if notMap, ok := m["not"].(map[string]any); ok {
-		s.Not = parseSchemaMap(notMap)
+	s.Not = parseSchemaValue(m["not"])
+	if len(typeUnion) > 0 {
+		if len(s.AnyOf) == 0 {
+			s.AnyOf = typeUnion
+		} else {
+			// 类型联合与同层原有组合约束同时成立，不能互相覆盖。
+			s.AllOf = append(s.AllOf, &llm.Schema{AnyOf: typeUnion})
+		}
 	}
 
 	switch additional := m["additionalProperties"].(type) {
@@ -706,6 +715,21 @@ func parseSchemaMap(m map[string]any) *llm.Schema {
 	}
 
 	return s
+}
+
+// 布尔 Schema 使用已有表示保持等价：空对象恒真，not 空对象恒假。
+func parseSchemaValue(raw any) *llm.Schema {
+	switch value := raw.(type) {
+	case map[string]any:
+		return parseSchemaMap(value)
+	case bool:
+		if value {
+			return &llm.Schema{}
+		}
+		return &llm.Schema{Not: &llm.Schema{}}
+	default:
+		return nil
+	}
 }
 
 func schemaStringSlice(raw any) []string {
@@ -747,8 +771,8 @@ func parseSchemaList(raw any) []*llm.Schema {
 	}
 	result := make([]*llm.Schema, 0, len(values))
 	for _, value := range values {
-		if schemaMap, ok := value.(map[string]any); ok {
-			result = append(result, parseSchemaMap(schemaMap))
+		if parsed := parseSchemaValue(value); parsed != nil {
+			result = append(result, parsed)
 		}
 	}
 	return result
