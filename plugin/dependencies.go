@@ -63,6 +63,7 @@ func releaseGeneration(g *generation) {
 func releaseDependencyBindings(g *generation) {
 	g.mu.Lock()
 	bindings := g.bindings
+	g.stoppedBindings = append([]*generation(nil), bindings...)
 	g.bindings, g.legacyBindings = nil, nil
 	g.mu.Unlock()
 	for _, dependency := range bindings {

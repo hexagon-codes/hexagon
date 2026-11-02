@@ -43,22 +43,24 @@ type DefinitionReferencer interface {
 type RestoreResolver func(context.Context, Reference) (Plugin, map[string]any, error)
 
 type generation struct {
-	plugin         Plugin
-	reference      Reference
-	dependencies   []string
-	bindings       []*generation
-	legacyBindings map[string]bool
-	started        bool
-	mu             sync.Mutex
-	refs           int
-	retired        bool
-	forced         bool
-	drained        chan struct{}
-	done           chan struct{}
-	stopOnce       sync.Once
-	stopCancel     context.CancelFunc
-	stopPhase      string
-	err            error
+	plugin       Plugin
+	reference    Reference
+	dependencies []string
+	bindings     []*generation
+	// stoppedBindings 只记录停止前的绑定身份，不持有资源引用；用于重启时判断是否需重新装配。
+	stoppedBindings []*generation
+	legacyBindings  map[string]bool
+	started         bool
+	mu              sync.Mutex
+	refs            int
+	retired         bool
+	forced          bool
+	drained         chan struct{}
+	done            chan struct{}
+	stopOnce        sync.Once
+	stopCancel      context.CancelFunc
+	stopPhase       string
+	err             error
 }
 
 func newGeneration(p Plugin, ref Reference) *generation {

@@ -128,7 +128,8 @@ func (l *Lifecycle) Init(ctx context.Context, name string, config map[string]any
 	return nil
 }
 
-// Start 启动插件
+// Start 启动插件。停止后重启时，若实际依赖代次已变化，先用原冻结配置重新初始化绑定；
+// 依赖未变化时仍只调用 Start，不重复初始化。
 func (l *Lifecycle) Start(ctx context.Context, name string) error {
 	unlock := l.lockOperation(name)
 	defer unlock()
@@ -143,6 +144,7 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 	}
 
 	g := instance.generation
+	rebind := false
 	if state == PluginStateStopped {
 		previous := g
 		g = newGeneration(instance.Plugin, previous.reference)
@@ -152,6 +154,21 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 			return err
 		}
 		g.bindings = bindings
+		previous.mu.Lock()
+		oldBindings := append([]*generation(nil), previous.stoppedBindings...)
+		previous.mu.Unlock()
+		for _, dependency := range bindings {
+			matched := false
+			for _, old := range oldBindings {
+				if dependency == old {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				rebind = true
+			}
+		}
 		g.legacyBindings = make(map[string]bool)
 		for _, dependency := range bindings {
 			g.legacyBindings[dependency.reference.Name] = true
@@ -176,6 +193,21 @@ func (l *Lifecycle) Start(ctx context.Context, name string) error {
 		}
 	}
 	dependencyCtx, view := contextWithDependencies(ctx, bindings)
+	if rebind {
+		config, copyErr := reflectx.DeepCopyChecked(instance.Config)
+		if copyErr != nil {
+			releaseDependencyBindings(g)
+			return fmt.Errorf("plugin restart config cannot be snapshotted: %w", copyErr)
+		}
+		if err := invokePluginCallback(name, "restart.init", func() error { return instance.Plugin.Init(dependencyCtx, config) }); err != nil {
+			cleanupErr := invokePluginCallback(name, "restart.init.cleanup.stop", func() error { return instance.Plugin.Stop(dependencyCtx) })
+			releaseDependencyBindings(g)
+			l.registry.mu.Lock()
+			instance.State, instance.Error = PluginStateError, errors.Join(err, cleanupErr)
+			l.registry.mu.Unlock()
+			return fmt.Errorf("failed to reinitialize plugin %s: %w", name, errors.Join(err, cleanupErr))
+		}
+	}
 	if err := invokePluginCallback(name, "start", func() error { return instance.Plugin.Start(dependencyCtx) }); err != nil {
 		cleanupErr := invokePluginCallback(name, "start.cleanup.stop", func() error { return instance.Plugin.Stop(dependencyCtx) })
 		releaseDependencyBindings(g)
