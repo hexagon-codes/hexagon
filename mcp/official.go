@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -615,6 +616,18 @@ func sdkSchemaToAICore(inputSchema any) *llm.Schema {
 }
 
 // parseSchemaMap 递归解析 JSON Schema map 为 ai-core Schema
+var schemaKeywordNames = func() map[string]bool {
+	result := make(map[string]bool)
+	typ := reflect.TypeFor[llm.Schema]()
+	for index := 0; index < typ.NumField(); index++ {
+		name := strings.Split(typ.Field(index).Tag.Get("json"), ",")[0]
+		if name != "" && name != "-" {
+			result[name] = true
+		}
+	}
+	return result
+}()
+
 func parseSchemaMap(m map[string]any) *llm.Schema {
 	if m == nil {
 		return nil
@@ -713,6 +726,14 @@ func parseSchemaMap(m map[string]any) *llm.Schema {
 	case map[string]any:
 		s.AdditionalProperties = parseSchemaMap(additional)
 	}
+	for name, value := range m {
+		if !schemaKeywordNames[name] {
+			if s.AdditionalKeywords == nil {
+				s.AdditionalKeywords = make(map[string]any)
+			}
+			s.AdditionalKeywords[name] = value
+		}
+	}
 
 	return s
 }
@@ -797,6 +818,11 @@ func aicoreSchemaToSDKMap(s *llm.Schema, root bool) map[string]any {
 	}
 
 	result := map[string]any{}
+	for name, value := range s.AdditionalKeywords {
+		if !schemaKeywordNames[name] {
+			result[name] = value
+		}
+	}
 	if s.Dialect != "" {
 		result["$schema"] = s.Dialect
 	}
