@@ -22,7 +22,7 @@ import (
 
 // Evaluator 是评估器接口
 type Evaluator interface {
-	// Name 返回评估器名称
+	// Name 返回一次执行中唯一的评估器身份，由 Runner 在执行前固定。
 	Name() string
 
 	// Description 返回评估器描述

@@ -37,6 +37,26 @@ func (r *Runner) AddEvaluators(evaluators ...Evaluator) *Runner {
 	return r
 }
 
+// namedEvaluator 将一次执行的身份与实例绑定，后续回调不再重新读取 Name。
+type namedEvaluator struct {
+	name      string
+	evaluator Evaluator
+}
+
+func (r *Runner) prepareEvaluators() ([]namedEvaluator, error) {
+	prepared := make([]namedEvaluator, 0, len(r.evaluators))
+	seen := make(map[string]bool, len(r.evaluators))
+	for _, evaluator := range r.evaluators {
+		name := evaluator.Name()
+		if seen[name] {
+			return nil, fmt.Errorf("evaluate: duplicate evaluator name %q", name)
+		}
+		seen[name] = true
+		prepared = append(prepared, namedEvaluator{name: name, evaluator: evaluator})
+	}
+	return prepared, nil
+}
+
 // SystemUnderTest 被测系统接口
 type SystemUnderTest interface {
 	// Run 运行系统并返回响应
@@ -60,10 +80,14 @@ func (f SystemFunc) Run(ctx context.Context, query string) (*SystemResponse, err
 	return f(ctx, query)
 }
 
-// EvaluateDataset 评估整个数据集
+// EvaluateDataset 评估整个数据集；重名评估器在运行被测系统前返回错误。
 func (r *Runner) EvaluateDataset(ctx context.Context, dataset *Dataset, system SystemUnderTest) (*EvalReport, error) {
 	if len(r.evaluators) == 0 {
 		return nil, fmt.Errorf("no evaluators configured")
+	}
+	evaluators, err := r.prepareEvaluators()
+	if err != nil {
+		return nil, err
 	}
 
 	report := &EvalReport{
@@ -76,9 +100,9 @@ func (r *Runner) EvaluateDataset(ctx context.Context, dataset *Dataset, system S
 	}
 
 	// 初始化指标汇总
-	for _, eval := range r.evaluators {
-		report.Summary[eval.Name()] = &MetricSummary{
-			Name:         eval.Name(),
+	for _, eval := range evaluators {
+		report.Summary[eval.name] = &MetricSummary{
+			Name:         eval.name,
 			Min:          1.0,
 			Max:          0.0,
 			Distribution: make(map[string]int),
@@ -107,7 +131,7 @@ func (r *Runner) EvaluateDataset(ctx context.Context, dataset *Dataset, system S
 		go func() {
 			defer wg.Done()
 			for work := range workCh {
-				result := r.evaluateSample(ctx, work.sample, system)
+				result := r.evaluateSample(ctx, work.sample, system, evaluators)
 				resultCh <- result
 			}
 		}()
@@ -191,7 +215,7 @@ func (r *Runner) EvaluateDataset(ctx context.Context, dataset *Dataset, system S
 }
 
 // evaluateSample 评估单个样本
-func (r *Runner) evaluateSample(ctx context.Context, sample Sample, system SystemUnderTest) SampleResult {
+func (r *Runner) evaluateSample(ctx context.Context, sample Sample, system SystemUnderTest, evaluators []namedEvaluator) SampleResult {
 	start := time.Now()
 	result := SampleResult{
 		SampleID: sample.ID,
@@ -239,25 +263,33 @@ func (r *Runner) evaluateSample(ctx context.Context, sample Sample, system Syste
 	}
 
 	// 运行所有评估器
-	for _, eval := range r.evaluators {
-		evalResult, err := eval.Evaluate(evalCtx, input)
-		result.Results[eval.Name()] = normalizeEvalResult(eval.Name(), evalResult, err)
+	for _, eval := range evaluators {
+		evalResult, err := eval.evaluator.Evaluate(evalCtx, input)
+		result.Results[eval.name] = normalizeEvalResult(eval.name, evalResult, err)
 	}
 
 	result.Duration = time.Since(start)
 	return result
 }
 
-// EvaluateSingle 评估单个输入
+// EvaluateSingle 评估单个输入；重名评估器在调用任何评估器前返回错误。
 func (r *Runner) EvaluateSingle(ctx context.Context, input EvalInput) (map[string]*EvalResult, error) {
+	evaluators, err := r.prepareEvaluators()
+	if err != nil {
+		return nil, err
+	}
+	return evaluateSingle(ctx, input, evaluators), nil
+}
+
+func evaluateSingle(ctx context.Context, input EvalInput, evaluators []namedEvaluator) map[string]*EvalResult {
 	results := make(map[string]*EvalResult)
 
-	for _, eval := range r.evaluators {
-		result, err := eval.Evaluate(ctx, input)
-		results[eval.Name()] = normalizeEvalResult(eval.Name(), result, err)
+	for _, eval := range evaluators {
+		result, err := eval.evaluator.Evaluate(ctx, input)
+		results[eval.name] = normalizeEvalResult(eval.name, result, err)
 	}
 
-	return results, nil
+	return results
 }
 
 // normalizeEvalResult 保留部分评分事实，并将空返回或执行错误显式记入同一结果。
@@ -282,8 +314,12 @@ func normalizeEvalResult(name string, result *EvalResult, err error) *EvalResult
 	return &failed
 }
 
-// EvaluateBatch 批量评估
+// EvaluateBatch 批量评估；整个批次执行前固定并校验评估器身份。
 func (r *Runner) EvaluateBatch(ctx context.Context, inputs []EvalInput) ([]map[string]*EvalResult, error) {
+	evaluators, err := r.prepareEvaluators()
+	if err != nil {
+		return nil, err
+	}
 	results := make([]map[string]*EvalResult, len(inputs))
 	resultCh := make(chan struct {
 		index  int
@@ -311,7 +347,7 @@ func (r *Runner) EvaluateBatch(ctx context.Context, inputs []EvalInput) ([]map[s
 		go func() {
 			defer wg.Done()
 			for work := range workCh {
-				result, _ := r.EvaluateSingle(ctx, work.input)
+				result := evaluateSingle(ctx, work.input, evaluators)
 				resultCh <- struct {
 					index  int
 					result map[string]*EvalResult

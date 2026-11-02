@@ -29,11 +29,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/reflectx"
 )
 
 // ErrArtifactConflict 和 ErrAtomicCreateUnsupported 分别表示 ID 冲突和缺少原子创建能力。
@@ -250,6 +251,7 @@ func (s *Service) DeleteAll(ctx context.Context, sessionID string) error {
 
 // MemoryStore 内存存储
 // 适用于开发和测试环境
+// 保存和读取均隔离 Data 与完整 Metadata；无法保类型隔离的元数据返回错误，不写入共享引用。
 type MemoryStore struct {
 	mu        sync.RWMutex
 	artifacts map[string]*Artifact // ID -> Artifact
@@ -266,19 +268,23 @@ func NewMemoryStore() *MemoryStore {
 //
 // Artifact 中的 Data（[]byte）与 Metadata（map）是引用类型，仅做结构体浅拷贝
 // 仍会让调用方与 store 内部共享底层数组/映射。读取路径统一返回深拷贝，确保调用方
-// 对返回值的任何修改都不会污染 store 内部状态（封装性 + 并发安全约定）。
-func cloneArtifact(art *Artifact) *Artifact {
+// 对返回值的任何修改都不会污染 store 内部状态。无法隔离的 Metadata 返回错误。
+func cloneArtifact(art *Artifact) (*Artifact, error) {
 	if art == nil {
-		return nil
+		return nil, nil
 	}
 	cloned := *art
 	if art.Data != nil {
 		cloned.Data = slices.Clone(art.Data)
 	}
 	if art.Metadata != nil {
-		cloned.Metadata = maps.Clone(art.Metadata)
+		metadata, err := reflectx.DeepCopyChecked(art.Metadata)
+		if err != nil {
+			return nil, fmt.Errorf("artifact metadata cannot be isolated: %w", err)
+		}
+		cloned.Metadata = metadata
 	}
-	return &cloned
+	return &cloned, nil
 }
 
 func (s *MemoryStore) Save(_ context.Context, art Artifact) (string, error) {
@@ -286,7 +292,11 @@ func (s *MemoryStore) Save(_ context.Context, art Artifact) (string, error) {
 	defer s.mu.Unlock()
 
 	// 写入时同样深拷贝，避免调用方持有的原始切片/映射被后续修改而影响 store。
-	s.artifacts[art.ID] = cloneArtifact(&art)
+	cloned, err := cloneArtifact(&art)
+	if err != nil {
+		return "", err
+	}
+	s.artifacts[art.ID] = cloned
 	return art.ID, nil
 }
 
@@ -327,7 +337,11 @@ func (s *MemoryStore) saveNextVersion(art Artifact, create bool) (string, error)
 		art.ID = fmt.Sprintf("%s/%s/v%d", art.SessionID, art.Name, art.Version)
 	}
 
-	s.artifacts[art.ID] = cloneArtifact(&art)
+	cloned, err := cloneArtifact(&art)
+	if err != nil {
+		return "", err
+	}
+	s.artifacts[art.ID] = cloned
 	return art.ID, nil
 }
 
@@ -340,7 +354,7 @@ func (s *MemoryStore) Get(_ context.Context, id string) (*Artifact, error) {
 		return nil, fmt.Errorf("artifact 不存在: %s", id)
 	}
 	// 返回深拷贝，避免调用方修改污染 store 内部状态。
-	return cloneArtifact(art), nil
+	return cloneArtifact(art)
 }
 
 func (s *MemoryStore) GetByVersion(_ context.Context, sessionID, name string, version int) (*Artifact, error) {
@@ -350,7 +364,7 @@ func (s *MemoryStore) GetByVersion(_ context.Context, sessionID, name string, ve
 	for _, art := range s.artifacts {
 		if art.SessionID == sessionID && art.Name == name && art.Version == version {
 			// 返回深拷贝，避免调用方修改污染 store 内部状态。
-			return cloneArtifact(art), nil
+			return cloneArtifact(art)
 		}
 	}
 	return nil, fmt.Errorf("artifact 不存在: %s/%s v%d", sessionID, name, version)
@@ -373,7 +387,7 @@ func (s *MemoryStore) GetLatest(_ context.Context, sessionID, name string) (*Art
 		return nil, nil
 	}
 	// 返回深拷贝，避免调用方修改污染 store 内部状态。
-	return cloneArtifact(latest), nil
+	return cloneArtifact(latest)
 }
 
 func (s *MemoryStore) List(_ context.Context, sessionID string) ([]Artifact, error) {
@@ -394,7 +408,11 @@ func (s *MemoryStore) List(_ context.Context, sessionID string) ([]Artifact, err
 	var result []Artifact
 	for _, art := range latestByName {
 		// 返回深拷贝，避免调用方修改污染 store 内部状态。
-		result = append(result, *cloneArtifact(art))
+		cloned, err := cloneArtifact(art)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *cloned)
 	}
 
 	sort.Slice(result, func(i, j int) bool {
@@ -412,7 +430,11 @@ func (s *MemoryStore) ListVersions(_ context.Context, sessionID, name string) ([
 	for _, art := range s.artifacts {
 		if art.SessionID == sessionID && art.Name == name {
 			// 返回深拷贝，避免调用方修改污染 store 内部状态。
-			versions = append(versions, *cloneArtifact(art))
+			cloned, err := cloneArtifact(art)
+			if err != nil {
+				return nil, err
+			}
+			versions = append(versions, *cloned)
 		}
 	}
 
