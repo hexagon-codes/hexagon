@@ -4,6 +4,12 @@
 
 ## v0.6.0（2026-11-02）
 
+- **graph**：异步流过滤器 panic 转为含栈错误终态并取消本轮图执行。
+- **a2a**：Stop 同时等待实际 HTTP handler、任务执行与流生产者清理；期限耗尽后继续排空，完成前拒绝新一代 Start。StreamingTaskHandler 必须在后台工作结束后关闭返回通道。
+- **mcp**：工具 Schema 原文只接受对应 tools/list 请求的响应；媒体类型按 MIME 解析，SSE 的事件名与 EOF 提交边界对齐官方 SDK，忽略事件不能覆盖有效约束。
+- **browserruntime**：新建页面与首次观察合并执行，已知失败清理本次创建页面；关闭结果未确认时保留归属，已确认关闭可重复清理。
+- **runtime**：正的亚微美元预算不再在零用量时误判耗尽，预算按记账最小单位向上取整。
+
 - **graph / core**：消除StreamChannel发送与关闭竞态，为StreamRun终态独立预留槽位，组合流继续消费SourceEOF之后的数据。
 - **a2a**：固定Stop所属服务器代次，拒绝停启交叠；停机期限不再被业务存储锁阻塞，宽限期限后取消在途HTTP上下文。
 - **mcp**：在官方SDK把动态数字转为float64前保留工具Schema，标准HTTP和stdio往返保持精确数值及空约束。

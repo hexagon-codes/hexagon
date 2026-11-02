@@ -17,6 +17,12 @@ hexagon 是 Hexagon 生态的 **AI Agent 框架（L2）**，向下依赖 toolkit
 
 ## 流终态、服务停机与Schema补充合同
 
+- 流过滤器 panic 属于本轮执行失败，返回含栈错误终态并取消图执行。正常事件过滤与缓冲丢弃不能删除终态。
+- Stop 的完成信号表示 HTTP 请求、已准入任务及流生产者均已实际结束；首次 Stop 超时不代表排空，后续 Stop 继续等待，期间 Start 拒绝启动。`StreamingTaskHandler` 返回的通道必须在生产者完成清理后关闭，即使已经发出 Final 或收到取消；不合作的生产者不会被伪称已停止。
+- MCP 原文捕获按 tools/list 请求身份关联，只处理 SDK 接受的响应事件；MIME 参数不改变媒体类型，SSE EOF 的末行也参与解析。已经由自定义 Transport 或调用者舍入的 float64 无法重建原始精度，该边界不变。
+- 浏览器新建页失败仅清理本次 nonce 标识的页面；结果未知时不盲目再建。ClosePage 未确认关闭返回错误，Coordinator 保留任务页面归属供再次清理；只有已知关闭记录才允许把页面缺失视为成功。
+- 美元预算与整数微美元记账比较时向上取整；正预算在零用量时仍可用，非正预算保留禁用合同。
+
 - `StreamChannel.Emit`与Close互斥，普通事件仍可在满缓冲时丢弃。`Graph.StreamRun`额外保留一个终态槽，结束或错误始终独立于普通事件过滤/丢弃策略；Done后仍可读完缓冲内事件。ComposeStream转发Merge时不把SourceEOF当成整体结束。
 - A2A Start与Stop按服务器代次协调。停止期间Start明确失败；Stop先停止当前监听，宽限期限到达时取消在途HTTP上下文并返回错误，资源回收继续完成；回收完成后可重启。注入Store仍归宿主所有，默认Store及已保存任务保留原所有权合同。
 - 官方MCP标准Streamable HTTP在正文处保留工具Schema原文，不包装SDK的会话协商连接；标准stdio、IO、in-memory及SSE连接在JSON-RPC解码前保留原文。工具代理采用精确Schema，Enum/Default/上下界的大整数和空数组存在性保持。自定义Transport保留其连接扩展行为，数值保真需由其提供相应原文能力，不对SDK已经舍入的数据补造精度。
