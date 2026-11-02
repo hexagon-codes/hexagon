@@ -86,6 +86,8 @@ func (f SystemFunc) Run(ctx context.Context, query string) (*SystemResponse, err
 
 // EvaluateDataset 评估整个数据集；重名评估器在运行被测系统前返回错误。
 func (r *Runner) EvaluateDataset(ctx context.Context, dataset *Dataset, system SystemUnderTest) (*EvalReport, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	if len(r.evaluators) == 0 {
 		return nil, fmt.Errorf("no evaluators configured")
 	}
@@ -135,8 +137,15 @@ func (r *Runner) EvaluateDataset(ctx context.Context, dataset *Dataset, system S
 		go func() {
 			defer wg.Done()
 			for work := range workCh {
+				if ctx.Err() != nil {
+					return
+				}
 				result := r.evaluateSample(ctx, work.sample, system, evaluators)
 				resultCh <- result
+				if r.config.StopOnError && (result.Error != "" || evaluationResultsFailed(result.Results)) {
+					cancel()
+					return
+				}
 			}
 		}()
 	}
@@ -266,11 +275,7 @@ func (r *Runner) evaluateSample(ctx context.Context, sample Sample, system Syste
 		input.Context = sample.Context
 	}
 
-	// 运行所有评估器
-	for _, eval := range evaluators {
-		evalResult, err := eval.evaluator.Evaluate(evalCtx, input)
-		result.Results[eval.name] = normalizeEvalResult(eval.name, evalResult, err)
-	}
+	result.Results = evaluateSingle(evalCtx, input, evaluators, r.config.StopOnError)
 
 	result.Duration = time.Since(start)
 	return result
@@ -282,18 +287,34 @@ func (r *Runner) EvaluateSingle(ctx context.Context, input EvalInput) (map[strin
 	if err != nil {
 		return nil, err
 	}
-	return evaluateSingle(ctx, input, evaluators), nil
+	return evaluateSingle(ctx, input, evaluators, r.config.StopOnError), nil
 }
 
-func evaluateSingle(ctx context.Context, input EvalInput, evaluators []namedEvaluator) map[string]*EvalResult {
+func evaluateSingle(ctx context.Context, input EvalInput, evaluators []namedEvaluator, stopOnError bool) map[string]*EvalResult {
 	results := make(map[string]*EvalResult)
 
 	for _, eval := range evaluators {
+		if err := ctx.Err(); err != nil {
+			results[eval.name] = normalizeEvalResult(eval.name, nil, err)
+			break
+		}
 		result, err := eval.evaluator.Evaluate(ctx, input)
 		results[eval.name] = normalizeEvalResult(eval.name, result, err)
+		if stopOnError && results[eval.name].Error != "" {
+			break
+		}
 	}
 
 	return results
+}
+
+func evaluationResultsFailed(results map[string]*EvalResult) bool {
+	for _, result := range results {
+		if result == nil || result.Error != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeEvalResult 固定本次评分事实，隔离评估器可能再次使用的结果对象。
@@ -328,6 +349,8 @@ func normalizeEvalResult(name string, result *EvalResult, err error) *EvalResult
 
 // EvaluateBatch 批量评估；整个批次执行前固定并校验评估器身份。
 func (r *Runner) EvaluateBatch(ctx context.Context, inputs []EvalInput) ([]map[string]*EvalResult, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	evaluators, err := r.prepareEvaluators()
 	if err != nil {
 		return nil, err
@@ -359,11 +382,18 @@ func (r *Runner) EvaluateBatch(ctx context.Context, inputs []EvalInput) ([]map[s
 		go func() {
 			defer wg.Done()
 			for work := range workCh {
-				result := evaluateSingle(ctx, work.input, evaluators)
+				if ctx.Err() != nil {
+					return
+				}
+				result := evaluateSingle(ctx, work.input, evaluators, r.config.StopOnError)
 				resultCh <- struct {
 					index  int
 					result map[string]*EvalResult
 				}{index: work.index, result: result}
+				if r.config.StopOnError && evaluationResultsFailed(result) {
+					cancel()
+					return
+				}
 			}
 		}()
 	}

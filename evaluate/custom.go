@@ -86,13 +86,15 @@ func (c *CustomEvaluator) Description() string {
 // 如果评估函数返回的结果中 Name 为空，会自动填充为评估器名称。
 func (c *CustomEvaluator) Evaluate(ctx context.Context, input EvalInput) (*EvalResult, error) {
 	result, err := c.evalFn(ctx, input)
-	if err != nil {
-		return nil, fmt.Errorf("custom evaluator %q: %w", c.name, err)
-	}
 
 	// 自动填充结果名称
 	if result != nil && result.Name == "" {
-		result.Name = c.name
+		cloned := *result
+		cloned.Name = c.name
+		result = &cloned
+	}
+	if err != nil {
+		return result, fmt.Errorf("custom evaluator %q: %w", c.name, err)
 	}
 
 	return result, nil
