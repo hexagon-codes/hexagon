@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+
+	"github.com/hexagon-codes/toolkit/util/reflectx"
 )
 
 // Registry 插件注册表
@@ -47,18 +49,20 @@ func (r *Registry) UnregisterFactory(name string) {
 
 // Register 注册插件实例
 func (r *Registry) Register(plugin Plugin) error {
+	info := plugin.Info()
 	r.mu.Lock()
 
-	info := plugin.Info()
 	if _, exists := r.plugins[info.Name]; exists {
 		r.mu.Unlock()
 		return fmt.Errorf("plugin %s already registered", info.Name)
 	}
 
 	r.plugins[info.Name] = &PluginInstance{
-		Plugin: plugin,
-		State:  PluginStateLoaded,
+		Plugin:     plugin,
+		State:      PluginStateLoaded,
+		generation: newGeneration(plugin, Reference{Name: info.Name, Version: info.Version}),
 	}
+	r.plugins[info.Name].generation.dependencies = append([]string(nil), info.Dependencies...)
 	r.mu.Unlock()
 
 	// emitEvent 内部会加读锁，必须在写锁释放后调用，否则同一 goroutine 重入死锁
@@ -98,7 +102,7 @@ func (r *Registry) Unregister(name string) error {
 	return nil
 }
 
-// Get 获取插件
+// Get 获取插件。返回值不持有资源使用权；运行请求应使用 Acquire 原子解析并固定路由。
 func (r *Registry) Get(name string) (Plugin, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -111,7 +115,7 @@ func (r *Registry) Get(name string) (Plugin, error) {
 	return instance.Plugin, nil
 }
 
-// GetInstance 获取插件实例
+// GetInstance 获取独立状态快照；Plugin 句柄只借用，实际运行使用 Acquire。
 func (r *Registry) GetInstance(name string) (*PluginInstance, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -121,7 +125,33 @@ func (r *Registry) GetInstance(name string) (*PluginInstance, error) {
 		return nil, fmt.Errorf("plugin %s not found", name)
 	}
 
+	copy := *instance
+	var err error
+	copy.Config, err = reflectx.DeepCopyChecked(instance.Config)
+	if err != nil {
+		return nil, fmt.Errorf("plugin config cannot be snapshotted: %w", err)
+	}
+	if instance.StartedAt != nil {
+		started := *instance.StartedAt
+		copy.StartedAt = &started
+	}
+	return &copy, nil
+}
+
+func (r *Registry) getInstance(name string) (*PluginInstance, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	instance, exists := r.plugins[name]
+	if !exists {
+		return nil, fmt.Errorf("plugin %s not found", name)
+	}
 	return instance, nil
+}
+
+func (r *Registry) instanceState(instance *PluginInstance) PluginState {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return instance.State
 }
 
 // Has 检查插件是否存在
