@@ -3,7 +3,6 @@ package graph
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -126,6 +125,6 @@ func TestStreamFilterPanicCancelsInFlightGraph(t *testing.T) {
 		t.Fatal("in-flight handler did not observe cancellation")
 	}
 	if third.Load() != 0 {
-		t.Fatal(fmt.Sprintf("third handler called %d times", third.Load()))
+		t.Fatalf("third handler called %d times", third.Load())
 	}
 }
