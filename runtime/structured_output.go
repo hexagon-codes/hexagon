@@ -220,6 +220,12 @@ func (r *DefaultRunner) invokeStructured(ctx context.Context, req Request, callR
 			}
 		}
 		failures = append(failures, structured.AttemptError{Output: output, Err: validationErr})
+		if response != nil {
+			if stop, stopped, finishErr := modelResponseStop(response); stopped && stop != StopReasonEndTurn {
+				state.stopReason, state.modelFinishReason = stop, response.FinishReason
+				return response, &structuredOutputError{Err: errors.Join(&structured.Error{Attempts: failures}, finishErr)}
+			}
+		}
 		if repair >= spec.MaxRepairs {
 			return response, &structuredOutputError{Err: &structured.Error{Attempts: failures}}
 		}

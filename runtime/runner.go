@@ -968,7 +968,10 @@ func requestID(req Request) string {
 func canceledStateResult(state *State) *Result {
 	result := stateResult(state)
 	if result != nil {
-		result.StopReason = ""
+		result.StopReason = state.stopReason
+		if result.StopReason == StopReasonEndTurn {
+			result.StopReason = ""
+		}
 	}
 	return result
 }
