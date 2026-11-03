@@ -153,7 +153,20 @@ func (s *Server) Start(addr string) error {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 	serverCtx, cancel := context.WithCancel(context.Background())
-	server := &http.Server{Addr: addr, Handler: s.corsMiddleware(mux), ReadTimeout: 30 * time.Second, WriteTimeout: 0, IdleTimeout: 120 * time.Second, BaseContext: func(net.Listener) context.Context { return serverCtx }}
+	server := &http.Server{Addr: addr, ReadTimeout: 30 * time.Second, WriteTimeout: 0, IdleTimeout: 120 * time.Second, BaseContext: func(net.Listener) context.Context { return serverCtx }}
+	handler := s.corsMiddleware(mux)
+	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.lifecycleMu.Lock()
+		if s.stopping != nil || s.httpServer != server {
+			s.lifecycleMu.Unlock()
+			http.Error(w, "server is stopping", http.StatusServiceUnavailable)
+			return
+		}
+		s.wg.Add(1)
+		s.lifecycleMu.Unlock()
+		defer s.wg.Done()
+		handler.ServeHTTP(w, r)
+	})
 	s.httpServer = server
 	s.serverCancel = cancel
 	s.running.Store(true)
