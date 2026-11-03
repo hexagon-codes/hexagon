@@ -111,7 +111,9 @@ const observePageCode = `async (page) => {
   if (!context[key]) Object.defineProperty(context, key, { value: { id: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2), next: 0, pages: new WeakMap(), closed: new Set() } });
   const registry = context[key];
   if (!registry.closed) registry.closed = new Set();
-  const identity = p => { if (!registry.pages.has(p)) { const id=registry.id + ':' + (++registry.next); registry.pages.set(p,id); p.once('close', () => registry.closed.add(id)); } return registry.pages.get(p); };
+  if (!registry.aliases) registry.aliases = new WeakMap();
+  if (!registry.trackedClosures) registry.trackedClosures = new WeakSet();
+  const identity = p => { if (!registry.pages.has(p)) registry.pages.set(p,registry.id + ':' + (++registry.next)); const id=registry.pages.get(p); if(!registry.aliases.has(p)) registry.aliases.set(p,new Set()); const aliases=registry.aliases.get(p); aliases.add(id); if(!registry.trackedClosures.has(p)) { registry.trackedClosures.add(p); p.once('close',()=>{for(const known of aliases) registry.closed.add(known);}); } return id; };
   const pages = await Promise.all(context.pages().filter(p => !p.isClosed()).map(async (p, index) => ({ id: identity(p), index, url: p.url(), title: await p.title().catch(() => '') })));
   const size = page.viewportSize() || await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
   return { hexclaw_browser_observation: { browser_id: registry.id, page: pages.find(p => p.id === identity(page)), pages, width: size.width, height: size.height } };
