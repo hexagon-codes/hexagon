@@ -111,3 +111,26 @@ func TestMapEachIsExplicit(t *testing.T) {
 		t.Fatalf("values=%v error=%v", values, err)
 	}
 }
+
+func TestComposeStreamKeepsMergedTail(t *testing.T) {
+	first := NewRunnable[string, string]("source", "", nil).WithStream(func(context.Context, string, ...Option) (*StreamReader[string], error) {
+		return stream.Merge(stream.FromSlice([]string{}), stream.FromSlice([]string{"tail"})), nil
+	})
+	second := NewRunnable[string, string]("identity", "", nil).WithTransform(func(_ context.Context, r *StreamReader[string], _ ...Option) (*StreamReader[string], error) {
+		return r, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	r, err := ComposeStream[string, string, string](first, second).Stream(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	values, err := r.Collect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values[0] != "tail" {
+		t.Fatalf("values=%v, want tail", values)
+	}
+}
