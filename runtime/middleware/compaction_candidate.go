@@ -44,12 +44,22 @@ func (candidate *CompactionCandidate) Apply(currentRevision uint64, currentMessa
 
 func cloneCompactionRequest(request llm.CompletionRequest) (llm.CompletionRequest, error) {
 	messages := hr.CloneOutputMessages(request.Messages)
+	// Metadata 可能携带运行时回调（例如推理回执观察器），不能按数据字段深拷贝；
+	// 压缩只读取请求其余字段和消息，因此保留独立 map、共享不可变回调即可。
+	metadata := request.Metadata
 	request.Messages = nil
+	request.Metadata = nil
 	copy, err := reflectx.DeepCopyChecked(request)
 	if err != nil {
 		return llm.CompletionRequest{}, fmt.Errorf("clone compaction request: %w", err)
 	}
 	copy.Messages = messages
+	if metadata != nil {
+		copy.Metadata = make(map[string]any, len(metadata))
+		for key, value := range metadata {
+			copy.Metadata[key] = value
+		}
+	}
 	return copy, nil
 }
 

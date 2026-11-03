@@ -37,6 +37,28 @@ func TestCompactionUsesFullRequestInsteadOfAccumulatedUsage(t *testing.T) {
 	}
 }
 
+func TestCompactionRequestPreservesCallbackMetadata(t *testing.T) {
+	observer := func(llm.ReasoningReceipt) {}
+	request := llm.CompletionRequest{
+		Messages: []llm.Message{llm.UserMessage("hello")},
+		Metadata: map[string]any{llm.ReasoningReceiptObserverMetadataKey: observer},
+	}
+	c := Compaction{MaxTokens: 1, Compact: func(_ context.Context, messages []llm.Message) ([]llm.Message, error) {
+		return messages, nil
+	}}
+	work, err := c.Prepare(request, 1)
+	if err != nil || work == nil {
+		t.Fatalf("prepare=%v err=%v", work, err)
+	}
+	if _, ok := work.request.Metadata[llm.ReasoningReceiptObserverMetadataKey].(func(llm.ReasoningReceipt)); !ok {
+		t.Fatalf("callback metadata was not preserved: %#v", work.request.Metadata)
+	}
+	request.Metadata["later"] = "mutation"
+	if _, ok := work.request.Metadata["later"]; ok {
+		t.Fatal("compaction request metadata was not isolated from the caller")
+	}
+}
+
 func TestCompactionCandidatePreservesAppendedTailAndAliases(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
