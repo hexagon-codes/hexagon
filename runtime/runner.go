@@ -777,6 +777,7 @@ func (r *DefaultRunner) executeToolCalls(ctx context.Context, state *State, call
 		}
 		var result ToolResult
 		var err error
+		toolFailed := false
 		started := time.Now()
 		if r.toolExecutor == nil {
 			result = ToolResult{Content: fmt.Sprintf("Error: tool %q not available", call.Name), Error: "tool executor not configured", Status: ToolStatusError}
@@ -808,7 +809,8 @@ func (r *DefaultRunner) executeToolCalls(ctx context.Context, state *State, call
 			if r.session == nil && position < len(pending) && !pending[position].SideEffect.ReplaySafe() && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 				err = &ToolReconciliationError{Err: err}
 			}
-			if err != nil {
+			toolFailed = err != nil
+			if toolFailed {
 				if signal, waiting := interrupt.IsInterruptSignal(err); waiting {
 					waitingByTask[taskID] = signal
 					if err := syncWaiting(); err != nil {
@@ -831,9 +833,6 @@ func (r *DefaultRunner) executeToolCalls(ctx context.Context, state *State, call
 				result.Error, result.Status = err.Error(), ToolStatusError
 				if result.Content == "" {
 					result.Content = fmt.Sprintf("Error: %v", err)
-				}
-				if emitErr := emitter.emit(ctx, Event{Type: EventToolCallFailed, State: state, ToolCall: &call, ToolResult: &result, Error: err, RuntimeError: runtimeError("tool_call_failed", err)}); emitErr != nil {
-					return emitErr
 				}
 			}
 		}
@@ -875,6 +874,12 @@ func (r *DefaultRunner) executeToolCalls(ctx context.Context, state *State, call
 		// （同一 tool_call ID 只需一个配对结果）。
 		if call.ID != "" && !result.NeedsReconciliation {
 			done[call.ID] = true
+		}
+		// 先保留已完成/已失败工具记录，再发失败事件；sink 写入失败不能丢事实。
+		if toolFailed {
+			if emitErr := emitter.emit(ctx, Event{Type: EventToolCallFailed, State: state, ToolCall: &call, ToolResult: &result, Error: err, RuntimeError: runtimeError("tool_call_failed", err)}); emitErr != nil {
+				return emitErr
+			}
 		}
 		if err := runAfterTool(ctx, r.middleware, state, call, result); err != nil {
 			return err
