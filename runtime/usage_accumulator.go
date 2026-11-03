@@ -40,9 +40,14 @@ func (u *UsageAccumulator) RecordCost(costUSD float64) {
 }
 
 // recordCost 保留小于记账单位的余量，不因逐笔舍入永久丢失费用。
+// 使用向正无穷方向的半单位舍入，使零增量调用保持幂等，避免正负余量交替振荡。
 func (u *UsageAccumulator) recordCost(costUSD float64) {
+	// 零费用不是新的记账事件，直接保持余额与余量，避免舍入回写造成振荡。
+	if costUSD == 0 {
+		return
+	}
 	exact := costUSD*1_000_000 + u.costRemainder
-	whole := math.Round(exact)
+	whole := math.Floor(exact + 0.5)
 	u.costRemainder = exact - whole
 	u.microDollars.Add(int64(whole))
 }

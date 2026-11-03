@@ -41,3 +41,22 @@ func TestUsageAccumulatorKeepsFractionalCostsAndRefunds(t *testing.T) {
 		t.Fatal("over-refund left a negative balance")
 	}
 }
+
+func TestUsageAccumulatorZeroCostIsIdempotent(t *testing.T) {
+	var u UsageAccumulator
+	u.RecordCost(.0000015)
+	cost := u.Snapshot().CostMicroUSD
+	exhausted := u.CheckLimits(0, 0, .000002) != nil
+	if cost != 2 || !exhausted {
+		t.Fatalf("initial accumulation=%d exhausted=%v", cost, exhausted)
+	}
+	for i := 0; i < 4; i++ {
+		u.RecordCost(0)
+		if got := u.Snapshot().CostMicroUSD; got != cost {
+			t.Fatalf("zero-cost call %d changed cost: %d -> %d", i+1, cost, got)
+		}
+		if got := u.CheckLimits(0, 0, .000002) != nil; got != exhausted {
+			t.Fatalf("zero-cost call %d changed budget state", i+1)
+		}
+	}
+}
