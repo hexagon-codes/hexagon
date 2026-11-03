@@ -16,10 +16,15 @@ package chain
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"runtime/debug"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/hexagon/core"
+	"github.com/hexagon-codes/hexagon/interrupt"
 )
 
 // Chain 链式组件
@@ -213,19 +218,45 @@ func (c *Chain[I, O]) Collect(ctx context.Context, input *stream.StreamReader[I]
 	return c.Invoke(ctx, collected, opts...)
 }
 
-// Transform 转换流
+// Transform 转换流。输出关闭会关闭输入并取消本转换；SourceEOF 只表示某个
+// 上游分源结束，不能当作整体终止；其他读取错误必须传给下游。
 func (c *Chain[I, O]) Transform(ctx context.Context, input *stream.StreamReader[I], opts ...core.Option) (*stream.StreamReader[O], error) {
-	reader, writer := stream.Pipe[O](10)
+	callCtx, cancel := context.WithCancel(ctx)
+	reader, writer := stream.PipeWithClose[O](10, func() error {
+		cancel()
+		return input.Close()
+	})
 	go func() {
 		defer writer.Close()
+		defer cancel()
+		defer func() {
+			if value := recover(); value != nil {
+				_ = writer.CloseWithError(&core.AsyncPanicError{Value: value, Stack: debug.Stack()})
+			}
+		}()
 		for {
-			in, err := input.Recv()
-			if err != nil {
+			if err := callCtx.Err(); err != nil {
+				_ = writer.CloseWithError(err)
 				return
 			}
-			result, err := c.Invoke(ctx, in, opts...)
+			in, err := input.Recv()
+			if cause := callCtx.Err(); cause != nil {
+				_ = writer.CloseWithError(cause)
+				return
+			}
 			if err != nil {
-				writer.CloseWithError(err)
+				if _, ok := stream.IsSourceEOF(err); ok {
+					continue
+				}
+				if err == io.EOF {
+					return
+				}
+				_ = writer.CloseWithError(err)
+				return
+			}
+			result, err := c.Invoke(callCtx, in, opts...)
+			if err != nil {
+				_ = writer.CloseWithError(err)
 				return
 			}
 			if err := writer.Send(result); err != nil {
@@ -261,7 +292,8 @@ func LoggingMiddleware(logger func(name string, input, output any, err error)) M
 	}
 }
 
-// RetryMiddleware 重试中间件
+// RetryMiddleware 重试中间件。取消、中断、未知副作用和待核对结果优先于
+// 调用方的 shouldRetry，不能被自定义策略重新放行。
 func RetryMiddleware(maxRetries int, shouldRetry func(error) bool) Middleware {
 	return func(next StepFunc) StepFunc {
 		return func(ctx context.Context, input any) (any, error) {
@@ -272,13 +304,30 @@ func RetryMiddleware(maxRetries int, shouldRetry func(error) bool) Middleware {
 					return output, nil
 				}
 				lastErr = err
-				if !shouldRetry(err) {
+				if retryStopped(err) || !shouldRetry(err) {
 					return nil, err
 				}
 			}
 			return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
 		}
 	}
+}
+
+func retryStopped(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if _, waiting := interrupt.IsInterruptSignal(err); waiting {
+		return true
+	}
+	var marker interface{ NeedsReconciliation() bool }
+	if errors.As(err, &marker) && marker.NeedsReconciliation() {
+		return true
+	}
+	return llm.IsUnsafeToReplay(err)
 }
 
 // RecoverMiddleware panic 恢复中间件
@@ -364,36 +413,90 @@ func (p *Parallel[I, O]) Add(handler func(ctx context.Context, input I) (O, erro
 	return p
 }
 
-// Invoke 执行并行处理
+// ParallelResult 按调用方声明顺序保留一个并行分支的结果。
+type ParallelResult[O any] struct {
+	Index  int
+	Output O
+	Err    error
+}
+
+// ParallelError 保留全部分支结果及完整错误树。任一分支成功或出现不可重放
+// 错误时，整组不能直接重试，避免已完成的外部动作被重复执行。
+type ParallelError[O any] struct {
+	Results []ParallelResult[O]
+}
+
+func (e *ParallelError[O]) Error() string {
+	var failures []error
+	for _, result := range e.Results {
+		if result.Err != nil {
+			failures = append(failures, fmt.Errorf("branch %d: %w", result.Index, result.Err))
+		}
+	}
+	if len(failures) == 0 {
+		return "parallel execution failed"
+	}
+	return errors.Join(failures...).Error()
+}
+
+func (e *ParallelError[O]) Unwrap() []error {
+	var failures []error
+	for _, result := range e.Results {
+		if result.Err != nil {
+			failures = append(failures, result.Err)
+		}
+	}
+	return failures
+}
+
+func (e *ParallelError[O]) UnsafeToReplay() bool {
+	for _, result := range e.Results {
+		if result.Err == nil || errors.Is(result.Err, context.Canceled) || errors.Is(result.Err, context.DeadlineExceeded) || llm.IsUnsafeToReplay(result.Err) {
+			return true
+		}
+	}
+	return false
+}
+
+// Invoke 等待全部分支结束后按声明顺序合并；失败分支不会丢弃其他分支已完成的
+// 结果，且不会在仍有分支运行时提前返回。分支 panic 被转成不可重放错误。
 func (p *Parallel[I, O]) Invoke(ctx context.Context, input I, opts ...core.Option) (O, error) {
 	var zero O
 	if len(p.handlers) == 0 {
 		return zero, fmt.Errorf("no handlers in parallel")
 	}
-
-	type result struct {
-		output O
-		err    error
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan ParallelResult[O], len(p.handlers))
+	for index, handler := range p.handlers {
+		handler := handler
+		go func(index int) {
+			result := ParallelResult[O]{Index: index}
+			defer func() {
+				if value := recover(); value != nil {
+					result.Err = &core.AsyncPanicError{Value: value, Stack: debug.Stack()}
+				}
+				results <- result
+			}()
+			result.Output, result.Err = handler(callCtx, input)
+		}(index)
 	}
-
-	results := make(chan result, len(p.handlers))
-
-	for _, h := range p.handlers {
-		h := h
-		go func() {
-			output, err := h(ctx, input)
-			results <- result{output: output, err: err}
-		}()
-	}
-
-	outputs := make([]O, 0, len(p.handlers))
+	ordered := make([]ParallelResult[O], len(p.handlers))
+	outputs := make([]O, len(p.handlers))
+	failed := false
 	for range p.handlers {
-		r := <-results
-		if r.err != nil {
-			return zero, r.err
+		result := <-results
+		ordered[result.Index] = result
+		outputs[result.Index] = result.Output
+		if result.Err != nil {
+			failed = true
+			// 首错即通知其他分支协作取消；仍会等待全部结果收口。
+			cancel()
 		}
-		outputs = append(outputs, r.output)
 	}
-
+	if failed {
+		// 失败分支没有有效输出，不能把零值交给用户的 merge 回调。
+		return zero, &ParallelError[O]{Results: ordered}
+	}
 	return p.merge(outputs), nil
 }

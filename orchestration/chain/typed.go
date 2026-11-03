@@ -19,6 +19,8 @@ package chain
 import (
 	"context"
 	"fmt"
+	"io"
+	"runtime/debug"
 
 	stream "github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/hexagon/core"
@@ -177,27 +179,45 @@ func (c *TypedChain[I, O]) Collect(ctx context.Context, input *stream.StreamRead
 	return c.Invoke(ctx, collected, opts...)
 }
 
-// Transform 流转换：对每个输入元素应用链
+// Transform 流转换：对每个输入元素应用链。输出关闭会关闭输入并取消转换；
+// SourceEOF 继续读取，其他错误完整传给下游。
 func (c *TypedChain[I, O]) Transform(ctx context.Context, input *stream.StreamReader[I], opts ...core.Option) (*stream.StreamReader[O], error) {
-	reader, writer := stream.Pipe[O](10)
+	callCtx, cancel := context.WithCancel(ctx)
+	reader, writer := stream.PipeWithClose[O](10, func() error {
+		cancel()
+		return input.Close()
+	})
 	go func() {
 		defer writer.Close()
+		defer cancel()
+		defer func() {
+			if value := recover(); value != nil {
+				_ = writer.CloseWithError(&core.AsyncPanicError{Value: value, Stack: debug.Stack()})
+			}
+		}()
 		for {
-			select {
-			case <-ctx.Done():
-				writer.CloseWithError(ctx.Err())
+			if err := callCtx.Err(); err != nil {
+				_ = writer.CloseWithError(err)
 				return
-			default:
 			}
-
 			in, err := input.Recv()
-			if err != nil {
+			if cause := callCtx.Err(); cause != nil {
+				_ = writer.CloseWithError(cause)
 				return
 			}
-
-			result, err := c.Invoke(ctx, in, opts...)
 			if err != nil {
-				writer.CloseWithError(err)
+				if _, ok := stream.IsSourceEOF(err); ok {
+					continue
+				}
+				if err == io.EOF {
+					return
+				}
+				_ = writer.CloseWithError(err)
+				return
+			}
+			result, err := c.Invoke(callCtx, in, opts...)
+			if err != nil {
+				_ = writer.CloseWithError(err)
 				return
 			}
 			if err := writer.Send(result); err != nil {
