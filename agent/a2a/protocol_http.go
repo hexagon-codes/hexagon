@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	wire "github.com/a2aproject/a2a-go/v2/a2a"
 )
