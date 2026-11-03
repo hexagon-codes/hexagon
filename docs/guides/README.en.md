@@ -4,15 +4,15 @@
 
 This directory indexes Hexagon guides for getting started, agents, RAG, orchestration, collaboration, plugins, and operations. The guides explain common usage; treat the current source, [`go.mod`](../../go.mod), and tests as the authorities for exported APIs, dependency versions, and actual behavior, respectively.
 
-Documentation version: **v0.5.15**. The [MCP API reference](../API.en.md#mcp) covers connections, typed diagnostics, tool discovery, and cleanup.
+Documentation version: **v0.6.0**. The [MCP API reference](../API.en.md#mcp) covers connections, typed diagnostics, tool discovery, and cleanup.
 
 ## Ecosystem and Current Baseline
 
 | Module | Role | Current Root-Module Declaration |
 |--------|------|---------------------------------|
-| **hexagon** | AI Agent framework core | Go `1.25.13` |
-| [**ai-core**](https://github.com/hexagon-codes/ai-core) | Core AI capability library | `v0.2.12` |
-| [**toolkit**](https://github.com/hexagon-codes/toolkit) | General-purpose Go toolkit | `v0.3.5` |
+| **hexagon** | AI Agent framework core | Go `1.26.10` |
+| [**ai-core**](https://github.com/hexagon-codes/ai-core) | Core AI capability library | `v0.3.0` |
+| [**toolkit**](https://github.com/hexagon-codes/toolkit) | General-purpose Go toolkit | `v0.3.7` |
 
 This table is a snapshot of the current root module. Treat [`go.mod`](../../go.mod) as the single source of truth for subsequent dependency updates.
 

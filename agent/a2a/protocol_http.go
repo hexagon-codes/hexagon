@@ -286,9 +286,29 @@ func (s *Server) beginExecution(ctx context.Context, id string) (context.Context
 	if task.Status.State.IsTerminal() {
 		return nil, nil, nil, NewUnsupportedOperationError("terminal tasks are immutable")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, ToA2AError(err)
+	}
+	// 执行登记与停机准入使用同一同步点，避免零计数Wait先于迟到Add。
+	s.lifecycleMu.Lock()
+	if s.stopping != nil {
+		s.lifecycleMu.Unlock()
+		return nil, nil, nil, NewUnsupportedOperationError("server is stopping")
+	}
+	s.wg.Add(1)
+	s.lifecycleMu.Unlock()
 	runCtx, cancel := context.WithCancel(ctx)
 	s.executions[id] = cancel
-	return runCtx, task, func() { cancel(); s.mu.Lock(); delete(s.executions, id); s.mu.Unlock() }, nil
+	var released sync.Once
+	return runCtx, task, func() {
+		released.Do(func() {
+			cancel()
+			s.mu.Lock()
+			delete(s.executions, id)
+			s.mu.Unlock()
+			s.wg.Done()
+		})
+	}, nil
 }
 
 func (s *Server) commitTask(ctx context.Context, task *Task) error {

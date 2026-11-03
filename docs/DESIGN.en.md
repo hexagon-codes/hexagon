@@ -98,9 +98,9 @@ Hexagon is a complete AI Agent development ecosystem consisting of multiple repo
 
 ```
 hexagon
-├── ai-core v0.2.12
-│   └── toolkit v0.3.4
-└── toolkit v0.3.5 (root module selected version)
+├── ai-core v0.3.0
+│   └── toolkit v0.3.7
+└── toolkit v0.3.7 (root module selected version)
 ```
 
 `hexagon-ui` is an independent optional application in the ecosystem and is not part of the Go module dependency graph above.
@@ -788,15 +788,15 @@ hexagon/
 ## Dependencies
 
 ```
-hexagon (Go >= 1.25.13)
-├── ai-core v0.2.12
-│   └── toolkit v0.3.4
-└── toolkit v0.3.5 (root module selected version)
+hexagon (Go >= 1.26.10)
+├── ai-core v0.3.0
+│   └── toolkit v0.3.7
+└── toolkit v0.3.7 (root module selected version)
 ```
 
 ### ai-core — AI Capabilities Library
 
-`github.com/hexagon-codes/ai-core` `v0.2.12` (Go >= 1.25.12)
+`github.com/hexagon-codes/ai-core` `v0.3.0` (Go >= 1.26.10)
 
 Provides core abstractions for LLM, Tool, Memory, Schema, Stream, and vector storage:
 
@@ -810,7 +810,7 @@ Provides core abstractions for LLM, Tool, Memory, Schema, Stream, and vector sto
 
 ### toolkit — Go General-Purpose Utility Library
 
-`github.com/hexagon-codes/toolkit` `v0.3.5` (Go >= 1.25.13)
+`github.com/hexagon-codes/toolkit` `v0.3.7` (Go >= 1.26.10)
 
 A production-grade Go utility library providing language enhancements, cryptography, networking, caching, goroutine pools, and other foundational capabilities:
 

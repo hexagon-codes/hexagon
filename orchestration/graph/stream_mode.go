@@ -19,6 +19,8 @@ package graph
 
 import (
 	"context"
+	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -236,9 +238,17 @@ func (g *Graph[S]) StreamRun(ctx context.Context, state S, opts ...StreamRunOpti
 	}
 	ch := NewStreamChannel(cfg.bufferSize + 1)
 	ch.terminalSlot = true
+	callCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
 		defer ch.Close()
+		defer cancel()
+		defer func() {
+			if value := recover(); value != nil {
+				cancel()
+				ch.emitTerminal(StreamModeEvent{Mode: StreamModeDebug, Type: EventNodeError, Data: fmt.Sprintf("graph stream callback panicked: %v", value), Metadata: map[string]any{"stack": string(debug.Stack())}})
+			}
+		}()
 
 		// 发射图开始事件
 		if modeSet[StreamModeDebug] {
@@ -250,7 +260,7 @@ func (g *Graph[S]) StreamRun(ctx context.Context, state S, opts ...StreamRunOpti
 			})
 		}
 
-		streamCtx := WithStreamChannel(ctx, ch)
+		streamCtx := WithStreamChannel(callCtx, ch)
 		events, err := g.Stream(streamCtx, state)
 		if err != nil {
 			ch.emitTerminal(StreamModeEvent{Mode: StreamModeDebug, Type: EventNodeError, Data: err.Error()})

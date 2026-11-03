@@ -2,7 +2,7 @@
 
 # Hexagon API 参考文档
 
-本文档覆盖 Hexagon **v0.5.15** API 与当前 `Unreleased` 变更。
+本文档覆盖 Hexagon **v0.6.0** API 与当前 `Unreleased` 变更。
 
 ## 目录
 
@@ -260,7 +260,7 @@ calculator := hexagon.NewTool("calculator", "执行加法计算",
 
 ## MCP
 
-`github.com/hexagon-codes/hexagon/mcp` 的 V2 入口使用官方 Go SDK。以下合同对应 **v0.5.15**；顶层兼容别名继续可用，新代码可直接导入 `mcp` 子包。
+`github.com/hexagon-codes/hexagon/mcp` 的 V2 入口使用官方 Go SDK。以下合同对应 **v0.6.0**；顶层兼容别名继续可用，新代码可直接导入 `mcp` 子包。
 
 ### 连接与资源所有权
 

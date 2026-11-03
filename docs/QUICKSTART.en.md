@@ -4,7 +4,7 @@
 
 This guide helps you get started with the Hexagon AI Agent framework in 30 minutes.
 
-Documentation version: **v0.5.15**. See the [changelog](../CHANGELOG.md) for release changes and the [MCP API reference](API.en.md#mcp) for connection and cleanup contracts.
+Documentation version: **v0.6.0**. See the [changelog](../CHANGELOG.md) for release changes and the [MCP API reference](API.en.md#mcp) for connection and cleanup contracts.
 
 ## Project Overview
 
@@ -39,7 +39,7 @@ Hexagon is a complete AI Agent development ecosystem:
 
 ### System Requirements
 
-- Go 1.25.13 or higher
+- Go 1.26.10 or higher
 - Network access (to reach LLM APIs)
 
 ### Environment Variables

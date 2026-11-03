@@ -2,7 +2,7 @@
 
 # Hexagon API Reference
 
-This document covers the Hexagon **v0.5.15** API and the current `Unreleased` changes.
+This document covers the Hexagon **v0.6.0** API and the current `Unreleased` changes.
 
 ## Table of Contents
 
@@ -260,7 +260,7 @@ calculator := hexagon.NewTool("calculator", "Perform addition",
 
 ## MCP
 
-The V2 entry points in `github.com/hexagon-codes/hexagon/mcp` use the official Go SDK. These contracts apply to **v0.5.15**. Existing top-level compatibility aliases remain available; new code can import the `mcp` package directly.
+The V2 entry points in `github.com/hexagon-codes/hexagon/mcp` use the official Go SDK. These contracts apply to **v0.6.0**. Existing top-level compatibility aliases remain available; new code can import the `mcp` package directly.
 
 ### Connections and Resource Ownership
 

@@ -17,7 +17,7 @@ MAJOR.MINOR.PATCH[-PRERELEASE]
 - **PATCH**: Backward-compatible bug fixes
 - **PRERELEASE**: Pre-release identifier (alpha, beta, GA)
 
-The current Hexagon root module requires **Go 1.25.13 or later**. The repository's `examples/` directory is a separate Go module, is outside the root module's release surface, and does not automatically track root-module dependencies.
+The current Hexagon root module requires **Go 1.26.10 or later**. The repository's `examples/` directory is a separate Go module, is outside the root module's release surface, and does not automatically track root-module dependencies.
 
 ## Stability Levels
 
@@ -229,16 +229,16 @@ Packages under `internal/` are not public and may change at any time.
 
 The current dependency topology of the Hexagon root module is:
 
-- L0: `toolkit v0.3.5`.
-- L1: `ai-core v0.2.12`, which itself requires `toolkit v0.3.4`; MVS selects `v0.3.5` for the root module.
+- L0: `toolkit v0.3.7`.
+- L1: `ai-core v0.3.0`, which itself requires `toolkit v0.3.7`; MVS selects `v0.3.7` for the root module.
 - L2: the Hexagon root module directly requires both versions and resolves one toolkit version under Go's minimal version selection.
 
 | Dependency | Version | Description |
 |-----|------|------|
-| `github.com/hexagon-codes/ai-core` | v0.2.12 | AI capability library |
-| `github.com/hexagon-codes/toolkit` | v0.3.5 | Go general-purpose toolkit |
+| `github.com/hexagon-codes/ai-core` | v0.3.0 | AI capability library |
+| `github.com/hexagon-codes/toolkit` | v0.3.7 | Go general-purpose toolkit |
 
-The root module requires Go 1.25.13 or later. The `examples/` module maintains its own `go.mod` and pins published versions; it is outside this table and must not be assumed to move in lockstep with the root module. Public API changes in dependencies must first be adapted and regression-tested in Hexagon, then shipped under Hexagon's own version.
+The root module requires Go 1.26.10 or later. The `examples/` module maintains its own `go.mod` and pins published versions; it is outside this table and must not be assumed to move in lockstep with the root module. Public API changes in dependencies must first be adapted and regression-tested in Hexagon, then shipped under Hexagon's own version.
 
 ## Feedback
 

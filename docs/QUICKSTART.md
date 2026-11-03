@@ -4,7 +4,7 @@
 
 本指南帮助你在 30 分钟内上手 Hexagon AI Agent 框架。
 
-文档对应 **v0.5.15**。版本变化见 [CHANGELOG](../CHANGELOG.md)，MCP 连接与清理合同见 [API 参考](API.md#mcp)。
+文档对应 **v0.6.0**。版本变化见 [CHANGELOG](../CHANGELOG.md)，MCP 连接与清理合同见 [API 参考](API.md#mcp)。
 
 ## 项目简介
 
@@ -39,7 +39,7 @@ Hexagon 是一个完整的 AI Agent 开发生态：
 
 ### 系统要求
 
-- Go 1.25.13 或更高版本
+- Go 1.26.10 或更高版本
 - 网络连接（访问 LLM API）
 
 ### 环境变量

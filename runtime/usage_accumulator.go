@@ -54,8 +54,8 @@ func (u *UsageAccumulator) CheckLimits(maxTokens int64, maxDuration time.Duratio
 	if maxDuration > 0 && !usage.StartedAt.IsZero() && time.Since(usage.StartedAt) > maxDuration {
 		return fmt.Errorf("duration budget exhausted: %v/%v", time.Since(usage.StartedAt).Round(time.Second), maxDuration)
 	}
-	maxCostMicroUSD := int64(maxCostUSD * 1_000_000)
-	if maxCostUSD > 0 && usage.CostMicroUSD >= maxCostMicroUSD {
+	maxCostMicroUSD := math.Ceil(maxCostUSD * 1_000_000)
+	if maxCostUSD > 0 && float64(usage.CostMicroUSD) >= maxCostMicroUSD {
 		return fmt.Errorf("cost budget exhausted: $%.4f/$%.2f", float64(usage.CostMicroUSD)/1_000_000, maxCostUSD)
 	}
 	return nil

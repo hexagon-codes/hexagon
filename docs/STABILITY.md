@@ -18,7 +18,7 @@ MAJOR.MINOR.PATCH[-PRERELEASE]
 - **PATCH**: 向后兼容的 Bug 修复
 - **PRERELEASE**: 预发布标识 (alpha, beta, GA)
 
-当前 Hexagon 根模块要求 **Go 1.25.13 或更高版本**。仓库内的 `examples/` 是独立 Go module，不属于 Hexagon 根模块的发布表面，也不随根模块依赖自动同步。
+当前 Hexagon 根模块要求 **Go 1.26.10 或更高版本**。仓库内的 `examples/` 是独立 Go module，不属于 Hexagon 根模块的发布表面，也不随根模块依赖自动同步。
 
 ## 稳定性等级
 
@@ -230,16 +230,16 @@ import "github.com/hexagon-codes/hexagon/observe/metrics"     // 指标
 
 Hexagon 根模块的当前依赖拓扑如下：
 
-- L0：`toolkit v0.3.5`。
-- L1：`ai-core v0.2.12`，其自身要求 `toolkit v0.3.4`；根模块通过最小版本选择解析为 `v0.3.5`。
+- L0：`toolkit v0.3.7`。
+- L1：`ai-core v0.3.0`，其自身要求 `toolkit v0.3.7`；根模块通过最小版本选择解析为 `v0.3.7`。
 - L2：Hexagon 根模块直接要求上述两个版本，并以 Go module 最小版本选择规则解析为单一 toolkit 版本。
 
 | 依赖 | 版本 | 说明 |
 |-----|------|------|
-| `github.com/hexagon-codes/ai-core` | v0.2.12 | AI 基础能力库 |
-| `github.com/hexagon-codes/toolkit` | v0.3.5 | Go 通用工具库 |
+| `github.com/hexagon-codes/ai-core` | v0.3.0 | AI 基础能力库 |
+| `github.com/hexagon-codes/toolkit` | v0.3.7 | Go 通用工具库 |
 
-根模块要求 Go 1.25.13 或更高版本。`examples/` 的 `go.mod` 独立维护并固定已发布版本，不属于上表，也不应据此推断与根模块 lockstep。依赖公开 API 的变化须先在 Hexagon 完成适配和回归，再随 Hexagon 自身版本发布。
+根模块要求 Go 1.26.10 或更高版本。`examples/` 的 `go.mod` 独立维护并固定已发布版本，不属于上表，也不应据此推断与根模块 lockstep。依赖公开 API 的变化须先在 Hexagon 完成适配和回归，再随 Hexagon 自身版本发布。
 
 ## 反馈
 
