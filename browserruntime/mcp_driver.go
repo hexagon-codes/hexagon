@@ -226,6 +226,13 @@ func (d *MCPDriver) Bind(ctx context.Context, server, pageID string, newPage boo
 		if failure == nil {
 			_, failure = d.call(ctx, server, "browser_tabs", map[string]any{"action": "select", "index": observed.Page.Index})
 		}
+		if failure == nil {
+			var confirmed Observation
+			confirmed, failure = d.observe(ctx, server, code)
+			if failure == nil && confirmed.Page.ID != observed.Page.ID {
+				failure = ErrSessionLost
+			}
+		}
 		if failure != nil {
 			var unknown *UnknownCallError
 			if errors.As(failure, &unknown) {
