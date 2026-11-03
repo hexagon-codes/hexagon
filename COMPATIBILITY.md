@@ -15,6 +15,17 @@ hexagon 是 Hexagon 生态的 **AI Agent 框架（L2）**，向下依赖 toolkit
 - 轻量 Run/Stream 不强制数据库；强持久装配需要宿主的连接、显式迁移、worker 与恢复入口。Runtime/图/中断状态保存各自 codec 和计划身份，旧快照不会自动获得新保证。缺少原资源版本或迁移时保留记录并明确失败；`SnapshotCodecs` 的迁移失败不得改写原记录。应用可继续固定旧 tag 完成原任务，HexClaw 不要求升级。
 - 发布版本来自目标提交的不可变 tag；开发构建使用构建注入或 module build info，未知时保留 `unknown`。文档或 Helm `appVersion` 的更新不代表 tag、镜像或 GitHub Release 已发布。
 
+## 2026-11-04 复审修复合同
+
+- `Chain.Transform`/`TypedChain.Transform` 将 `SourceEOF` 视为单个上游结束并继续读取；其他读取错误传给下游；输出关闭会关闭输入并取消本次转换；步骤 panic 转为带栈的 `AsyncPanicError` 流错误。
+- `chain.Parallel` 等待全部分支结束；首错后协作取消其他分支。全部成功时才调用 `merge`，失败时返回零值结果并在 `ParallelError.Results` 中保留有序的成功/失败事实；任一分支成功或不可重放时 `ParallelError.UnsafeToReplay()` 为 true，不能整组重试；分支 panic 转为 `AsyncPanicError`。`RetryMiddleware` 不再重试取消、中断、待核对或未知副作用。
+- `SessionLane` 的幂等键包含 session 作用域；缓存和返回值均为独立副本；回调 panic 保存为 `AsyncPanicError` 而不是 nil 成功。`Forget(requestID)` 清理所有作用域的同名请求。
+- `AfterLLM` 采用候选响应的 `ProviderContinuation`；中间件改写正文/工具调用时必须同步提供或清空该状态，禁止新正文配旧协议输出。
+- 图写集持久化记录动态值的具体类型，恢复支持标量、`json.Number`/`RawMessage`、切片和映射；未知命名类型在恢复时显式失败，不静默变成 `float64`。
+- `CompiledGraph.Run` 的累计统计并发安全；可复用编译图可被多个 Run 同时调用。
+- A2A/MCP 的 JSON-RPC ID 与工具参数使用 `json.Number` 保留超过 2^53 的整数；A2A `DataPart.Data` 与 `metadata` 的动态数字也使用 `json.Number`，线上 JSON 仍为数值字面，消费者按 Int64/Float64/String 处理；流事件响应 ID 必须与请求 ID 同属字符串或数字，不能仅按打印文本关联。A2A 流事件 `store.Get` 使用请求 context；HTTP 错误体读取限制为 1 MiB。MCP `serveHTTP` 在绑定失败时等待并释放 shutdown watcher。
+- `HotReloadManager.LastError()` 返回观察回调的 panic/失败；`core.InvokeWithCallback` 的回调 panic 被收口并记录诊断日志，不终止宿主。
+
 ## 流终态、服务停机与Schema补充合同
 
 - Graph的节点、结果采用、事件快照及Inspect复制使用同一panic失败边界，保留`NodePanicError`与栈；StreamRun错误事件携带可用的panic栈。流组合的异步源/收集/逐元素适配使用`AsyncPanicError`，副作用未知时不自动重放。

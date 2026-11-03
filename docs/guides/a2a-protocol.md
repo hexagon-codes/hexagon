@@ -356,7 +356,7 @@ if snapshot == nil || notification.EventType() != a2a.EventTypeTaskStatus {
 
 - `WebhookPushService.Push` 每次调用只发送一次 HTTP POST。`WithWebhookRetry` 当前只校验并保存配置，不是已执行的自动重试保证。
 - `AsyncPushService.Push` 成功只代表入队；队列满返回 `ErrPushQueueFull`，关闭后返回 `ErrPushServiceClosed`。Worker 不向调用方传递底层交付错误。
-- 当调用方在进程内自行开启内部 Card 的推送能力并注入 `PushService` 时，`Server` 会在普通 `tasks/send` 结束后异步触发 Task 状态推送，不等待也不暴露推送错误；该行为不属于当前 A2A 协议合同，内建流式更新也不会自动发送 Artifact Webhook。
+- 当前 `Server` 处理链没有调用 `sendPushNotification`；即使内部 Card 开启并注入 `PushService`，也不会在 `tasks/send` 或流式更新结束后自动发送 Task 状态推送。需要进程内推送时，调用方必须自行构造 `PushNotification` 并调用 `PushService.Push`，同时处理入队或交付错误。
 - `Close` 会停止 Worker 并释放剩余队列，不承诺刷新完成所有待发消息。
 
 需要至少一次交付时，实现自己的 `PushService` 和持久化 outbox，加入有界重试、幂等键、可观测失败与死信处理。`PushManager` 可用于任务级配置和速率限制，其构造函数 `NewPushManager` 也返回 `error`。

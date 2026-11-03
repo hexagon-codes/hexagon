@@ -356,7 +356,7 @@ The following describes Go-level push primitives only. The current A2A protocol 
 
 - Each `WebhookPushService.Push` call performs one HTTP POST. `WithWebhookRetry` currently validates and stores configuration only; it is not an executed automatic-retry guarantee.
 - A successful `AsyncPushService.Push` means only that the request was enqueued. A full queue returns `ErrPushQueueFull`; a closed service returns `ErrPushServiceClosed`. Workers do not propagate underlying delivery failures to callers.
-- When an embedder enables push on the internal Card and injects a `PushService` in-process, `Server` triggers an asynchronous Task-status push after regular `tasks/send`, without waiting for or exposing the delivery error. That behavior is not part of the current A2A protocol contract, and built-in streaming updates do not automatically emit Artifact Webhooks.
+- The current `Server` processing chain does not call `sendPushNotification`. Even when the internal Card enables push and a `PushService` is injected, `Server` does not automatically send Task-status pushes after `tasks/send` or streaming updates. For in-process delivery, the caller must construct the `PushNotification` and call `PushService.Push` directly, handling enqueue or delivery errors.
 - `Close` stops workers and releases the remaining queue; it does not promise to flush every pending message.
 
 For at-least-once delivery, implement a custom `PushService` and persistent outbox with bounded retries, idempotency keys, observable failures, and dead-letter handling. `PushManager` can provide per-Task configuration and rate limiting; its `NewPushManager` constructor also returns an `error`.
