@@ -1335,3 +1335,47 @@ var errSimulatedPlain = &plainErr{}
 type plainErr struct{}
 
 func (e *plainErr) Error() string { return "plain" }
+
+// TestPushProtocolRemainsUnsupportedWithPushService 锁定当前公开合同：
+// 即使内部 Card 开启推送并注入 PushService，公开 Card 仍声明 false，协议入口仍返回 -32003。
+func TestPushProtocolRemainsUnsupportedWithPushService(t *testing.T) {
+	card := NewAgentCard("push-contract", "http://example.invalid", "1")
+	card.Capabilities.PushNotifications = true
+	push, err := NewDefaultPushService()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer push.Close()
+	server := NewServer(card, NewEchoHandler(), WithPushService(push))
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+	card.URL = ts.URL
+
+	response, err := http.Get(ts.URL + PathAgentCard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var publicCard AgentCard
+	if err := json.NewDecoder(response.Body).Decode(&publicCard); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if publicCard.Capabilities.PushNotifications {
+		t.Fatal("public card advertised push notifications")
+	}
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"` + MethodSetPushNotification + `","params":{"id":"task","pushNotificationConfig":{"url":"https://example.invalid/hook"}}}`
+	rpcResponse, err := http.Post(ts.URL+PathTasks, ContentTypeJSON, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rpcResponse.Body.Close()
+	var rpc JSONRPCResponse
+	if err := json.NewDecoder(rpcResponse.Body).Decode(&rpc); err != nil {
+		t.Fatal(err)
+	}
+	if rpc.Error == nil || rpc.Error.Code != CodePushNotificationNotSupported {
+		t.Fatalf("push RPC error=%+v, want code %d", rpc.Error, CodePushNotificationNotSupported)
+	}
+}
