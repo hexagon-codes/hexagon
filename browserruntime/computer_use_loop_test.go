@@ -86,3 +86,24 @@ func TestComputerUseLoopRequiresFinalResult(t *testing.T) {
 		})
 	}
 }
+
+func TestComputerUseLoopCancellationDuringFinalObserve(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	observations := 0
+	_, err := RunComputerUse(ctx, Image{}, ComputerUseLoopPorts{
+		MaxExchanges: 1,
+		Exchange: func(context.Context, uint64, Image) (ComputerUseTurn, error) {
+			return ComputerUseTurn{Calls: []ComputerUseCall{{ID: "call", Actions: []Action{{Type: "click"}}}}}, nil
+		},
+		Execute: func(context.Context, uint64, ComputerUseCall, int, Action) error { return nil },
+		Observe: func(context.Context, uint64, ComputerUseCall) (Image, error) {
+			observations++
+			cancel()
+			return Image{Width: 1, Height: 1}, nil
+		},
+	})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrComputerUseExchangeLimit) || observations != 1 {
+		t.Fatalf("err=%v observations=%d exchange_limit=%v", err, observations, errors.Is(err, ErrComputerUseExchangeLimit))
+	}
+}

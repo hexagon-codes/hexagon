@@ -89,6 +89,10 @@ func RunComputerUse(ctx context.Context, image Image, ports ComputerUseLoopPorts
 			if observeErr != nil {
 				return "", observeErr
 			}
+			// 最后一次观察期间也可能取消；不能把取消误报为轮次耗尽。
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
 			image = observed
 		}
 	}
