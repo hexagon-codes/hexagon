@@ -1,9 +1,13 @@
 package runtime
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/hexagon-codes/hexagon/core"
 )
 
 // TestSessionLane_Idempotent 同 requestID 重试只执行一次 fn，返回首次结果。
@@ -76,6 +80,69 @@ func TestSessionLane_SerializesSameSession(t *testing.T) {
 	wg.Wait()
 	if atomic.LoadInt32(&maxConcurrent) != 1 {
 		t.Fatalf("同 session 应串行（max concurrent=1），实际 %d", maxConcurrent)
+	}
+}
+
+func TestSessionLaneScopesRequestIDBySession(t *testing.T) {
+	lane := NewSessionLane()
+	var first, second int32
+	a, err := lane.Do("session-a", "same-request", func() (*Result, error) {
+		atomic.AddInt32(&first, 1)
+		return &Result{Content: "a"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := lane.Do("session-b", "same-request", func() (*Result, error) {
+		atomic.AddInt32(&second, 1)
+		return &Result{Content: "b"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != 1 || second != 1 || a.Content != "a" || b.Content != "b" {
+		t.Fatalf("first=%d second=%d a=%+v b=%+v", first, second, a, b)
+	}
+}
+
+func TestSessionLaneReturnsIndependentResult(t *testing.T) {
+	lane := NewSessionLane()
+	first, err := lane.Do("session", "request", func() (*Result, error) {
+		return &Result{Content: "original", Metadata: map[string]any{"k": "v"}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Content = "caller-mutated"
+	first.Metadata["k"] = "caller-mutated"
+	second, err := lane.Do("session", "request", func() (*Result, error) {
+		t.Fatal("cached request ran again")
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Content != "original" || second.Metadata["k"] != "v" {
+		t.Fatalf("cached result mutated: %+v", second)
+	}
+}
+
+func TestSessionLanePanicIsRetainedAsError(t *testing.T) {
+	lane := NewSessionLane()
+	_, err := lane.DoRun(context.Background(), "session", "panic-request", func(context.Context) (*Result, error) {
+		panic("callback failed")
+	})
+	var panicErr *core.AsyncPanicError
+	if !errors.As(err, &panicErr) {
+		t.Fatalf("panic not converted: %v", err)
+	}
+	called := false
+	result, err := lane.DoRun(context.Background(), "session", "panic-request", func(context.Context) (*Result, error) {
+		called = true
+		return &Result{Content: "replayed"}, nil
+	})
+	if called || result != nil || !errors.As(err, &panicErr) {
+		t.Fatalf("panic cache became success: called=%v result=%+v error=%v", called, result, err)
 	}
 }
 

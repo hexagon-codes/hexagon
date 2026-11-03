@@ -23,6 +23,9 @@ func TestRuntimeStructuredSchemaKeepsOriginalNumericContract(t *testing.T) {
 	type unsigned struct {
 		N uint64 `json:"n" enum:"18446744073709551615" required:"true"`
 	}
+	type stringRange struct {
+		N int64 `json:"n,string" min:"10" max:"20" required:"true"`
+	}
 	var dynamic, empty llm.Schema
 	if err := json.Unmarshal([]byte(`{"type":"object","properties":{"n":{"type":"integer","enum":[9007199254740993]}},"required":["n"]}`), &dynamic); err != nil {
 		t.Fatal(err)
@@ -40,6 +43,10 @@ func TestRuntimeStructuredSchemaKeepsOriginalNumericContract(t *testing.T) {
 		{"minimum valid", schema.Of[minimum](), `{"n":9007199254740993}`, false},
 		{"maximum invalid", schema.Of[maximum](), `{"n":9007199254740996}`, true},
 		{"unsigned enum valid", schema.Of[unsigned](), `{"n":18446744073709551615}`, false},
+		{"string range below", schema.Of[stringRange](), `{"n":"9"}`, true},
+		{"string range above", schema.Of[stringRange](), `{"n":"21"}`, true},
+		{"string range not number", schema.Of[stringRange](), `{"n":"abc"}`, true},
+		{"string range valid", schema.Of[stringRange](), `{"n":"20"}`, false},
 		{"dynamic enum invalid", &dynamic, `{"n":9007199254740992}`, true},
 		{"empty enum", &empty, `{"n":0}`, true},
 	}

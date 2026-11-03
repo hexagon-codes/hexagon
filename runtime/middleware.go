@@ -102,8 +102,17 @@ func runAfterLLM(ctx context.Context, mw []Middleware, state *State, resp *llm.C
 			return err
 		}
 		if resp != nil && candidateResponse != nil {
+			continuation := candidateResponse.ProviderContinuation
+			// 正文/工具调用被改写但中间件没有提供新的续传状态时，旧协议条目
+			// 已不再描述本次响应，必须清除；显式提供不同 continuation 时才采用。
+			if (resp.Content != candidateResponse.Content || !reflect.DeepEqual(resp.ToolCalls, candidateResponse.ToolCalls)) &&
+				continuation != nil && reflect.DeepEqual(continuation, resp.ProviderContinuation) {
+				continuation = nil
+			}
 			resp.Content = candidateResponse.Content
 			resp.ToolCalls = append([]llm.ToolCall(nil), candidateResponse.ToolCalls...)
+			// UsageReceipt 仍由执行核计量事实控制，不随响应变换覆盖。
+			resp.ProviderContinuation = continuation.Clone()
 		}
 	}
 	return nil

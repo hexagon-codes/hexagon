@@ -162,5 +162,5 @@ func (l *SessionLane) DoRun(ctx context.Context, sessionKey, requestID string, f
 	if requestID == "" {
 		return run()
 	}
-	return l.doRequest(execution, requestID, run)
+	return l.doRequest(execution, sessionKey, requestID, run)
 }
