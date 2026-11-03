@@ -1,6 +1,7 @@
 package a2a
 
 import (
+	"bytes"
 	"encoding/json"
 	"time"
 
@@ -272,10 +273,18 @@ func (m *Message) GetTextContent() string {
 // UnmarshalJSON 自定义 JSON 反序列化
 func (m *Message) UnmarshalJSON(data []byte) error {
 	var value wire.Message
-	if err := json.Unmarshal(data, &value); err != nil {
+	if err := decodeJSONUseNumber(data, &value); err != nil {
 		return err
 	}
 	*m = *localMessage(&value)
+	var raw struct {
+		Parts    []json.RawMessage `json:"parts"`
+		Metadata json.RawMessage   `json:"metadata"`
+	}
+	if json.Unmarshal(data, &raw) == nil {
+		replacePartData(m.Parts, raw.Parts)
+		preciseMetadata(raw.Metadata, &m.Metadata)
+	}
 	return nil
 }
 
@@ -383,14 +392,78 @@ func (p *DataPart) MarshalJSON() ([]byte, error) {
 // UnmarshalPart 从 JSON 反序列化 Part
 func UnmarshalPart(data []byte) (Part, error) {
 	var value wire.Part
-	if err := json.Unmarshal(data, &value); err != nil {
+	if err := decodeJSONUseNumber(data, &value); err != nil {
 		return nil, ErrInvalidMessage
 	}
 	result := localPart(&value)
 	if result == nil {
 		return nil, ErrInvalidMessage
 	}
+	precisePart(result, data)
 	return result, nil
+}
+
+// precisePart 在官方 SDK 已把动态字段解成 float64 后，从原始 JSON 重新
+// 解码 Data 与 Metadata，保留大整数；无法解析时保持 SDK 结果。
+func precisePart(part Part, raw json.RawMessage) {
+	var envelope struct {
+		Data     json.RawMessage `json:"data"`
+		Metadata json.RawMessage `json:"metadata"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil {
+		return
+	}
+	if dataPart, ok := part.(*DataPart); ok && len(envelope.Data) > 0 {
+		var value any
+		if decodeJSONUseNumber(envelope.Data, &value) == nil {
+			dataPart.Data = value
+		}
+	}
+	if len(envelope.Metadata) > 0 {
+		var metadata map[string]any
+		if decodeJSONUseNumber(envelope.Metadata, &metadata) == nil {
+			setPartMetadata(part, metadata)
+		}
+	}
+}
+
+func setPartMetadata(part Part, metadata map[string]any) {
+	switch p := part.(type) {
+	case *TextPart:
+		p.Metadata = metadata
+	case *FilePart:
+		p.Metadata = metadata
+	case *DataPart:
+		p.Metadata = metadata
+	}
+}
+
+func preciseMetadata(raw json.RawMessage, target *map[string]any) {
+	if len(raw) == 0 {
+		return
+	}
+	var value map[string]any
+	if decodeJSONUseNumber(raw, &value) == nil {
+		*target = value
+	}
+}
+
+func replacePartData(parts []Part, rawParts []json.RawMessage) {
+	// official SDK 的 localParts 会跳过 JSON null 部分；这里同步过滤原始
+	// 数组，避免后续部分与原始索引错位后套用错误的 Data/Metadata。
+	filtered := make([]json.RawMessage, 0, len(rawParts))
+	for _, raw := range rawParts {
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			continue
+		}
+		filtered = append(filtered, raw)
+	}
+	for index := range parts {
+		if index >= len(filtered) {
+			return
+		}
+		precisePart(parts[index], filtered[index])
+	}
 }
 
 // UnmarshalParts 从 JSON 数组反序列化 Parts
@@ -457,10 +530,18 @@ func (a *Artifact) GetTextContent() string {
 // UnmarshalJSON 自定义 JSON 反序列化
 func (a *Artifact) UnmarshalJSON(data []byte) error {
 	var value wire.Artifact
-	if err := json.Unmarshal(data, &value); err != nil {
+	if err := decodeJSONUseNumber(data, &value); err != nil {
 		return err
 	}
 	*a = localArtifact(&value)
+	var raw struct {
+		Parts    []json.RawMessage `json:"parts"`
+		Metadata json.RawMessage   `json:"metadata"`
+	}
+	if json.Unmarshal(data, &raw) == nil {
+		replacePartData(a.Parts, raw.Parts)
+		preciseMetadata(raw.Metadata, &a.Metadata)
+	}
 	return nil
 }
 

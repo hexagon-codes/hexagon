@@ -428,21 +428,21 @@ func (s *Server) handleSendMessage(ctx context.Context, params json.RawMessage) 
 func (s *Server) handleSendMessageStream(ctx context.Context, w http.ResponseWriter, params json.RawMessage) {
 	var req SendMessageRequest
 	if err := json.Unmarshal(params, &req); err != nil {
-		s.writeSSEError(w, NewInvalidParamsError(err.Error()))
+		s.writeSSEError(ctx, w, NewInvalidParamsError(err.Error()))
 		return
 	}
 	if req.ReturnImmediately {
-		s.writeSSEError(w, NewUnsupportedOperationError("returnImmediately"))
+		s.writeSSEError(ctx, w, NewUnsupportedOperationError("returnImmediately"))
 		return
 	}
 	task, err := s.getOrCreateTask(ctx, &req)
 	if err != nil {
-		s.writeSSEError(w, ToA2AError(err))
+		s.writeSSEError(ctx, w, ToA2AError(err))
 		return
 	}
 	runCtx, currentTask, release, beginErr := s.beginExecution(ctx, task.ID)
 	if beginErr != nil {
-		s.writeSSEError(w, beginErr)
+		s.writeSSEError(ctx, w, beginErr)
 		return
 	}
 	defer func() {
@@ -456,7 +456,7 @@ func (s *Server) handleSendMessageStream(ctx context.Context, w http.ResponseWri
 	task.History = append(task.History, req.Message)
 	task.Status = TaskStatus{State: TaskStateWorking, Timestamp: time.Now()}
 	if err := s.commitTask(ctx, task); err != nil {
-		s.writeSSEError(w, ToA2AError(err))
+		s.writeSSEError(ctx, w, ToA2AError(err))
 		return
 	}
 	w.Header().Set("Content-Type", ContentTypeSSE)
@@ -464,11 +464,11 @@ func (s *Server) handleSendMessageStream(ctx context.Context, w http.ResponseWri
 	flusher := w.(http.Flusher)
 	projected, err := projectHistory(task, req.HistoryLimit)
 	if err != nil {
-		s.writeSSEError(w, ToA2AError(err))
+		s.writeSSEError(ctx, w, ToA2AError(err))
 		flusher.Flush()
 		return
 	}
-	s.writeSSEEvent(w, "task", &TaskEvent{Task: projected})
+	s.writeSSEEvent(ctx, w, "task", &TaskEvent{Task: projected})
 	flusher.Flush()
 	if task.Status.State.IsTerminal() {
 		return
@@ -494,18 +494,18 @@ func (s *Server) handleSendMessageStream(ctx context.Context, w http.ResponseWri
 			task.Status.Message = update.Message
 		}
 		if err := s.commitTask(ctx, task); err != nil {
-			s.writeSSEError(w, ToA2AError(err))
+			s.writeSSEError(ctx, w, ToA2AError(err))
 			flusher.Flush()
 			return true
 		}
 		if task.Status.State != TaskStateCanceled && update != nil && update.Artifact != nil {
 			event := &ArtifactEvent{ID: task.ID, ContextID: task.SessionID, Artifact: *update.Artifact}
-			s.writeSSEEvent(w, EventTypeArtifact, event)
+			s.writeSSEEvent(ctx, w, EventTypeArtifact, event)
 			s.notifySubscribers(task.ID, event)
 		}
 		final := task.Status.State.IsTerminal() || task.Status.State == TaskStateInputRequired || task.Status.State == TaskStateAuthRequired
 		status := &TaskStatusEvent{ID: task.ID, ContextID: task.SessionID, Status: task.Status, Final: final}
-		s.writeSSEEvent(w, EventTypeTaskStatus, status)
+		s.writeSSEEvent(ctx, w, EventTypeTaskStatus, status)
 		s.notifySubscribers(task.ID, status)
 		flusher.Flush()
 		return final
@@ -548,7 +548,7 @@ func (s *Server) handleSendMessageStream(ctx context.Context, w http.ResponseWri
 		select {
 		case <-ctx.Done():
 			if current, err := s.store.Get(context.WithoutCancel(ctx), task.ID); err == nil && current.Status.State == TaskStateCanceled {
-				s.writeSSEEvent(w, EventTypeTaskStatus, &TaskStatusEvent{ID: task.ID, ContextID: task.SessionID, Status: current.Status, Final: true})
+				s.writeSSEEvent(ctx, w, EventTypeTaskStatus, &TaskStatusEvent{ID: task.ID, ContextID: task.SessionID, Status: current.Status, Final: true})
 				flusher.Flush()
 			}
 			return
@@ -671,7 +671,7 @@ func (s *Server) handleGetPushNotification(ctx context.Context, params json.RawM
 func (s *Server) handleResubscribe(ctx context.Context, w http.ResponseWriter, params json.RawMessage) {
 	var req ResubscribeRequest
 	if err := json.Unmarshal(params, &req); err != nil {
-		s.writeSSEError(w, NewInvalidParamsError(err.Error()))
+		s.writeSSEError(ctx, w, NewInvalidParamsError(err.Error()))
 		return
 	}
 	events := make(chan StreamEvent, 100)
@@ -679,17 +679,17 @@ func (s *Server) handleResubscribe(ctx context.Context, w http.ResponseWriter, p
 	defer s.unsubscribe(req.TaskID, events)
 	task, err := s.store.Get(ctx, req.TaskID)
 	if err != nil {
-		s.writeSSEError(w, ToA2AError(err))
+		s.writeSSEError(ctx, w, ToA2AError(err))
 		return
 	}
 	if task.Status.State.IsTerminal() {
-		s.writeSSEError(w, NewUnsupportedOperationError("cannot subscribe to terminal task"))
+		s.writeSSEError(ctx, w, NewUnsupportedOperationError("cannot subscribe to terminal task"))
 		return
 	}
 	w.Header().Set("Content-Type", ContentTypeSSE)
 	w.Header().Set("Cache-Control", "no-cache")
 	flusher := w.(http.Flusher)
-	s.writeSSEEvent(w, "task", &TaskEvent{Task: task})
+	s.writeSSEEvent(ctx, w, "task", &TaskEvent{Task: task})
 	flusher.Flush()
 	stop, _ := ctx.Value(subscriptionStopKey{}).(<-chan struct{})
 	for {
@@ -702,7 +702,7 @@ func (s *Server) handleResubscribe(ctx context.Context, w http.ResponseWriter, p
 			if !ok {
 				return
 			}
-			s.writeProtocolEvent(w, event)
+			s.writeProtocolEvent(ctx, w, event)
 			flusher.Flush()
 			if _, failed := event.(*ErrorEvent); failed {
 				return
@@ -913,11 +913,11 @@ func (s *Server) writeError(w http.ResponseWriter, err *Error, id any) {
 }
 
 // writeSSEEvent 写入 SSE 事件
-func (s *Server) writeSSEEvent(w http.ResponseWriter, eventType string, data any) {
-	s.writeProtocolEvent(w, data)
+func (s *Server) writeSSEEvent(ctx context.Context, w http.ResponseWriter, eventType string, data any) {
+	s.writeProtocolEvent(ctx, w, data)
 }
 
 // writeSSEError 写入 SSE 错误
-func (s *Server) writeSSEError(w http.ResponseWriter, err *Error) {
-	s.writeSSEEvent(w, EventTypeError, &ErrorEvent{Error: err})
+func (s *Server) writeSSEError(ctx context.Context, w http.ResponseWriter, err *Error) {
+	s.writeSSEEvent(ctx, w, EventTypeError, &ErrorEvent{Error: err})
 }

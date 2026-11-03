@@ -446,9 +446,11 @@ func (c *Client) callRPC(ctx context.Context, method string, params, result any)
 		return c.handleHTTPError(resp)
 	}
 
-	// 解析 JSON-RPC 响应
+	// 解析 JSON-RPC 响应；ID 使用 json.Number 保留原始整数精度。
 	var rpcResp JSONRPCResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+	decoder := json.NewDecoder(resp.Body)
+	decoder.UseNumber()
+	if err := decoder.Decode(&rpcResp); err != nil {
 		return fmt.Errorf("decode response failed: %w", err)
 	}
 
@@ -460,9 +462,9 @@ func (c *Client) callRPC(ctx context.Context, method string, params, result any)
 		return rpcResp.Error
 	}
 
-	// 解析结果
+	// 解析结果；UseNumber 保留 DataPart 等动态字段的大整数精度。
 	if result != nil && rpcResp.Result != nil {
-		if err := json.Unmarshal(rpcResp.Result, result); err != nil {
+		if err := decodeJSONUseNumber(rpcResp.Result, result); err != nil {
 			return fmt.Errorf("decode result failed: %w", err)
 		}
 	}
@@ -472,16 +474,44 @@ func (c *Client) callRPC(ctx context.Context, method string, params, result any)
 
 // handleHTTPError 处理 HTTP 错误
 func (c *Client) handleHTTPError(resp *http.Response) error {
-	body, _ := io.ReadAll(resp.Body)
+	// 错误体只用于诊断，限制读取上限，避免恶意/异常对端耗尽内存。
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	// 尝试解析为 JSON-RPC 错误响应
 	var rpcResp JSONRPCResponse
-	if err := json.Unmarshal(body, &rpcResp); err == nil && rpcResp.Error != nil {
+	if err := decodeJSONUseNumber(body, &rpcResp); err == nil && rpcResp.Error != nil {
 		return rpcResp.Error
 	}
 
 	// 返回 HTTP 错误
 	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+}
+
+// sameJSONRPCID 要求响应 ID 与请求 ID 同属字符串或数字；仅比较
+// fmt.Sprint 会让字符串 "1" 与数字 1 错误关联到同一请求。
+func sameJSONRPCID(requestID, responseID any) bool {
+	_, requestString := requestID.(string)
+	_, responseString := responseID.(string)
+	if requestString != responseString {
+		return false
+	}
+	return fmt.Sprint(requestID) == fmt.Sprint(responseID)
+}
+
+func decodeJSONUseNumber(data []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 // readSSEEvents 读取 SSE 事件
@@ -506,11 +536,11 @@ func (c *Client) readSSEEvents(ctx context.Context, body io.ReadCloser, events c
 		data.Reset()
 		if len(requestIDs) > 0 {
 			var response JSONRPCResponse
-			if err := json.Unmarshal([]byte(payload), &response); err != nil {
+			if err := decodeJSONUseNumber([]byte(payload), &response); err != nil {
 				send(&ErrorEvent{Error: NewParseError(err.Error())})
 				return true
 			}
-			if fmt.Sprint(response.ID) != fmt.Sprint(requestIDs[0]) {
+			if !sameJSONRPCID(requestIDs[0], response.ID) {
 				send(&ErrorEvent{Error: NewInvalidRequestError("invalid stream response correlation")})
 				return true
 			}

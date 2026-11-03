@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -460,6 +461,23 @@ func NewMCPServerV2(name, version string) *ServerV2 {
 	return &ServerV2{server: server}
 }
 
+// decodeMCPArguments 保留精确数值并拒绝尾随第二个 JSON 值。
+func decodeMCPArguments(data []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
 // RegisterTool 注册单个 ai-core 工具到 MCP 服务器
 //
 // 自动将 ai-core Schema 转换为 MCP InputSchema
@@ -473,9 +491,9 @@ func (s *ServerV2) RegisterTool(t tool.Tool) {
 	}
 
 	handler := func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
-		// 解析参数
+		// 解析参数；UseNumber 保留大整数/精确小数，不能经 float64 舍入。
 		var args map[string]any
-		if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		if err := decodeMCPArguments(req.Params.Arguments, &args); err != nil {
 			return &sdkmcp.CallToolResult{
 				Content: []sdkmcp.Content{
 					&sdkmcp.TextContent{Text: fmt.Sprintf("参数解析失败: %v", err)},
@@ -590,17 +608,26 @@ func (s *ServerV2) ServeSSE(ctx context.Context, addr string) error {
 
 // serveHTTP 在 addr 上启动一个 HTTP 服务承载给定 handler，ctx 取消时优雅关闭。
 func serveHTTP(ctx context.Context, addr string, h http.Handler) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// ReadHeaderTimeout 防 Slowloris（慢速发送请求头耗尽连接）DoS。
 	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
-
+	serveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+		defer close(done)
+		<-serveCtx.Done()
+		shutCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
 		_ = srv.Shutdown(shutCtx)
 	}()
 
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	err := srv.ListenAndServe()
+	cancel()
+	<-done // 绑定失败/正常退出都等待本次 watcher 结束，避免重试累积。
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil

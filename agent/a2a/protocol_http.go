@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strconv"
@@ -31,7 +32,17 @@ func (s *Server) handleProtocolRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req JSONRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.UseNumber() // JSON-RPC ID 是 opaque number，不能经 float64 舍入。
+	if err := decoder.Decode(&req); err != nil {
+		s.writeError(w, NewParseError(err.Error()), nil)
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values")
+		}
 		s.writeError(w, NewParseError(err.Error()), nil)
 		return
 	}
@@ -40,7 +51,7 @@ func (s *Server) handleProtocolRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch req.ID.(type) {
-	case string, float64:
+	case string, json.Number:
 	default:
 		s.writeError(w, NewInvalidRequestError("request ID must be a string or number"), nil)
 		return
@@ -96,7 +107,7 @@ func (s *Server) handleProtocolRPC(w http.ResponseWriter, r *http.Request) {
 	s.writeResult(w, result, req.ID)
 }
 
-func (s *Server) protocolEvent(event any) (wire.Event, error) {
+func (s *Server) protocolEvent(ctx context.Context, event any) (wire.Event, error) {
 	switch e := event.(type) {
 	case *TaskEvent:
 		return wireTask(e.Task)
@@ -110,7 +121,7 @@ func (s *Server) protocolEvent(event any) (wire.Event, error) {
 		}
 		contextID := e.ContextID
 		if contextID == "" {
-			if task, err := s.store.Get(context.Background(), e.ID); err == nil {
+			if task, err := s.store.Get(ctx, e.ID); err == nil {
 				contextID = task.SessionID
 			}
 		}
@@ -122,7 +133,7 @@ func (s *Server) protocolEvent(event any) (wire.Event, error) {
 		}
 		contextID := e.ContextID
 		if contextID == "" {
-			if task, err := s.store.Get(context.Background(), e.ID); err == nil {
+			if task, err := s.store.Get(ctx, e.ID); err == nil {
 				contextID = task.SessionID
 			}
 		}
@@ -134,7 +145,7 @@ func (s *Server) protocolEvent(event any) (wire.Event, error) {
 	}
 }
 
-func (s *Server) writeProtocolEvent(w http.ResponseWriter, event any) {
+func (s *Server) writeProtocolEvent(ctx context.Context, w http.ResponseWriter, event any) {
 	var id any
 	if stream, ok := w.(*rpcStreamWriter); ok {
 		id = stream.id
@@ -143,7 +154,7 @@ func (s *Server) writeProtocolEvent(w http.ResponseWriter, event any) {
 	if failure, ok := event.(*ErrorEvent); ok {
 		response = NewJSONRPCErrorResponse(id, failure.Error)
 	} else {
-		value, err := s.protocolEvent(event)
+		value, err := s.protocolEvent(ctx, event)
 		if err != nil {
 			response = NewJSONRPCErrorResponse(id, NewInternalError(err.Error()))
 		} else {
@@ -166,7 +177,7 @@ func (s *Server) writeProtocolEvent(w http.ResponseWriter, event any) {
 
 func decodeProtocolEvent(data string) StreamEvent {
 	var response JSONRPCResponse
-	if err := json.Unmarshal([]byte(data), &response); err != nil {
+	if err := decodeJSONUseNumber([]byte(data), &response); err != nil {
 		return &ErrorEvent{Error: NewParseError(err.Error())}
 	}
 	if response.Error != nil {
@@ -176,24 +187,119 @@ func decodeProtocolEvent(data string) StreamEvent {
 		return &ErrorEvent{Error: NewInvalidRequestError("invalid JSON-RPC response version")}
 	}
 	var value wire.StreamResponse
-	if err := json.Unmarshal(response.Result, &value); err != nil {
+	if err := decodeJSONUseNumber(response.Result, &value); err != nil {
 		return &ErrorEvent{Error: NewParseError(err.Error())}
 	}
+	var event StreamEvent
 	switch e := value.Event.(type) {
 	case *wire.Task:
-		return &TaskEvent{Task: localTask(e)}
+		event = &TaskEvent{Task: localTask(e)}
 	case *wire.Message:
-		return &MessageEvent{Message: localMessage(e)}
+		event = &MessageEvent{Message: localMessage(e)}
 	case *wire.TaskStatusUpdateEvent:
 		status := localStatus(e.Status)
-		return &TaskStatusEvent{ID: string(e.TaskID), ContextID: e.ContextID, Status: status, Final: status.State.IsTerminal() || status.State == TaskStateInputRequired || status.State == TaskStateAuthRequired, Metadata: e.Metadata}
+		event = &TaskStatusEvent{ID: string(e.TaskID), ContextID: e.ContextID, Status: status, Final: status.State.IsTerminal() || status.State == TaskStateInputRequired || status.State == TaskStateAuthRequired, Metadata: e.Metadata}
 	case *wire.TaskArtifactUpdateEvent:
 		artifact := localArtifact(e.Artifact)
 		artifact.Append = e.Append
 		artifact.LastChunk = e.LastChunk
-		return &ArtifactEvent{ID: string(e.TaskID), ContextID: e.ContextID, Artifact: artifact, Metadata: e.Metadata}
+		event = &ArtifactEvent{ID: string(e.TaskID), ContextID: e.ContextID, Artifact: artifact, Metadata: e.Metadata}
 	default:
 		return &ErrorEvent{Error: NewParseError("unknown stream event")}
+	}
+	preciseStreamParts(response.Result, event)
+	return event
+}
+
+// preciseStreamParts 用原始 JSON 覆盖官方 SDK 已量化的 DataPart/Metadata 数值。
+func preciseStreamParts(raw json.RawMessage, event StreamEvent) {
+	var wrapper struct {
+		Task *struct {
+			Metadata json.RawMessage `json:"metadata"`
+			Status   struct {
+				Message *struct {
+					Metadata json.RawMessage   `json:"metadata"`
+					Parts    []json.RawMessage `json:"parts"`
+				} `json:"message"`
+			} `json:"status"`
+			History []struct {
+				Metadata json.RawMessage   `json:"metadata"`
+				Parts    []json.RawMessage `json:"parts"`
+			} `json:"history"`
+			Artifacts []struct {
+				Metadata json.RawMessage   `json:"metadata"`
+				Parts    []json.RawMessage `json:"parts"`
+			} `json:"artifacts"`
+		} `json:"task"`
+		Message *struct {
+			Metadata json.RawMessage   `json:"metadata"`
+			Parts    []json.RawMessage `json:"parts"`
+		} `json:"message"`
+		StatusUpdate *struct {
+			Metadata json.RawMessage `json:"metadata"`
+			Status   struct {
+				Message *struct {
+					Metadata json.RawMessage   `json:"metadata"`
+					Parts    []json.RawMessage `json:"parts"`
+				} `json:"message"`
+			} `json:"status"`
+		} `json:"statusUpdate"`
+		ArtifactUpdate *struct {
+			Metadata json.RawMessage `json:"metadata"`
+			Artifact *struct {
+				Metadata json.RawMessage   `json:"metadata"`
+				Parts    []json.RawMessage `json:"parts"`
+			} `json:"artifact"`
+		} `json:"artifactUpdate"`
+	}
+	if json.Unmarshal(raw, &wrapper) != nil {
+		return
+	}
+	switch e := event.(type) {
+	case *TaskEvent:
+		if e.Task == nil || wrapper.Task == nil {
+			return
+		}
+		preciseMetadata(wrapper.Task.Metadata, &e.Task.Metadata)
+		if e.Task.Status.Message != nil && wrapper.Task.Status.Message != nil {
+			preciseMetadata(wrapper.Task.Status.Message.Metadata, &e.Task.Status.Message.Metadata)
+			replacePartData(e.Task.Status.Message.Parts, wrapper.Task.Status.Message.Parts)
+		}
+		for index := range e.Task.History {
+			if index < len(wrapper.Task.History) {
+				preciseMetadata(wrapper.Task.History[index].Metadata, &e.Task.History[index].Metadata)
+				replacePartData(e.Task.History[index].Parts, wrapper.Task.History[index].Parts)
+			}
+		}
+		for index := range e.Task.Artifacts {
+			if index < len(wrapper.Task.Artifacts) {
+				preciseMetadata(wrapper.Task.Artifacts[index].Metadata, &e.Task.Artifacts[index].Metadata)
+				replacePartData(e.Task.Artifacts[index].Parts, wrapper.Task.Artifacts[index].Parts)
+			}
+		}
+	case *MessageEvent:
+		if e.Message != nil && wrapper.Message != nil {
+			preciseMetadata(wrapper.Message.Metadata, &e.Message.Metadata)
+			replacePartData(e.Message.Parts, wrapper.Message.Parts)
+		}
+	case *TaskStatusEvent:
+		if wrapper.StatusUpdate == nil {
+			return
+		}
+		preciseMetadata(wrapper.StatusUpdate.Metadata, &e.Metadata)
+		if e.Status.Message != nil && wrapper.StatusUpdate.Status.Message != nil {
+			preciseMetadata(wrapper.StatusUpdate.Status.Message.Metadata, &e.Status.Message.Metadata)
+			replacePartData(e.Status.Message.Parts, wrapper.StatusUpdate.Status.Message.Parts)
+		}
+	case *ArtifactEvent:
+		if wrapper.ArtifactUpdate == nil {
+			return
+		}
+		preciseMetadata(wrapper.ArtifactUpdate.Metadata, &e.Metadata)
+		if wrapper.ArtifactUpdate.Artifact != nil {
+			preciseMetadata(wrapper.ArtifactUpdate.Artifact.Metadata, &e.Artifact.Metadata)
+			replacePartData(e.Artifact.Parts, wrapper.ArtifactUpdate.Artifact.Parts)
+		}
 	}
 }
 
