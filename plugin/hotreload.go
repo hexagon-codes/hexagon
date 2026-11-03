@@ -57,6 +57,8 @@ type HotReloadManager struct {
 	versions    map[string][]PluginVersion
 	retirements map[string]*Retirement
 	done        chan struct{}
+	// lastError 保留最近一次热更新观察回调的 panic/失败，供宿主诊断。
+	lastError error
 }
 
 // HotReloadCallback 热更新回调
@@ -189,6 +191,14 @@ func (m *HotReloadManager) IsRunning() bool {
 	return m.running
 }
 
+// LastError 返回最近一次热更新观察回调的 panic/失败；成功回调会清除旧值。
+// 回调失败不回滚已经发布的热更新，也不终止监控协程。
+func (m *HotReloadManager) LastError() error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.lastError
+}
+
 // watch 监控配置变化
 func (m *HotReloadManager) watch(ctx context.Context, done chan struct{}) {
 	defer close(done)
@@ -250,10 +260,22 @@ func (m *HotReloadManager) reloadPlugin(name, path string, modTime time.Time) {
 	}
 	m.mu.Unlock()
 
-	// 触发回调
+	// 触发回调。观察回调失败/panic 不终止监控协程，也不回滚已发布热更新；
+	// 错误通过 LastError 暴露，调用方仍可自行记录。
 	if m.callback != nil {
 		newVersion := m.getCurrentVersion(name)
-		m.callback(name, oldVersion, newVersion, err)
+		m.mu.Lock()
+		m.lastError = nil
+		m.mu.Unlock()
+		callbackErr := invokePluginCallback(name, "hot_reload.observe", func() error {
+			m.callback(name, oldVersion, newVersion, err)
+			return nil
+		})
+		if callbackErr != nil {
+			m.mu.Lock()
+			m.lastError = callbackErr
+			m.mu.Unlock()
+		}
 	}
 }
 
