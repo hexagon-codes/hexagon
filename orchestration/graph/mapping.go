@@ -369,6 +369,7 @@ func (g *Graph[S]) applyWrites(base S, writes []StateWrite) (output S, err error
 type encodedWrite struct {
 	Path      string          `json:"path"`
 	Operation WriteOperation  `json:"operation"`
+	Type      string          `json:"type,omitempty"`
 	Value     json.RawMessage `json:"value,omitempty"`
 }
 
@@ -379,7 +380,11 @@ func encodeWrites(writes []StateWrite) ([]encodedWrite, error) {
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, encodedWrite{write.Path, write.Operation, data})
+		typeName := ""
+		if write.Value != nil {
+			typeName = reflect.TypeOf(write.Value).String()
+		}
+		result = append(result, encodedWrite{Path: write.Path, Operation: write.Operation, Type: typeName, Value: data})
 	}
 	return result, nil
 }
@@ -401,11 +406,77 @@ func decodeWrites(nodeIO *NodeIO, writes []encodedWrite) ([]StateWrite, error) {
 		if t == nil {
 			return nil, fmt.Errorf("saved write has no declared mapping: %q", write.Path)
 		}
-		value := reflect.New(t)
+		target := t
+		if t.Kind() == reflect.Interface && write.Type != "" {
+			resolved, ok := parseDynamicWriteType(write.Type)
+			if !ok {
+				return nil, fmt.Errorf("saved write %q uses unsupported dynamic type %q; use a concrete field or a supported scalar/container", write.Path, write.Type)
+			}
+			target = resolved
+		}
+		value := reflect.New(target)
 		if err := json.Unmarshal(write.Value, value.Interface()); err != nil {
 			return nil, err
 		}
-		result = append(result, StateWrite{write.Path, write.Operation, value.Elem().Interface()})
+		result = append(result, StateWrite{Path: write.Path, Operation: write.Operation, Value: value.Elem().Interface()})
 	}
 	return result, nil
+}
+
+// parseDynamicWriteType 只解析可稳定重建的内建类型；命名结构体/指针需要宿主
+// 显式类型注册，不能在恢复时猜测。支持标量、json.Number/RawMessage 及其切片/映射。
+func parseDynamicWriteType(name string) (reflect.Type, bool) {
+	switch name {
+	case "any", "interface {}", "interface{}":
+		return reflect.TypeFor[any](), true
+	case "bool":
+		return reflect.TypeFor[bool](), true
+	case "string":
+		return reflect.TypeFor[string](), true
+	case "int":
+		return reflect.TypeFor[int](), true
+	case "int8":
+		return reflect.TypeFor[int8](), true
+	case "int16":
+		return reflect.TypeFor[int16](), true
+	case "int32":
+		return reflect.TypeFor[int32](), true
+	case "int64":
+		return reflect.TypeFor[int64](), true
+	case "uint":
+		return reflect.TypeFor[uint](), true
+	case "uint8":
+		return reflect.TypeFor[uint8](), true
+	case "uint16":
+		return reflect.TypeFor[uint16](), true
+	case "uint32":
+		return reflect.TypeFor[uint32](), true
+	case "uint64":
+		return reflect.TypeFor[uint64](), true
+	case "uintptr":
+		return reflect.TypeFor[uintptr](), true
+	case "float32":
+		return reflect.TypeFor[float32](), true
+	case "float64":
+		return reflect.TypeFor[float64](), true
+	case "json.Number":
+		return reflect.TypeFor[json.Number](), true
+	case "json.RawMessage":
+		return reflect.TypeFor[json.RawMessage](), true
+	}
+	if strings.HasPrefix(name, "[]") {
+		element, ok := parseDynamicWriteType(strings.TrimPrefix(name, "[]"))
+		if !ok {
+			return nil, false
+		}
+		return reflect.SliceOf(element), true
+	}
+	if strings.HasPrefix(name, "map[string]") {
+		element, ok := parseDynamicWriteType(strings.TrimPrefix(name, "map[string]"))
+		if !ok {
+			return nil, false
+		}
+		return reflect.MapOf(reflect.TypeFor[string](), element), true
+	}
+	return nil, false
 }

@@ -19,6 +19,9 @@ type CompiledGraph[S State] struct {
 
 	// Stats 执行统计
 	Stats *ExecutionStats
+
+	// statsMu 保护可复用编译图的累计统计；Run 可被多个调用方并发使用。
+	statsMu sync.Mutex
 }
 
 // ExecutionPlan 执行计划
@@ -302,9 +305,11 @@ func computeCriticalPath[S State](g *Graph[S], deps map[string][]string) []strin
 func (cg *CompiledGraph[S]) Run(ctx context.Context, initialState S, opts ...RunOption) (S, error) {
 	startTime := time.Now()
 	defer func() {
+		cg.statsMu.Lock()
 		cg.Stats.TotalExecutions++
 		cg.Stats.TotalDuration += time.Since(startTime)
 		cg.Stats.LastExecution = time.Now()
+		cg.statsMu.Unlock()
 	}()
 
 	return cg.Graph.Run(ctx, initialState, opts...)
