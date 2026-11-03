@@ -16,7 +16,9 @@ import (
 
 	coretool "github.com/hexagon-codes/ai-core/tool"
 
+	"github.com/hexagon-codes/hexagon/internal/util"
 	hexagonmcp "github.com/hexagon-codes/hexagon/mcp"
+	"time"
 )
 
 // ToolSchema 是现有MCP服务暴露的工具名称及输入合同。
@@ -106,9 +108,10 @@ func codeTool(tools map[string]ToolSchema) (string, error) {
 const observePageCode = `async (page) => {
   const context = page.context();
   const key = Symbol.for('hexclaw.browser.identity');
-  if (!context[key]) Object.defineProperty(context, key, { value: { id: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2), next: 0, pages: new WeakMap() } });
+  if (!context[key]) Object.defineProperty(context, key, { value: { id: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2), next: 0, pages: new WeakMap(), closed: new Set() } });
   const registry = context[key];
-  const identity = p => { if (!registry.pages.has(p)) registry.pages.set(p, registry.id + ':' + (++registry.next)); return registry.pages.get(p); };
+  if (!registry.closed) registry.closed = new Set();
+  const identity = p => { if (!registry.pages.has(p)) { const id=registry.id + ':' + (++registry.next); registry.pages.set(p,id); p.once('close', () => registry.closed.add(id)); } return registry.pages.get(p); };
   const pages = await Promise.all(context.pages().filter(p => !p.isClosed()).map(async (p, index) => ({ id: identity(p), index, url: p.url(), title: await p.title().catch(() => '') })));
   const size = page.viewportSize() || await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
   return { hexclaw_browser_observation: { browser_id: registry.id, page: pages.find(p => p.id === identity(page)), pages, width: size.width, height: size.height } };
@@ -119,6 +122,10 @@ func (d *MCPDriver) observe(ctx context.Context, server, code string) (Observati
 	if err != nil {
 		return Observation{}, err
 	}
+	return decodeObservation(result)
+}
+
+func decodeObservation(result coretool.Result) (Observation, error) {
 	encoded, err := json.Marshal(result.Output)
 	if err != nil {
 		return Observation{}, errors.New("browser observation could not be decoded")
@@ -128,7 +135,7 @@ func (d *MCPDriver) observe(ctx context.Context, server, code string) (Observati
 		return observation, nil
 	}
 	var value any
-	if err = json.Unmarshal(encoded, &value); err == nil && walkObservation(value, &observation) && observation.Page.ID != "" {
+	if err := json.Unmarshal(encoded, &value); err == nil && walkObservation(value, &observation) && observation.Page.ID != "" {
 		return observation, nil
 	}
 	return Observation{}, errors.New("browser MCP returned no stable page observation")
@@ -205,16 +212,36 @@ func (d *MCPDriver) Bind(ctx context.Context, server, pageID string, newPage boo
 		if _, ok := tools["browser_tabs"]; !ok {
 			return Observation{}, errors.New("browser tab creation is unsupported")
 		}
-		if _, err = d.call(ctx, server, "browser_tabs", map[string]any{"action": "new"}); err != nil {
-			return Observation{}, err
+		nonce := util.GenerateID("browser_page")
+		encoded, _ := jsValue(nonce)
+		createCode := `async (page) => { const created=await page.context().newPage(); Object.defineProperty(created,Symbol.for('hexclaw.browser.creation'),{value:` + encoded + `}); try { return await (` + observePageCode + `)(created); } catch (error) { await created.close(); throw error; } }`
+		result, callErr := d.call(ctx, server, code, map[string]any{"code": createCode})
+		observed, decodeErr := Observation{}, error(nil)
+		if callErr == nil {
+			observed, decodeErr = decodeObservation(result)
 		}
+		failure := errors.Join(callErr, decodeErr)
+		if failure == nil {
+			_, failure = d.call(ctx, server, "browser_tabs", map[string]any{"action": "select", "index": observed.Page.Index})
+		}
+		if failure != nil {
+			var unknown *UnknownCallError
+			if errors.As(failure, &unknown) {
+				return Observation{}, failure
+			}
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			cleanupCode := `async (page) => { const target=page.context().pages().find(p=>p[Symbol.for('hexclaw.browser.creation')]===` + encoded + `); if(target&&!target.isClosed()) await target.close(); return {hexclaw_closed_page:true}; }`
+			if _, cleanupErr := d.call(cleanupCtx, server, code, map[string]any{"code": cleanupCode}); cleanupErr != nil {
+				return Observation{}, &UnknownCallError{Cause: errors.Join(failure, cleanupErr)}
+			}
+			return Observation{}, failure
+		}
+		return observed, nil
 	}
 	observed, err := d.observe(ctx, server, code)
 	if err != nil {
 		return Observation{}, err
-	}
-	if newPage {
-		return observed, nil
 	}
 	if pageID == "" {
 		if len(observed.Pages) != 1 {
@@ -634,6 +661,60 @@ func (d *MCPDriver) ClosePage(ctx context.Context, server, pageID string) (coret
 	if err != nil {
 		return coretool.Result{}, err
 	}
-	code := `async (page) => { const context = page.context(); const registry = context[Symbol.for('hexclaw.browser.identity')]; if (!registry) return { hexclaw_closed_page: false }; const target = context.pages().find(p => registry.pages.get(p) === ` + encoded + `); if (!target || target.isClosed()) return { hexclaw_closed_page: false }; await target.close(); return { hexclaw_closed_page: true }; }`
-	return d.call(ctx, server, tool, map[string]any{"code": code})
+	code := `async (page) => { const context = page.context(); const registry = context[Symbol.for('hexclaw.browser.identity')]; if (!registry) return { hexclaw_closed_page: false, reason:'identity_unavailable' }; const id=` + encoded + `; const target=context.pages().find(p=>registry.pages.get(p)===id); if(!target) return {hexclaw_closed_page: !!registry.closed?.has(id), reason:registry.closed?.has(id)?'already_closed':'identity_not_found'}; if(!target.isClosed()) await target.close(); if(registry.closed) registry.closed.add(id); return {hexclaw_closed_page:true}; }`
+	result, err := d.call(ctx, server, tool, map[string]any{"code": code})
+	if err != nil {
+		return result, err
+	}
+	data, err := json.Marshal(result.Output)
+	if err != nil {
+		return result, err
+	}
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return result, err
+	}
+	closed, found := pageClosure(value)
+	if !found || !closed {
+		return result, &ObservedToolError{Message: "browser page closure was not confirmed"}
+	}
+	return result, nil
+}
+
+// pageClosure读取明确的关闭事实，不把工具调用成功当成页面已经关闭。
+func pageClosure(value any) (bool, bool) {
+	switch v := value.(type) {
+	case map[string]any:
+		if closed, ok := v["hexclaw_closed_page"].(bool); ok {
+			return closed, true
+		}
+		for _, key := range []string{"structuredContent", "content", "text", "result"} {
+			if nested, ok := v[key]; ok {
+				if closed, found := pageClosure(nested); found {
+					return closed, true
+				}
+			}
+		}
+	case []any:
+		for _, nested := range v {
+			if closed, found := pageClosure(nested); found {
+				return closed, true
+			}
+		}
+	case string:
+		data := []byte(v)
+		index := bytes.Index(data, []byte(`"hexclaw_closed_page"`))
+		if index < 0 {
+			return false, false
+		}
+		start := bytes.LastIndexByte(data[:index], '{')
+		if start < 0 {
+			return false, false
+		}
+		var object map[string]any
+		if json.NewDecoder(bytes.NewReader(data[start:])).Decode(&object) == nil {
+			return pageClosure(object)
+		}
+	}
+	return false, false
 }
