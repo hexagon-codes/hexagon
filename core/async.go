@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -465,6 +466,14 @@ func InvokeWithCallback[I, O any](
 	opts ...Option,
 ) {
 	go func() {
+		// 回调没有返回通道；panic 必须在本框架协程内收口，至少保留诊断日志，
+		// 不能让它终止宿主进程。有结果的异步调用应使用 Future。
+		defer func() {
+			if value := recover(); value != nil {
+				panicErr := &AsyncPanicError{Value: value, Stack: debug.Stack()}
+				log.Printf("hexagon: %v", panicErr)
+			}
+		}()
 		result, err := runnable.Invoke(ctx, input, opts...)
 		callback(result, err)
 	}()
