@@ -2,12 +2,12 @@
 
 # A2A (Agent-to-Agent) Protocol Guide
 
-Hexagon's `agent/a2a` package provides Agent Cards, Tasks, JSON-RPC, SSE, authentication, push delivery, and Agent bridges. This guide follows the current repository source; `ProtocolVersion` is currently `1.0`.
+Hexagon's `agent/a2a` package provides Agent Cards, Tasks, JSON-RPC, SSE, authentication, push primitives, and Agent bridges. This guide follows the current repository source; `ProtocolVersion` is currently `1.0`.
 
 ## Capability Boundaries
 
 - Regular requests use JSON-RPC 2.0; streaming requests use Server-Sent Events (SSE).
-- `Server` includes an in-memory Task store and optional push delivery, but it does not install authentication middleware automatically.
+- `Server` includes an in-memory Task store and an optional push service, but it does not install authentication middleware automatically; the current A2A protocol entry does not expose push configuration.
 - `Client` supports synchronous Task APIs and SSE event streams. Calls made after closing it return `ErrClientClosed`.
 - `AgentCard.Capabilities` is both a declaration and a server-side gate. Declare only capabilities that are actually configured.
 - The default store, asynchronous push queue, and subscribers are in-process components, not persistence or reliable-messaging guarantees.
@@ -118,7 +118,7 @@ func a2aMessage(text string) *a2a.Message {
 
 For signal handling, custom timeouts, or middleware, use `server.Handler()` as the Handler of an externally managed `http.Server`, and check errors from both `ListenAndServe` and `Shutdown`. When using `Start` directly, graceful shutdown is available through `server.Stop(ctx)`; its error must also be handled.
 
-`NewServer` uses `MemoryTaskStore` by default. Inject a production `TaskStore` with `WithStore` when Tasks must survive process restarts. If push configuration is enabled, a custom store should also implement `PushConfigStore`.
+`NewServer` uses `MemoryTaskStore` by default. Inject a production `TaskStore` with `WithStore` when Tasks must survive process restarts. Go-level push primitives use `PushConfigStore` to store configuration; the current A2A protocol entry does not expose push configuration.
 
 ### Results and Errors
 
@@ -226,7 +226,7 @@ func call(ctx context.Context) (_ *a2a.Task, err error) {
 }
 ```
 
-To continue the same Task, call `SendMessage` again with `TaskID: task.ID`. `GetTask`, `ListTasks`, `CancelTask`, `SetPushNotification`, and `GetPushNotification` all return errors that must be handled. Pass every network call a deadline-bound or cancelable `context.Context`. The client preserves error chains, so `errors.Is(err, context.DeadlineExceeded)` can identify a timeout.
+To continue the same Task, call `SendMessage` again with `TaskID: task.ID`. `GetTask`, `ListTasks`, `CancelTask`, `SetPushNotification`, and `GetPushNotification` all return errors that must be handled; push configuration calls currently return `-32003`. Pass every network call a deadline-bound or cancelable `context.Context`. The client preserves error chains, so `errors.Is(err, context.DeadlineExceeded)` can identify a timeout.
 
 ### Consuming SSE
 
@@ -320,45 +320,17 @@ The client also provides `APIKeyAuth` and `BasicAuth`. Do not put credentials in
 
 ## Push Notifications
 
-### Configuration
+### Current Protocol Status
 
-Push configuration APIs are available only when the Card declares `PushNotifications=true`; actual delivery also requires the Server to receive a `PushService` through `WithPushService`. `NewDefaultPushService` now returns `(*AsyncPushService, error)`: check the error and call `Close` during shutdown.
+The current A2A `1.0` protocol entry does not expose push configuration:
 
-```go
-func serveWithPush(card *a2a.AgentCard, handler a2a.TaskHandler) error {
-	push, err := a2a.NewDefaultPushService()
-	if err != nil {
-		return fmt.Errorf("create push service: %w", err)
-	}
-	defer push.Close()
+- The public Agent Card always reports `capabilities.pushNotifications=false`.
+- `CreateTaskPushNotificationConfig`, `GetTaskPushNotificationConfig`, and the list/delete methods uniformly return `-32003 push notification not supported`.
+- Setting `card.Capabilities.PushNotifications=true` or injecting a service through `WithPushService` does not make those JSON-RPC methods available.
 
-	card.Capabilities.PushNotifications = true
-	server := a2a.NewServer(card, handler, a2a.WithPushService(push))
-	return server.Start(":8080")
-}
-```
+`PushService`, `PushNotification`, `PushManager`, and related types remain as Go-level primitives for in-process use or future protocol integration. They do not imply protocol availability.
 
-A new Task can carry its push configuration directly:
-
-```go
-task, err := client.SendMessage(ctx, &a2a.SendMessageRequest{
-	Message: a2a.NewUserMessage("Run the job"),
-	PushNotification: &a2a.PushNotificationConfig{
-		URL:   "https://consumer.example.com/a2a/events",
-		Token: "callback-token",
-	},
-})
-if err != nil {
-	return err
-}
-if task.ID == "" {
-	return fmt.Errorf("server returned an empty Task ID")
-}
-```
-
-Configure an existing Task with `client.SetPushNotification(ctx, task.ID, config)` and verify it with `GetPushNotification`. Handle errors from both calls.
-
-### Immutable Notification Contract
+### Immutable Notification Contract (Go primitives)
 
 `PushNotification` fields are private and notifications can be created only through constructors. Construction serializes a snapshot. Mutating the source Task or Artifact later, or mutating a copy returned by an accessor, cannot change the notification.
 
@@ -376,15 +348,15 @@ if snapshot == nil || notification.EventType() != a2a.EventTypeTaskStatus {
 }
 ```
 
-Use `NewArtifactNotification(taskID, artifact)` for Artifact notifications and read a copy with `Artifact()`; check errors from both construction and access. `TaskID()`, `EventType()`, and `Timestamp()` expose notification metadata. `NewWebhookPushService` and `NewAsyncPushService` also return configuration-validation errors.
+Use `NewArtifactNotification(taskID, artifact)` for Artifact notifications and read a copy with `Artifact()`; check errors from both construction and access. `TaskID()`, `EventType()`, and `Timestamp()` expose notification metadata. `NewWebhookPushService`, `NewAsyncPushService`, and `NewDefaultPushService` all return configuration-validation errors; `NewDefaultPushService` must also be closed during shutdown.
 
-### Delivery Guarantees
+### Delivery Guarantees (Go primitives)
 
-The current implementation is best-effort. It does not promise automatic Webhook retries or reliable delivery:
+The following describes Go-level push primitives only. The current A2A protocol entry does not enable push, so these guarantees must not be read as protocol-level Webhook availability. The implementation is best-effort and does not promise automatic Webhook retries or reliable delivery:
 
 - Each `WebhookPushService.Push` call performs one HTTP POST. `WithWebhookRetry` currently validates and stores configuration only; it is not an executed automatic-retry guarantee.
 - A successful `AsyncPushService.Push` means only that the request was enqueued. A full queue returns `ErrPushQueueFull`; a closed service returns `ErrPushServiceClosed`. Workers do not propagate underlying delivery failures to callers.
-- `Server` triggers an asynchronous Task-status push after regular `tasks/send`, without waiting for or exposing the delivery error. Built-in streaming updates do not automatically emit Artifact Webhooks.
+- When an embedder enables push on the internal Card and injects a `PushService` in-process, `Server` triggers an asynchronous Task-status push after regular `tasks/send`, without waiting for or exposing the delivery error. That behavior is not part of the current A2A protocol contract, and built-in streaming updates do not automatically emit Artifact Webhooks.
 - `Close` stops workers and releases the remaining queue; it does not promise to flush every pending message.
 
 For at-least-once delivery, implement a custom `PushService` and persistent outbox with bounded retries, idempotency keys, observable failures, and dead-letter handling. `PushManager` can provide per-Task configuration and rate limiting; its `NewPushManager` constructor also returns an `error`.
@@ -498,10 +470,10 @@ The current `NetworkBridge` methods do not use its `taskStore` field, so it does
 | `/tasks/get` | POST | Server-registered non-streaming alias |
 | `/tasks/cancel` | POST | Server-registered non-streaming alias |
 | `/tasks/resubscribe` | POST | `Resubscribe` SSE |
-| `/tasks/pushNotification/get` | POST | Server-registered non-streaming alias |
-| `/tasks/pushNotification/set` | POST | Server-registered non-streaming alias |
+| `/tasks/pushNotification/get` | POST | Registered but uniformly returns `-32003`; push is not exposed |
+| `/tasks/pushNotification/set` | POST | Registered but uniformly returns `-32003`; push is not exposed |
 
-The Server also registers matching split paths for send/get/cancel/push operations, but the official `Client` posts every non-streaming method to `/tasks`.
+The Server also registers matching split paths for send/get/cancel operations, but the official `Client` posts every non-streaming method to `/tasks`.
 
 ### JSON-RPC Methods
 
@@ -513,8 +485,8 @@ The Server also registers matching split paths for send/get/cancel/push operatio
 | `tasks/list` | List Tasks by Session/state with pagination |
 | `tasks/cancel` | Cancel a non-terminal Task |
 | `tasks/resubscribe` | Resubscribe to an existing Task |
-| `tasks/pushNotification/set` | Set a Task's push configuration |
-| `tasks/pushNotification/get` | Get a Task's push configuration |
+| `CreateTaskPushNotificationConfig` | Currently returns `-32003`; push is not exposed |
+| `GetTaskPushNotificationConfig` | Currently returns `-32003`; push is not exposed |
 
 ```json
 {

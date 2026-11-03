@@ -2,12 +2,12 @@
 
 # A2A (Agent-to-Agent) 协议指南
 
-Hexagon 的 `agent/a2a` 包提供 Agent Card、Task、JSON-RPC、SSE、认证、推送和 Agent 桥接。本文以当前仓库源码为准；`ProtocolVersion` 当前为 `1.0`。
+Hexagon 的 `agent/a2a` 包提供 Agent Card、Task、JSON-RPC、SSE、认证、推送原语和 Agent 桥接。本文以当前仓库源码为准；`ProtocolVersion` 当前为 `1.0`。
 
 ## 能力边界
 
 - 普通请求使用 JSON-RPC 2.0，流式请求使用 Server-Sent Events (SSE)。
-- `Server` 内置内存 Task 存储和可选推送，但不会自动安装认证中间件。
+- `Server` 内置内存 Task 存储和可选推送服务，但不会自动安装认证中间件；当前 A2A 协议入口不暴露推送配置。
 - `Client` 支持同步 Task API 和 SSE 事件流；关闭后的请求返回 `ErrClientClosed`。
 - `AgentCard.Capabilities` 同时是能力声明和服务端门禁。只声明已经配置的能力。
 - 默认存储、异步推送队列和订阅者都在进程内，不是持久化或可靠消息保证。
@@ -118,7 +118,7 @@ func a2aMessage(text string) *a2a.Message {
 
 若需要信号处理、自定义超时或中间件，使用 `server.Handler()` 作为自建 `http.Server` 的 Handler，并检查 `ListenAndServe` 和 `Shutdown` 的错误。直接使用 `Start` 时，优雅停止由 `server.Stop(ctx)` 提供，其错误也必须处理。
 
-`NewServer` 默认使用 `MemoryTaskStore`。生产环境要持久化 Task 时，通过 `WithStore` 注入自己的 `TaskStore`；需要推送配置时，自定义 Store 还应实现 `PushConfigStore`。
+`NewServer` 默认使用 `MemoryTaskStore`。生产环境要持久化 Task 时，通过 `WithStore` 注入自己的 `TaskStore`；Go 层推送原语使用 `PushConfigStore` 存取配置；当前 A2A 协议入口未暴露推送配置。
 
 ### 处理结果和错误
 
@@ -226,7 +226,7 @@ func call(ctx context.Context) (_ *a2a.Task, err error) {
 }
 ```
 
-继续同一 Task 时再次调用 `SendMessage` 并传入 `TaskID: task.ID`。`GetTask`、`ListTasks`、`CancelTask`、`SetPushNotification` 和 `GetPushNotification` 都返回需要处理的错误。所有网络调用都应传入带截止时间或可取消的 `context.Context`；客户端保留错误链，可用 `errors.Is(err, context.DeadlineExceeded)` 判断超时。
+继续同一 Task 时再次调用 `SendMessage` 并传入 `TaskID: task.ID`。`GetTask`、`ListTasks`、`CancelTask`、`SetPushNotification` 和 `GetPushNotification` 都返回需要处理的错误；当前推送配置调用返回 `-32003`。所有网络调用都应传入带截止时间或可取消的 `context.Context`；客户端保留错误链，可用 `errors.Is(err, context.DeadlineExceeded)` 判断超时。
 
 ### 消费 SSE
 
@@ -320,45 +320,17 @@ defer func() {
 
 ## 推送通知
 
-### 配置
+### 当前协议状态
 
-只有 Card 声明 `PushNotifications=true` 时，推送配置 API 才可用；真正交付还要求 Server 通过 `WithPushService` 注入 `PushService`。`NewDefaultPushService` 现在返回 `(*AsyncPushService, error)`，必须检查错误并在退出时调用 `Close`。
+当前 A2A `1.0` 协议入口不暴露推送配置：
 
-```go
-func serveWithPush(card *a2a.AgentCard, handler a2a.TaskHandler) error {
-	push, err := a2a.NewDefaultPushService()
-	if err != nil {
-		return fmt.Errorf("create push service: %w", err)
-	}
-	defer push.Close()
+- 公开 Agent Card 固定返回 `capabilities.pushNotifications=false`。
+- `CreateTaskPushNotificationConfig`、`GetTaskPushNotificationConfig` 以及列表、删除方法统一返回 `-32003 push notification not supported`。
+- 设置 `card.Capabilities.PushNotifications=true` 或通过 `WithPushService` 注入服务，不会让上述 JSON-RPC 方法变为可用。
 
-	card.Capabilities.PushNotifications = true
-	server := a2a.NewServer(card, handler, a2a.WithPushService(push))
-	return server.Start(":8080")
-}
-```
+`PushService`、`PushNotification`、`PushManager` 等仍作为 Go 层原语保留，供进程内调用或后续协议接入；这些原语不构成 A2A 协议可用性承诺。
 
-新建 Task 时可直接携带推送配置：
-
-```go
-task, err := client.SendMessage(ctx, &a2a.SendMessageRequest{
-	Message: a2a.NewUserMessage("Run the job"),
-	PushNotification: &a2a.PushNotificationConfig{
-		URL:   "https://consumer.example.com/a2a/events",
-		Token: "callback-token",
-	},
-})
-if err != nil {
-	return err
-}
-if task.ID == "" {
-	return fmt.Errorf("server returned an empty Task ID")
-}
-```
-
-已存在 Task 可用 `client.SetPushNotification(ctx, task.ID, config)` 配置，并用 `GetPushNotification` 核对；两者的错误都要处理。
-
-### 不可变通知契约
+### 不可变通知契约（Go 层原语）
 
 `PushNotification` 的字段是私有的，只能通过构造器创建。构造时会序列化一份快照；之后修改原 Task/Artifact，或修改访问器返回的副本，都不会改变通知。
 
@@ -376,15 +348,15 @@ if snapshot == nil || notification.EventType() != a2a.EventTypeTaskStatus {
 }
 ```
 
-产物通知使用 `NewArtifactNotification(taskID, artifact)`，并通过 `Artifact()` 读取副本；构造和读取都要检查错误。`TaskID()`、`EventType()` 和 `Timestamp()` 提供元数据。`NewWebhookPushService` 和 `NewAsyncPushService` 也会返回配置校验错误。
+产物通知使用 `NewArtifactNotification(taskID, artifact)`，并通过 `Artifact()` 读取副本；构造和读取都要检查错误。`TaskID()`、`EventType()` 和 `Timestamp()` 提供元数据。`NewWebhookPushService`、`NewAsyncPushService` 和 `NewDefaultPushService` 都会返回配置校验错误；`NewDefaultPushService` 还需在退出时调用 `Close`。
 
-### 交付保证
+### 交付保证（Go 层原语）
 
-当前实现是 best-effort，不承诺 Webhook 自动重试或可靠交付：
+以下仅描述 Go 层推送原语；当前 A2A 协议入口未启用推送，不能据此认为 Webhook 已通过协议可用。当前实现是 best-effort，不承诺 Webhook 自动重试或可靠交付：
 
 - `WebhookPushService.Push` 每次调用只发送一次 HTTP POST。`WithWebhookRetry` 当前只校验并保存配置，不是已执行的自动重试保证。
 - `AsyncPushService.Push` 成功只代表入队；队列满返回 `ErrPushQueueFull`，关闭后返回 `ErrPushServiceClosed`。Worker 不向调用方传递底层交付错误。
-- `Server` 在普通 `tasks/send` 结束后异步触发 Task 状态推送，不等待也不暴露推送错误；内建流式更新不会自动发送 Artifact Webhook。
+- 当调用方在进程内自行开启内部 Card 的推送能力并注入 `PushService` 时，`Server` 会在普通 `tasks/send` 结束后异步触发 Task 状态推送，不等待也不暴露推送错误；该行为不属于当前 A2A 协议合同，内建流式更新也不会自动发送 Artifact Webhook。
 - `Close` 会停止 Worker 并释放剩余队列，不承诺刷新完成所有待发消息。
 
 需要至少一次交付时，实现自己的 `PushService` 和持久化 outbox，加入有界重试、幂等键、可观测失败与死信处理。`PushManager` 可用于任务级配置和速率限制，其构造函数 `NewPushManager` 也返回 `error`。
@@ -498,10 +470,10 @@ if reply.GetTextContent() == "" {
 | `/tasks/get` | POST | Server 注册的非流式别名 |
 | `/tasks/cancel` | POST | Server 注册的非流式别名 |
 | `/tasks/resubscribe` | POST | `Resubscribe` SSE |
-| `/tasks/pushNotification/get` | POST | Server 注册的非流式别名 |
-| `/tasks/pushNotification/set` | POST | Server 注册的非流式别名 |
+| `/tasks/pushNotification/get` | POST | 已注册但统一返回 `-32003`；推送未启用 |
+| `/tasks/pushNotification/set` | POST | 已注册但统一返回 `-32003`；推送未启用 |
 
-Server 也为 send/get/cancel/push 注册了同名的分路径，但官方 `Client` 的非流式方法统一 POST 到 `/tasks`。
+Server 也为 send/get/cancel 注册了同名的分路径，但官方 `Client` 的非流式方法统一 POST 到 `/tasks`。
 
 ### JSON-RPC 方法
 
@@ -513,8 +485,8 @@ Server 也为 send/get/cancel/push 注册了同名的分路径，但官方 `Clie
 | `tasks/list` | 按 Session/状态分页列出 Task |
 | `tasks/cancel` | 取消非终态 Task |
 | `tasks/resubscribe` | 重新订阅已存在 Task |
-| `tasks/pushNotification/set` | 设置 Task 推送配置 |
-| `tasks/pushNotification/get` | 获取 Task 推送配置 |
+| `CreateTaskPushNotificationConfig` | 当前统一返回 `-32003`；协议入口未启用推送 |
+| `GetTaskPushNotificationConfig` | 当前统一返回 `-32003`；协议入口未启用推送 |
 
 ```json
 {

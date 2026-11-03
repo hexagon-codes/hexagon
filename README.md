@@ -406,7 +406,7 @@ for event := range events {
 - JSON-RPC 2.0 + SSE 流式响应
 - 多种认证方式 (Bearer Token/API Key/Basic Auth/RBAC)
 - Agent 发现服务 (Registry/Static/Remote)
-- 推送通知支持
+- 推送通知类型与进程内推送服务（协议入口未启用）
 - Hexagon Agent 桥接适配
 
 ## 💡 设计理念
