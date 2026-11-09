@@ -9,7 +9,7 @@ require (
 	github.com/hexagon-codes/toolkit v0.3.7
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/redis/go-redis/v9 v9.18.0
-	golang.org/x/image v0.44.0
+	golang.org/x/image v0.45.0
 	golang.org/x/net v0.60.0
 	golang.org/x/sync v0.23.0
 	gopkg.in/yaml.v3 v3.0.1
