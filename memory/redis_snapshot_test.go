@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"os"
 	"testing"
@@ -25,8 +26,23 @@ func TestSnapshotRedisConditionalWrites(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	a := scopedFixture(t, store.NewRedisStore(clients[0], store.WithRedisPrefix("memory-cas-test:")), "synthetic")
-	b := scopedFixture(t, store.NewRedisStore(clients[1], store.WithRedisPrefix("memory-cas-test:")), "synthetic")
+	prefix := "memory-cas-test:" + rand.Text() + ":"
+	t.Cleanup(func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		keys, err := clients[0].Keys(cleanup, prefix+"*").Result()
+		if err != nil {
+			t.Errorf("list owned Redis keys: %v", err)
+			return
+		}
+		if len(keys) > 0 {
+			if err := clients[0].Del(cleanup, keys...).Err(); err != nil {
+				t.Errorf("delete owned Redis keys: %v", err)
+			}
+		}
+	})
+	a := scopedFixture(t, store.NewRedisStore(clients[0], store.WithRedisPrefix(prefix)), "synthetic")
+	b := scopedFixture(t, store.NewRedisStore(clients[1], store.WithRedisPrefix(prefix)), "synthetic")
 	record, err := a.Save(ctx, recordFixture(a.Scope(), "entry", "Original"), 0)
 	if err != nil {
 		t.Fatal(err)
