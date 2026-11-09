@@ -179,11 +179,12 @@ func (e *Engine) Retrieve(ctx context.Context, query string, opts ...RetrieveOpt
 		opt(cfg)
 	}
 
-	// 负数 TopK 是非法输入。底层 store.Search 对负数 k 执行
-	// make([]Document, k) 会 panic, 因此在 Engine 层做下限校验:
-	// 将负数 clamp 为 0 (语义同 TopK=0, 即返回空结果), 不向下游透传非法值。
-	if cfg.TopK < 0 {
-		cfg.TopK = 0
+	// 非正 TopK 表示无需结果，不派发 embedding 或向量查询。
+	if cfg.TopK <= 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return []Document{}, nil
 	}
 
 	// 生成查询向量
