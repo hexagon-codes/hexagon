@@ -126,7 +126,7 @@ func (p *JSONParser[T]) Parse(ctx context.Context, output string) (T, error) {
 
 	// 提取 JSON
 	jsonStr := output
-	if p.ExtractJSON {
+	if p.ExtractJSON && !json.Valid([]byte(output)) {
 		jsonStr = extractJSON(output)
 		if jsonStr == "" {
 			return result, fmt.Errorf("%w: no JSON found in output", ErrParseFailure)
