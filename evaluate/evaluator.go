@@ -81,6 +81,7 @@ type EvalResult struct {
 	Name string `json:"name"`
 
 	// Score 评分（0-1）
+	// Runner 将非有限或范围外评分记为评估错误，报告中的原始值保留在错误诊断中。
 	Score float64 `json:"score"`
 
 	// Passed 是否通过（可选）

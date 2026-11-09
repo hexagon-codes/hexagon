@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"math"
 	"sort"
 
 	"github.com/hexagon-codes/hexagon/agent"
@@ -90,7 +91,11 @@ func QualityBaseline(
 // QualityBaselineWithCriteria 在相同评估报告上检查均分、执行错误及显式关键维度。
 // 关键结果缺失/错误/Passed=false 为失败；Passed=nil 记录未判定且整体不能通过。
 // 规则判断不额外调用被测系统或模型，返回报告保留逐案例依据。
+// MinScore 为 NaN 时在执行 Agent 和评估器之前返回错误。
 func QualityBaselineWithCriteria(ctx context.Context, a Runnable, dataset *evaluate.Dataset, criteria BaselineCriteria, evaluators ...evaluate.Evaluator) (*BaselineResult, error) {
+	if math.IsNaN(criteria.MinScore) {
+		return nil, fmt.Errorf("agenteval: minimum score must not be NaN")
+	}
 	if len(evaluators) == 0 {
 		return nil, fmt.Errorf("agenteval: 至少需要一个评估器")
 	}

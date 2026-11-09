@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -329,6 +331,25 @@ func normalizeEvalResult(name string, result *EvalResult, err error) *EvalResult
 			failed.Passed = &passed
 		}
 		failed.SubScores = maps.Clone(result.SubScores)
+		// 非法评分是评估错误；原始值保留在诊断中，报告中的数值必须可序列化。
+		invalidScore := func(score float64) bool {
+			return math.IsNaN(score) || math.IsInf(score, 0) || score < 0 || score > 1
+		}
+		if invalidScore(failed.Score) {
+			err = errors.Join(err, fmt.Errorf("evaluate: invalid score %v: expected a finite value in [0,1]", failed.Score))
+			failed.Score = 0
+		}
+		names := make([]string, 0, len(failed.SubScores))
+		for name := range failed.SubScores {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if score := failed.SubScores[name]; invalidScore(score) {
+				err = errors.Join(err, fmt.Errorf("evaluate: invalid subscore %q=%v: expected a finite value in [0,1]", name, score))
+				failed.SubScores[name] = 0
+			}
+		}
 		details, copyErr := reflectx.DeepCopyChecked(result.Details)
 		failed.Details = details
 		if copyErr != nil {
