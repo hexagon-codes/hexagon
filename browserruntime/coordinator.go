@@ -131,6 +131,7 @@ type profileState struct {
 	strandedGeneration uint64
 	transition         chan struct{}
 	fileChooser        *fileChooserState
+	changed            chan struct{}
 }
 
 type fileChooserState struct {
@@ -174,10 +175,58 @@ func (c *Coordinator) Sessions() []SessionRef {
 }
 
 func newProfileState() *profileState {
-	state := &profileState{gate: make(chan struct{}, 1), transition: make(chan struct{}, 1), stopped: make(map[uint64]bool)}
+	state := &profileState{gate: make(chan struct{}, 1), transition: make(chan struct{}, 1), stopped: make(map[uint64]bool), changed: make(chan struct{})}
 	state.gate <- struct{}{}
 	state.transition <- struct{}{}
 	return state
+}
+
+// notifyChangedLocked 仅唤醒等待者重新读取原有状态，调用方持有 Coordinator.mu。
+func (p *profileState) notifyChangedLocked() {
+	close(p.changed)
+	p.changed = make(chan struct{})
+}
+
+// waitProfileGate 复用同一执行权；未知动作不会放行，也不能让后继请求永久等待。
+func (c *Coordinator) waitProfileGate(ctx context.Context, state *profileState, ref SessionRef, onWait func()) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c.mu.Lock()
+		if !state.live || state.ref.Generation != ref.Generation {
+			c.mu.Unlock()
+			return ErrStaleGeneration
+		}
+		uncertain := state.stranded && state.strandedGeneration == ref.Generation
+		if active := state.active; active != nil && active.ref.Generation == ref.Generation {
+			uncertain = uncertain || c.unknownTasks[bindingKey(active.task)]
+		}
+		changed := state.changed
+		stopped := state.stopped[ref.Generation]
+		c.mu.Unlock()
+		if uncertain && !stopped {
+			return ErrNotQuiescent
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-state.gate:
+			return nil
+		default:
+		}
+		if onWait != nil {
+			onWait()
+			onWait = nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-state.gate:
+			return nil
+		case <-changed:
+		}
+	}
 }
 
 // PrepareProfile 先登记受管配置，尚未连接时不把它暴露为可执行会话。
@@ -225,6 +274,7 @@ func (c *Coordinator) RegisterSession(ref SessionRef) error {
 		ref.Generation = state.ref.Generation + 1
 	}
 	state.ref, state.live, state.fileChooser = ref, true, nil
+	state.notifyChangedLocked()
 	return nil
 }
 
@@ -281,6 +331,7 @@ func (c *Coordinator) ConfirmSessionStopped(profile string, generation uint64) {
 			state.stranded = false
 			state.gate <- struct{}{}
 		}
+		state.notifyChangedLocked()
 	}
 	c.mu.Unlock()
 }
@@ -299,6 +350,7 @@ func (c *Coordinator) CloseSession(ctx context.Context, profile string, stop fun
 	}
 	ref, active := state.ref, state.active
 	state.live = false
+	state.notifyChangedLocked()
 	c.mu.Unlock()
 	if active != nil {
 		active.cancel()
@@ -325,6 +377,7 @@ func (c *Coordinator) CloseSession(ctx context.Context, profile string, stop fun
 func bindingKey(task TaskRef) string { return task.OwnerID + "\x00" + task.ID }
 
 // Inspect 以 Profile 执行权读取候选页面，不创建页面、选择活动页或建立任务绑定。
+// 其他任务的同代次动作仍未知时返回 ErrNotQuiescent，不排队掩盖未确认状态。
 func (c *Coordinator) Inspect(ctx context.Context, task TaskRef, target Target) (Observation, error) {
 	if task.ID == "" || task.OwnerID == "" {
 		return Observation{}, errors.New("trusted browser task and owner identities are required")
@@ -377,10 +430,8 @@ func (c *Coordinator) Inspect(ctx context.Context, task TaskRef, target Target) 
 		}
 		return observation, err
 	}
-	select {
-	case <-ctx.Done():
-		return Observation{}, ctx.Err()
-	case <-selected.gate:
+	if err := c.waitProfileGate(ctx, selected, ref, nil); err != nil {
+		return Observation{}, err
 	}
 	defer func() { selected.gate <- struct{}{} }()
 	c.mu.Lock()
@@ -413,6 +464,7 @@ func (c *Coordinator) Inspect(ctx context.Context, task TaskRef, target Target) 
 
 // Acquire 同一 Profile 串行排队；取消等待者不改变持有者或共享浏览器。
 // 已确认的文件选择模态保留在原会话中，仅相同归属与页面的后续调用可以接续。
+// 当前代次动作仍未知时返回 ErrNotQuiescent，不派发后续动作或永久排队。
 func (c *Coordinator) Acquire(ctx context.Context, task TaskRef, target Target) (*Lease, error) {
 	if c.driver == nil {
 		return nil, errors.New("browser driver is unavailable")
@@ -453,19 +505,12 @@ func (c *Coordinator) Acquire(ctx context.Context, task TaskRef, target Target) 
 		return nil, ErrStaleGeneration
 	}
 	c.mu.Unlock()
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-selected.gate:
-	default:
+	if err := c.waitProfileGate(ctx, selected, ref, func() {
 		if c.opts.Waiting != nil {
 			c.opts.Waiting(ctx, task, ref)
 		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-selected.gate:
-		}
+	}); err != nil {
+		return nil, err
 	}
 	release := func() { selected.gate <- struct{}{} }
 	if err := ctx.Err(); err != nil {
@@ -527,9 +572,10 @@ func (c *Coordinator) Acquire(ctx context.Context, task TaskRef, target Target) 
 		if errors.As(err, &unknown) {
 			c.mu.Lock()
 			stopped := selected.stopped[ref.Generation]
-			if !stopped {
+			if !stopped && selected.ref.Generation == ref.Generation {
 				selected.stranded = true
 				selected.strandedGeneration = ref.Generation
+				selected.notifyChangedLocked()
 			}
 			c.mu.Unlock()
 			if stopped {
@@ -950,6 +996,7 @@ func (l *Lease) markUnknown() {
 	l.mu.Unlock()
 	l.coordinator.mu.Lock()
 	l.coordinator.unknownTasks[bindingKey(l.task)] = true
+	l.state.notifyChangedLocked()
 	l.coordinator.mu.Unlock()
 }
 
@@ -990,6 +1037,7 @@ func (l *Lease) Reconcile(ctx context.Context, verify func(context.Context, Sess
 	l.mu.Unlock()
 	l.coordinator.mu.Lock()
 	delete(l.coordinator.unknownTasks, bindingKey(l.task))
+	l.state.notifyChangedLocked()
 	l.coordinator.mu.Unlock()
 	return nil
 }

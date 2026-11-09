@@ -104,7 +104,7 @@ func TestMCPDriverUnconfirmedCreationCleanupDoesNotAllocateAgain(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	defer cancel()
 	_, err = c.Acquire(ctx, TaskRef{ID: "second", OwnerID: "owner"}, Target{ProfileID: "p"})
-	if !errors.Is(err, context.DeadlineExceeded) {
+	if !errors.Is(err, ErrNotQuiescent) {
 		t.Fatalf("profile reused before reconciliation: %v", err)
 	}
 	if calls != before {
