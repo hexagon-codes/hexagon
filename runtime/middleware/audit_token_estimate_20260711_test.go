@@ -16,7 +16,7 @@ func TestAuditTokenEstimate_CJKAlignment(t *testing.T) {
 		name    string
 		content string
 	}{
-		{"CJK", strings.Repeat("你好世界", 50)},   // 原 len/4+4=154 vs CountGPT4=133
+		{"CJK", strings.Repeat("你好世界", 50)},        // 原 len/4+4=154 vs CountGPT4=133
 		{"EN", strings.Repeat("hello world ", 50)}, // 原 len/4+4=154 vs CountGPT4=125
 	}
 	for _, c := range cases {
