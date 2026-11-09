@@ -7,9 +7,9 @@ go 1.26.10
 
 require (
 	github.com/go-sql-driver/mysql v1.9.3
-	github.com/hexagon-codes/ai-core v0.2.14-0.20261109142754-c41d39893b36
+	github.com/hexagon-codes/ai-core v0.3.0
 	github.com/hexagon-codes/hexagon v0.5.16-0.20261109155346-9071517b8dac
-	github.com/hexagon-codes/toolkit v0.3.7
+	github.com/hexagon-codes/toolkit v0.3.8
 )
 
 require (

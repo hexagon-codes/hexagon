@@ -5,8 +5,8 @@ go 1.26.10
 retract [v0.5.10, v0.5.11]
 
 require (
-	github.com/hexagon-codes/ai-core v0.2.14-0.20261109142754-c41d39893b36
-	github.com/hexagon-codes/toolkit v0.3.7
+	github.com/hexagon-codes/ai-core v0.3.0
+	github.com/hexagon-codes/toolkit v0.3.8
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/redis/go-redis/v9 v9.18.0
 	golang.org/x/image v0.45.0
